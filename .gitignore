@@ -1,0 +1,14 @@
+# Generated release archives
+outputs/
+
+# Local test and scratch files
+work/
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs
+*.log
