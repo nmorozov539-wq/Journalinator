@@ -1,43 +1,46 @@
-# Investigation Board
+# Investigation Board — Collaborative Journal
 
-System-independent shared investigation canvas for Foundry Virtual Tabletop 14.367.
+An Obsidian-inspired shared notes journal and investigation canvas for Foundry Virtual Tabletop v14. This is the `fork/collaborative-notes-canvas` variant of Investigation Board.
 
-## Features
+## Included in this alpha
 
-- Multiple investigation boards in one world.
-- Infinite pan-and-zoom canvas with a dot grid.
-- Notes, clues, people, locations, and image cards.
-- Visual links between cards.
-- Real-time player collaboration through Foundry's module socket.
-- Persistent world storage, written by the active GM.
-- Search, resize, fit-to-content, JSON import/export, and Russian/English UI.
-
-## Installation for local testing
-
-1. Copy the `investigation-board` folder to `<Foundry user data>/Data/modules/`.
-2. The folder name must match the manifest id: `investigation-board`.
-3. Restart Foundry, enable **Investigation Board** in the world, and reload.
-4. Open it with the floating button at the lower-left, the scene control button, or `Ctrl+Shift+I`.
-
-If this source folder is named `Investigation board`, rename the copied folder to `investigation-board` before starting Foundry.
+- One shared journal and one infinite canvas.
+- Fullscreen three-region layout: note drawer, canvas, and note editor.
+- Notes may remain in the drawer or be placed once on the canvas.
+- Markdown-like blocks with stable IDs and GM-arbitrated edit locks.
+- Sticky note, document, and torn-paper styles from an extensible registry.
+- Optional card images, resizing, panning, zooming, and free text labels.
+- Curved SVG links created by dragging between cards.
+- Link labels, arrow direction, color, and solid/dashed styles.
+- Typed `[[wikilinks]]` and `[[Target|label]]` links resolved by stable note ID.
+- Backlinks, search, style/placement filters, and jump-to-note navigation.
+- Trash with restore for everyone and permanent emptying for GMs only.
+- Per-note contribution totals and journal-wide activity statistics.
+- Automatic migration of cards from the first board of version 0.2.0.
+- Russian and English localization.
 
 ## Collaboration model
 
-All connected clients receive changes immediately. The first active GM acts as the persistence authority and stores the current board data in a hidden world setting. Players can edit by default; a GM can disable this in **Configure Settings → Module Settings**.
+The first active GM is the authority for edits and world persistence. Block lock requests are granted in arrival order. Players can read without a GM, but editing becomes read-only until a GM connects. Locks expire after the configured timeout.
 
-Card images are stored as URLs, not embedded files. This keeps world data small and makes exports portable when the URLs remain available.
+Updates are sent when an operation finishes; card dragging and cursor movement are not streamed continuously.
+
+## Installation
+
+Copy the `investigation-board` directory to `<Foundry user data>/Data/modules/`, restart Foundry, and activate the module in the world. Open it from the Scene Controls button or with `Ctrl+Shift+I`.
 
 ## Controls
 
 - Mouse wheel: zoom toward the pointer.
-- Drag empty space or right-drag anywhere: pan.
-- Double-click empty space: create a note.
-- Drag a card by its header: move it. Double-click a card to edit it.
+- Right-drag anywhere on the canvas: pan.
+- Drag a card header: move it.
 - Drag the lower-right corner: resize it.
-- Link tool: select two cards to connect them.
-- `Delete`: delete the selected card.
-- `Escape`: return to select mode or close the editor.
+- Drag the round handle on a card to another card: create a link.
+- Click a link: configure label, direction, color, and line style.
 
-## Data safety
+## Branches
 
-Use **Export** periodically to download a JSON backup. Only GMs can import a backup or create, rename, and delete whole boards.
+- `main`: compact floating-window investigation board, version 0.2.0.
+- `fork/collaborative-notes-canvas`: this shared-journal architecture.
+
+The alpha keeps future GM visibility fields in the data model, but hidden-content storage is not enabled yet. A later GM-tier implementation must use storage that is never delivered to player clients.

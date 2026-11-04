@@ -1,8 +1,8 @@
 {
   "id": "investigation-board",
-  "title": "Investigation Board",
-  "description": "A shared infinite investigation canvas with notes, evidence, people, locations, images, and connections.",
-  "version": "0.2.0",
+  "title": "Investigation Board — Collaborative Journal",
+  "description": "An Obsidian-inspired shared notes journal with an infinite investigation canvas, block locks, curved links, trash, and contribution statistics.",
+  "version": "0.3.0-alpha.1",
   "authors": [
     {
       "name": "Investigation Board contributors"

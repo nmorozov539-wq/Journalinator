@@ -1,0 +1,44 @@
+<div class="ib-journal-shell">
+  <header class="ib-journal-header">
+    <div class="ib-journal-brand"><i class="fa-solid fa-diagram-project"></i><strong>{{localize "IB.Title"}}</strong><span>{{localize "IB.SharedJournal"}}</span></div>
+    <div class="ib-journal-status" data-status="ready"><i class="fa-solid fa-cloud"></i><span>{{localize "IB.Saved"}}</span></div>
+    <button type="button" data-action="toggle-focus" title="{{localize "IB.FocusMode"}}"><i class="fa-solid fa-expand"></i></button>
+    <button type="button" data-action="close" title="{{localize "IB.Close"}}"><i class="fa-solid fa-xmark"></i></button>
+  </header>
+  <div class="ib-journal-layout">
+    <aside class="ib-drawer">
+      <nav class="ib-drawer-tabs">
+        <button type="button" class="is-active" data-drawer-mode="notes"><i class="fa-solid fa-note-sticky"></i><span>{{localize "IB.Notes"}}</span></button>
+        <button type="button" data-drawer-mode="trash"><i class="fa-solid fa-trash-can"></i><span>{{localize "IB.Trash"}}</span></button>
+        <button type="button" data-drawer-mode="stats"><i class="fa-solid fa-chart-simple"></i><span>{{localize "IB.Stats"}}</span></button>
+      </nav>
+      <div class="ib-drawer-filters">
+        <label class="ib-search"><i class="fa-solid fa-magnifying-glass"></i><input type="search" data-filter="search" placeholder="{{localize "IB.Search"}}"></label>
+        <div class="ib-filter-row">
+          <select data-filter="style" aria-label="{{localize "IB.FilterStyle"}}"><option value="">{{localize "IB.AllStyles"}}</option></select>
+          <select data-filter="placement" aria-label="{{localize "IB.FilterPlacement"}}"><option value="">{{localize "IB.AllNotes"}}</option><option value="placed">{{localize "IB.Placed"}}</option><option value="unplaced">{{localize "IB.Unplaced"}}</option></select>
+        </div>
+      </div>
+      <div class="ib-drawer-content"></div>
+      <footer class="ib-drawer-footer"><button type="button" data-action="new-note"><i class="fa-solid fa-plus"></i>{{localize "IB.NewNote"}}</button></footer>
+    </aside>
+    <main class="ib-canvas-region">
+      <div class="ib-canvas-toolbar">
+        <button type="button" class="is-active" data-tool="select" title="{{localize "IB.Select"}}"><i class="fa-solid fa-arrow-pointer"></i></button><span></span>
+        <button type="button" data-tool="sticky" title="{{localize "IB.StyleSticky"}}"><i class="fa-solid fa-note-sticky"></i></button>
+        <button type="button" data-tool="document" title="{{localize "IB.StyleDocument"}}"><i class="fa-solid fa-file-lines"></i></button>
+        <button type="button" data-tool="torn" title="{{localize "IB.StyleTorn"}}"><i class="fa-solid fa-scroll"></i></button>
+        <button type="button" data-tool="label" title="{{localize "IB.FreeLabel"}}"><i class="fa-solid fa-font"></i></button><span></span>
+        <button type="button" data-action="fit" title="{{localize "IB.Fit"}}"><i class="fa-solid fa-maximize"></i></button>
+        <button type="button" data-action="zoom-in" title="{{localize "IB.ZoomIn"}}"><i class="fa-solid fa-plus"></i></button>
+        <button type="button" data-action="zoom-out" title="{{localize "IB.ZoomOut"}}"><i class="fa-solid fa-minus"></i></button>
+      </div>
+      <div class="ib-canvas-viewport">
+        <div class="ib-canvas-world"><svg class="ib-canvas-links" viewBox="-50000 -50000 100000 100000" preserveAspectRatio="none" aria-hidden="true"></svg><div class="ib-canvas-labels"></div><div class="ib-canvas-cards"></div></div>
+        <div class="ib-canvas-empty">{{localize "IB.CanvasEmpty"}}</div><div class="ib-canvas-help">{{localize "IB.CanvasHelp"}}</div><div class="ib-canvas-zoom">100%</div>
+      </div>
+    </main>
+    <aside class="ib-note-editor"><div class="ib-note-editor-content"></div></aside>
+  </div>
+  <div class="ib-link-popover"></div><div class="ib-journal-modal"></div>
+</div>
