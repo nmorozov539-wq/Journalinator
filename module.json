@@ -1,0 +1,21 @@
+{
+  "id": "fvtt-journalinator",
+  "title": "Journalinator",
+  "description": "A shared, Obsidian-style corkboard journal for narrative campaigns.",
+  "version": "0.1.0",
+  "compatibility": {
+    "minimum": "14",
+    "verified": "14"
+  },
+  "authors": [],
+  "esmodules": ["scripts/init.mjs"],
+  "styles": ["styles/journal.css"],
+  "socket": true,
+  "documentTypes": {
+    "JournalEntryPage": {
+      "note": {},
+      "layout": {},
+      "stats": {}
+    }
+  }
+}
