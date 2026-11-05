@@ -13,6 +13,21 @@ const CHANNEL = `module.${MODULE_ID}`;
 const CONTRIBUTION_CAP = 2000;
 
 /**
+ * All GM-side write handling is serialized through this promise chain. Socket handlers are
+ * async, so without it two messages can both read `page.system.blocks`/`links` before either
+ * update lands, and the second whole-array write clobbers the first player's change. This is
+ * what makes the spec's "the GM serializes writes" assumption true.
+ */
+let writeQueue = Promise.resolve();
+
+function enqueueWrite(message, senderUserId) {
+  writeQueue = writeQueue
+    .then(() => handleMessage(message, senderUserId))
+    .catch(err => console.error("Journalinator: write failed", err));
+  return writeQueue;
+}
+
+/**
  * The server appends the sender's verified user id as the socket relay's own trailing argument
  * (see dist/server/sockets.mjs handleCustomSocket), so `senderUserId` below is never something
  * a client could spoof — this is what makes lock/write arbitration (spec §6.6) trustworthy.
@@ -34,7 +49,7 @@ export function registerSocket() {
     }
     if (!game.user.isGM) return;
     if (game.users.activeGM?.id !== game.user.id) return;
-    handleMessage(message, senderUserId);
+    enqueueWrite(message, senderUserId);
   });
 }
 
@@ -91,7 +106,7 @@ async function reconcileAndSave(shared, page, blocks, senderUserId, extraSystemU
     senderUserId,
     findNoteByTitle: {
       byId: id => shared.pages.get(id),
-      byTitle: title => shared.pages.find(p => p.type === `${MODULE_ID}.note` && p.name.toLowerCase() === title.toLowerCase())
+      byTitle: title => shared.pages.find(p => p.type === `${MODULE_ID}.note` && !p.system.deleted && p.name.toLowerCase() === title.toLowerCase())
     },
     createNoteNear: async title => {
       const existingCards = layout?.system.cards ?? {};
@@ -386,7 +401,7 @@ async function handleMessage(message, senderUserId) {
 /** Sends a write request to the active GM. If we are the active GM, applies it directly. */
 export function requestWrite(message) {
   if (game.users.activeGM?.id === game.user.id) {
-    return handleMessage(message, game.user.id);
+    return enqueueWrite(message, game.user.id);
   }
   game.socket.emit(CHANNEL, message);
 }

@@ -223,7 +223,9 @@ export default class JournalCanvas {
     `;
 
     const update = fields => this.callbacks.onUpdateLink(link.sourceId, link.id, fields);
-    this.linkToolbar.querySelector(".jn-link-label-input").oninput = ev => update({ label: ev.target.value });
+    // Commit on change (blur), not per keystroke: one socket message and one world write
+    // per label edit, matching the block-save rule in spec §6.2.
+    this.linkToolbar.querySelector(".jn-link-label-input").onchange = ev => update({ label: ev.target.value });
     this.linkToolbar.querySelector(".jn-link-dir").onclick = () =>
       update({ direction: { none: "one", one: "two", two: "none" }[link.direction] });
     this.linkToolbar.querySelectorAll(".jn-link-color").forEach(btn => {
