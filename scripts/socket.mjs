@@ -1,24 +1,35 @@
 import { getContainerIds } from "./store/containers.mjs";
 import { CARD_STYLES, seedTilt } from "./styles/registry.mjs";
 import { reconcileTypedLinks } from "./wikilinks.mjs";
+import {
+  authoritativeRequestLock, authoritativeReleaseLock, authoritativeHeartbeat,
+  authoritativeHolds, authoritativeSnapshot, receiveLockBroadcast
+} from "./locks.mjs";
 
 const MODULE_ID = "fvtt-journalinator";
 const CHANNEL = `module.${MODULE_ID}`;
+const CONTRIBUTION_CAP = 2000;
 
 /**
- * Phase 1 write path: no lock/arbitration queue yet (that's spec §6.6, Phase 4) — just a
- * direct "ask the active GM to do it" relay, enough to prove the socket channel and the
- * create/save flows work end to end. The server appends the sender's verified user id as
- * the socket relay's own trailing argument (see dist/server/sockets.mjs handleCustomSocket),
- * so `senderUserId` below is never something a client could spoof.
+ * The server appends the sender's verified user id as the socket relay's own trailing argument
+ * (see dist/server/sockets.mjs handleCustomSocket), so `senderUserId` below is never something
+ * a client could spoof — this is what makes lock/write arbitration (spec §6.6) trustworthy.
+ *
+ * Lock broadcasts (`lockUpdate`/`lockState`) are applied by *every* client, GM or not — they're
+ * just informational mirrors of the GM's ephemeral lock state (spec §6.6). Everything else is
+ * a write request only the active GM's client acts on.
  *
  * Card drags/resizes are NOT streamed (spec §8.1) — the client only calls requestWrite once,
- * on drop/release, with the final position. There's also no "held by" pick-up marker yet
- * (that's part of the lock system in Phase 4), so two people dragging the same card at once
- * can still race; acceptable for now, revisit alongside block locking.
+ * on drop/release, with the final position. There's also no "held by" pick-up marker on cards
+ * (unlike blocks, which do have one now) — two people dragging the same card at once can still
+ * race; acceptable for now.
  */
 export function registerSocket() {
   game.socket.on(CHANNEL, (message, senderUserId) => {
+    if (message.type === "lockUpdate" || message.type === "lockState") {
+      receiveLockBroadcast(message);
+      return;
+    }
     if (!game.user.isGM) return;
     if (game.users.activeGM?.id !== game.user.id) return;
     handleMessage(message, senderUserId);
@@ -53,7 +64,7 @@ async function createNotePage(shared, { title, style, x, y, authorId }) {
     type: `${MODULE_ID}.note`,
     system: {
       style,
-      blocks: [{ blockId: foundry.utils.randomID(), text: "New note. Click here and start writing." }],
+      blocks: [{ blockId: foundry.utils.randomID(), text: "New note. Click here and start writing.", authorId }],
       authorId,
       createdAt: Date.now(),
       updatedAt: Date.now()
@@ -69,6 +80,40 @@ async function createNotePage(shared, { title, style, x, y, authorId }) {
   return page;
 }
 
+/** Re-runs typed-wikilink resolution against `blocks` and saves both blocks and links together. */
+async function reconcileAndSave(shared, page, blocks, senderUserId, extraSystemUpdates = {}) {
+  const layout = layoutPage(shared);
+  const sourceCard = layout?.system.cards[page.id] ?? { x: 0, y: 0 };
+  const links = await reconcileTypedLinks(page, blocks, {
+    senderUserId,
+    findNoteByTitle: {
+      byId: id => shared.pages.get(id),
+      byTitle: title => shared.pages.find(p => p.type === `${MODULE_ID}.note` && p.name.toLowerCase() === title.toLowerCase())
+    },
+    createNoteNear: async title => {
+      const existingCards = layout?.system.cards ?? {};
+      const { x, y } = findFreeSpot(existingCards, 190, 90, sourceCard.x + 220, sourceCard.y);
+      return createNotePage(shared, { title, style: "sticky", x, y, authorId: senderUserId });
+    }
+  });
+
+  await page.update({
+    "system.blocks": blocks,
+    "system.links": links,
+    "system.updatedAt": Date.now(),
+    ...extraSystemUpdates
+  });
+}
+
+/** Credits added characters (capped per save, spec §12) to whoever just saved. */
+function creditContribution(page, senderUserId, oldText, newText) {
+  const added = Math.max(0, newText.length - oldText.length);
+  const credited = Math.min(CONTRIBUTION_CAP, added);
+  const contributions = { ...(page.system.contributions ?? {}) };
+  contributions[senderUserId] = (contributions[senderUserId] ?? 0) + credited;
+  return contributions;
+}
+
 async function handleMessage(message, senderUserId) {
   const ids = getContainerIds();
   if (!ids) return;
@@ -81,31 +126,68 @@ async function handleMessage(message, senderUserId) {
       return;
     }
 
-    case "saveNote": {
+    case "saveBlock": {
       const page = shared.pages.get(message.noteId);
       if (!page) return;
+      if (!authoritativeHolds(message.noteId, message.blockId, senderUserId)) return; // doesn't hold the lock — ignore
+      const blocks = page.system.blocks ?? [];
+      const index = blocks.findIndex(b => b.blockId === message.blockId);
+      if (index === -1) return;
 
-      const layout = layoutPage(shared);
-      const sourceCard = layout?.system.cards[message.noteId] ?? { x: 0, y: 0 };
-      const links = await reconcileTypedLinks(page, message.blocks, {
-        senderUserId,
-        findNoteByTitle: {
-          byId: id => shared.pages.get(id),
-          byTitle: title => shared.pages.find(p => p.type === `${MODULE_ID}.note` && p.name.toLowerCase() === title.toLowerCase())
-        },
-        createNoteNear: async title => {
-          const existingCards = layout?.system.cards ?? {};
-          const { x, y } = findFreeSpot(existingCards, 190, 90, sourceCard.x + 220, sourceCard.y);
-          return createNotePage(shared, { title, style: "sticky", x, y, authorId: senderUserId });
-        }
-      });
+      const oldText = blocks[index].text;
+      const nextBlocks = blocks.map((b, i) => i === index ? { ...b, text: message.text, authorId: senderUserId } : b);
+      const contributions = creditContribution(page, senderUserId, oldText, message.text);
 
-      await page.update({
-        "system.blocks": message.blocks,
-        "system.links": links,
-        "system.updatedAt": Date.now(),
+      await reconcileAndSave(shared, page, nextBlocks, senderUserId, {
+        "system.contributions": contributions,
         "system.editCount": (page.system.editCount ?? 0) + 1
       });
+      return;
+    }
+
+    case "splitBlock": {
+      const page = shared.pages.get(message.noteId);
+      if (!page) return;
+      if (!authoritativeHolds(message.noteId, message.blockId, senderUserId)) return;
+      const blocks = page.system.blocks ?? [];
+      const index = blocks.findIndex(b => b.blockId === message.blockId);
+      if (index === -1) return;
+
+      const nextBlocks = [...blocks];
+      nextBlocks.splice(index, 1,
+        { ...blocks[index], text: message.beforeText, authorId: senderUserId },
+        { blockId: foundry.utils.randomID(), text: message.afterText, authorId: senderUserId }
+      );
+      await reconcileAndSave(shared, page, nextBlocks, senderUserId, {
+        "system.editCount": (page.system.editCount ?? 0) + 1
+      });
+      return;
+    }
+
+    case "mergeBlockUp": {
+      const page = shared.pages.get(message.noteId);
+      if (!page) return;
+      const blocks = page.system.blocks ?? [];
+      const index = blocks.findIndex(b => b.blockId === message.blockId);
+      if (index <= 0) return; // no previous block to merge into
+      const prevBlock = blocks[index - 1];
+      if (!authoritativeHolds(message.noteId, message.blockId, senderUserId)) return;
+      if (!authoritativeHolds(message.noteId, prevBlock.blockId, senderUserId)) return; // needs both locks (spec §6.4)
+
+      const nextBlocks = blocks.filter((_, i) => i !== index);
+      nextBlocks[index - 1] = { ...prevBlock, text: prevBlock.text + blocks[index].text, authorId: senderUserId };
+      await reconcileAndSave(shared, page, nextBlocks, senderUserId, {
+        "system.editCount": (page.system.editCount ?? 0) + 1
+      });
+      return;
+    }
+
+    case "requestLock": authoritativeRequestLock(message.noteId, message.blockId, senderUserId); return;
+    case "releaseLock": authoritativeReleaseLock(message.noteId, message.blockId, senderUserId); return;
+    case "heartbeat": authoritativeHeartbeat(message.noteId, message.blockId, senderUserId); return;
+    case "requestLockState": {
+      const snapshot = authoritativeSnapshot();
+      game.socket.emit(CHANNEL, { type: "lockState", locks: snapshot });
       return;
     }
 

@@ -151,6 +151,20 @@
   font: 600 10px/16px system-ui;
   text-align: center;
 }
+.jn-card-lock-pill {
+  display: none;
+  position: absolute;
+  top: 6px; left: 6px;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 9px;
+  background: var(--jn-acc);
+  color: #17171a;
+}
+.jn-card.jn-being-edited .jn-card-lock-pill {
+  display: block;
+}
+
 .jn-card-title {
   margin: 0;
   font-size: 14px;
@@ -264,9 +278,29 @@
   overflow: auto;
 }
 
-.journalinator-editor h2 {
-  margin: 0;
+.journalinator-eh {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.journalinator-eh b {
+  flex: 1;
   font-size: 15px;
+}
+.jn-dot {
+  flex: none;
+  width: 9px; height: 9px;
+  border-radius: 50%;
+}
+
+.journalinator-authors-toggle {
+  background: var(--jn-bg);
+  color: var(--jn-text);
+  border: 1px solid var(--jn-line);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
 }
 
 .journalinator-meta {
@@ -275,34 +309,67 @@
   margin: 6px 0;
 }
 
-.journalinator-textarea {
-  width: 100%;
-  min-height: 300px;
-  box-sizing: border-box;
-  background: var(--jn-bg);
-  color: var(--jn-text);
-  border: 1px solid var(--jn-line);
-  border-radius: 6px;
-  font: 12.5px/1.5 ui-monospace, monospace;
-  padding: 8px;
-}
-
-.journalinator-save {
-  margin-top: 8px;
-  background: var(--jn-bg);
-  color: var(--jn-text);
-  border: 1px solid var(--jn-line);
-  border-radius: 6px;
-  padding: 5px 9px;
-  cursor: pointer;
-}
-.journalinator-save:hover {
-  border-color: var(--jn-acc);
-}
-
 .journalinator-empty {
   color: var(--jn-muted);
   font-size: 12.5px;
+}
+
+.journalinator-offline-banner {
+  padding: 6px 12px;
+  background: #4a2a2a;
+  color: #e8b9b9;
+  font-size: 12.5px;
+  text-align: center;
+}
+
+/* --- Per-block editor --- */
+
+.jn-doc {
+  margin-top: 10px;
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+.jn-block, p.jn-block {
+  position: relative;
+  margin: 0 0 0.7em -10px;
+  padding: 0 0 0 7px;
+  border-left: 3px solid transparent;
+  border-radius: 0 6px 6px 0;
+  white-space: pre-wrap;
+}
+.jn-show-authors .jn-block {
+  border-left-color: var(--jn-au);
+}
+.jn-block.jn-locked {
+  margin-right: -10px;
+  padding: 6px 10px 6px 7px;
+  background: color-mix(in srgb, var(--jn-lc) 13%, transparent);
+  border-left-color: var(--jn-lc);
+}
+.jn-block.jn-pending {
+  opacity: 0.6;
+}
+.jn-tag {
+  position: absolute;
+  right: 6px; top: -8px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 9px;
+  background: var(--jn-lc, var(--jn-acc));
+  color: #17171a;
+}
+.jn-block-input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 64px;
+  resize: vertical;
+  font: 12.5px/1.5 ui-monospace, monospace;
+  background: transparent;
+  color: var(--jn-text);
+  border: 0;
+  outline: 0;
+  padding: 0;
 }
 
 .journalinator-chips {

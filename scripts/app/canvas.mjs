@@ -1,4 +1,5 @@
 import { CARD_STYLES } from "../styles/registry.mjs";
+import { hasAnyLock } from "../locks.mjs";
 
 const DRAG_THRESHOLD = 5;
 const LINK_COLORS = ["", "#a393f2", "#d6a45c", "#d77b91"];
@@ -84,6 +85,7 @@ export default class JournalCanvas {
         <div class="jn-card-image" hidden></div>
         <h3 class="jn-card-title"></h3>
         <p class="jn-card-excerpt"></p>
+        <span class="jn-card-lock-pill">&#9998;</span>
         <b class="jn-card-link" title="Drag to another card to link"></b>
         <b class="jn-card-resize"></b>
       `;
@@ -93,6 +95,7 @@ export default class JournalCanvas {
 
     el.className = `jn-card ${styleDef.cssClass}`;
     el.classList.toggle("selected", note._id === this.selectedNoteId);
+    el.classList.toggle("jn-being-edited", hasAnyLock(note._id));
     el.style.left = `${cardData.x}px`;
     el.style.top = `${cardData.y}px`;
     el.style.setProperty("--jn-rotation", `${cardData.rotation ?? 0}deg`);

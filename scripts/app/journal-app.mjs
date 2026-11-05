@@ -1,7 +1,7 @@
 import { notesStore } from "../store/notes-store.mjs";
 import { requestWrite } from "../socket.mjs";
 import JournalCanvas from "./canvas.mjs";
-import { CARD_STYLES } from "../styles/registry.mjs";
+import NoteEditor from "./editor.mjs";
 
 const { ApplicationV2 } = foundry.applications.api;
 
@@ -10,8 +10,10 @@ const { ApplicationV2 } = foundry.applications.api;
  * center, and an editor panel on the right. Raw DOM render — no Handlebars — since ApplicationV2
  * supports that directly by implementing _renderHTML/_replaceHTML ourselves.
  *
- * The canvas itself (JournalCanvas) is created once and kept alive across re-renders so a
- * document-sync hook firing elsewhere never resets this client's pan/zoom.
+ * Both the canvas (JournalCanvas) and the editor (NoteEditor) are created once and kept alive
+ * across this app's re-renders — a document-sync hook firing elsewhere never resets the
+ * canvas's pan/zoom or blows away an in-progress block edit (beyond the content-preserving
+ * rebuild NoteEditor already does for that case).
  */
 export default class JournalApp extends ApplicationV2 {
   static DEFAULT_OPTIONS = {
@@ -27,6 +29,9 @@ export default class JournalApp extends ApplicationV2 {
   #selectedNoteId = null;
   #query = "";
   #hookIds = [];
+  #editor = new NoteEditor({
+    onFocusNote: id => this.#canvas.focusNote(id)
+  });
   #canvas = new JournalCanvas({
     onSelectNote: id => { this.#selectedNoteId = id; this.render(); },
     onCreateNoteAt: (x, y) => requestWrite({ type: "createNote", title: "Untitled", x, y }),
@@ -56,6 +61,7 @@ export default class JournalApp extends ApplicationV2 {
     ]) {
       this.#hookIds.push([hook, Hooks.on(hook, rerender)]);
     }
+    this.#hookIds.push(["journalinatorLocksChanged", Hooks.on("journalinatorLocksChanged", rerender)]);
   }
 
   _onClose() {
@@ -73,7 +79,7 @@ export default class JournalApp extends ApplicationV2 {
       allNotes: notes,
       notes: filtered,
       layout: notesStore.getLayout(),
-      selected: this.#selectedNoteId ? notesStore.getNote(this.#selectedNoteId) : null
+      gmOnline: !!game.users.activeGM
     };
   }
 
@@ -87,6 +93,7 @@ export default class JournalApp extends ApplicationV2 {
         <button type="button" class="journalinator-new">+ New Note</button>
         <button type="button" class="journalinator-add-label">+ Label</button>
       </header>
+      ${!context.gmOnline ? `<div class="journalinator-offline-banner">Read-only — the GM is offline</div>` : ""}
       <div class="journalinator-body">
         <div class="journalinator-canvas-slot"></div>
         <aside class="journalinator-editor"></aside>
@@ -97,36 +104,9 @@ export default class JournalApp extends ApplicationV2 {
     this.#canvas.selectedNoteId = this.#selectedNoteId;
     this.#canvas.update(context.allNotes, context.layout);
 
-    const editor = root.querySelector(".journalinator-editor");
-    if (context.selected) {
-      const note = context.selected;
-      const author = game.users.get(note.system.authorId)?.name ?? "unknown";
-      const styleOptions = Object.entries(CARD_STYLES)
-        .map(([key, def]) => `<option value="${key}" ${note.system.style === key ? "selected" : ""}>${def.label}</option>`)
-        .join("");
-      const backlinks = context.allNotes
-        .filter(n => (n.system.links ?? []).some(l => l.targetId === note._id))
-        .map(n => `<button type="button" class="journalinator-chip" data-id="${n._id}">${foundry.utils.escapeHTML(n.name)}</button>`)
-        .join("") || `<small class="journalinator-meta">None yet</small>`;
-      editor.innerHTML = `
-        <h2>${foundry.utils.escapeHTML(note.name)}</h2>
-        <p class="journalinator-meta">by ${foundry.utils.escapeHTML(author)}</p>
-        <div class="journalinator-meta">Linked from</div>
-        <div class="journalinator-chips">${backlinks}</div>
-        <div class="journalinator-row">
-          <label>Style <select class="journalinator-style">${styleOptions}</select></label>
-        </div>
-        <div class="journalinator-row">
-          <button type="button" class="journalinator-set-image">${note.system.image ? "Change Image" : "Set Image"}</button>
-          ${note.system.image ? `<button type="button" class="journalinator-clear-image">Remove Image</button>` : ""}
-          <button type="button" class="journalinator-new-linked">+ New Linked Note</button>
-        </div>
-        <textarea class="journalinator-textarea">${foundry.utils.escapeHTML(note.system.blocks.map(b => b.text).join("\n\n"))}</textarea>
-        <button type="button" class="journalinator-save">Save</button>
-      `;
-    } else {
-      editor.innerHTML = `<p class="journalinator-empty">Select a note to open it.</p>`;
-    }
+    this.#editor.open(this.#selectedNoteId);
+    root.querySelector(".journalinator-editor").appendChild(this.#editor.root);
+    this.#editor.render();
 
     return root;
   }
@@ -135,7 +115,7 @@ export default class JournalApp extends ApplicationV2 {
     content.replaceChildren(result);
   }
 
-  _onRender(context) {
+  _onRender() {
     const root = this.element;
 
     root.querySelector(".journalinator-search")?.addEventListener("input", ev => {
@@ -151,44 +131,6 @@ export default class JournalApp extends ApplicationV2 {
 
     root.querySelector(".journalinator-add-label")?.addEventListener("click", () => {
       this.#canvas.addLabelButton();
-    });
-
-    root.querySelector(".journalinator-style")?.addEventListener("change", ev => {
-      requestWrite({ type: "setNoteStyle", noteId: this.#selectedNoteId, style: ev.target.value });
-    });
-
-    root.querySelector(".journalinator-set-image")?.addEventListener("click", () => {
-      const note = notesStore.getNote(this.#selectedNoteId);
-      new foundry.applications.apps.FilePicker({
-        type: "image",
-        current: note?.system.image ?? "",
-        callback: path => requestWrite({ type: "setNoteImage", noteId: this.#selectedNoteId, image: path })
-      }).render(true);
-    });
-
-    root.querySelector(".journalinator-clear-image")?.addEventListener("click", () => {
-      requestWrite({ type: "setNoteImage", noteId: this.#selectedNoteId, image: null });
-    });
-
-    root.querySelector(".journalinator-new-linked")?.addEventListener("click", async () => {
-      const title = await this.#promptText("New Linked Note", "");
-      if (!title) return;
-      requestWrite({ type: "newLinkedNote", sourceId: this.#selectedNoteId, title });
-    });
-
-    root.querySelectorAll(".journalinator-chip").forEach(el => {
-      el.addEventListener("click", () => this.#canvas.focusNote(el.dataset.id));
-    });
-
-    root.querySelector(".journalinator-save")?.addEventListener("click", () => {
-      const textarea = root.querySelector(".journalinator-textarea");
-      const note = notesStore.getNote(this.#selectedNoteId);
-      if (!note) return;
-      const blocks = textarea.value.split("\n\n").map((text, i) => ({
-        blockId: note.system.blocks[i]?.blockId ?? foundry.utils.randomID(),
-        text
-      }));
-      requestWrite({ type: "saveNote", noteId: this.#selectedNoteId, blocks });
     });
   }
 

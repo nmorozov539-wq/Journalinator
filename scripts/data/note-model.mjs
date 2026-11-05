@@ -7,7 +7,8 @@ export default class NoteModel extends foundry.abstract.TypeDataModel {
       image: new fields.FilePathField({ categories: ["IMAGE"], required: false, nullable: true, initial: null }),
       blocks: new fields.ArrayField(new fields.SchemaField({
         blockId: new fields.StringField({ required: true }),
-        text: new fields.StringField({ required: true, blank: true, initial: "" })
+        text: new fields.StringField({ required: true, blank: true, initial: "" }),
+        authorId: new fields.StringField({ required: false, blank: true, initial: "" })
       })),
       links: new fields.ArrayField(new fields.SchemaField({
         id: new fields.StringField({ required: true }),
