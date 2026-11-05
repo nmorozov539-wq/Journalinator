@@ -10,6 +10,7 @@ export default class NoteModel extends foundry.abstract.TypeDataModel {
         text: new fields.StringField({ required: true, blank: true, initial: "" })
       })),
       links: new fields.ArrayField(new fields.SchemaField({
+        id: new fields.StringField({ required: true }),
         targetId: new fields.DocumentIdField(),
         label: new fields.StringField({ required: false, blank: true, initial: "" }),
         direction: new fields.StringField({ required: true, choices: ["none", "one", "two"], initial: "none" }),

@@ -304,3 +304,107 @@
   color: var(--jn-muted);
   font-size: 12.5px;
 }
+
+.journalinator-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 4px;
+}
+.journalinator-chip {
+  font-size: 12px;
+  padding: 3px 9px;
+  border-radius: 12px;
+  background: var(--jn-bg);
+  color: var(--jn-text);
+  border: 1px solid var(--jn-line);
+  cursor: pointer;
+}
+.journalinator-chip:hover {
+  border-color: var(--jn-acc);
+}
+
+/* --- Links --- */
+
+.jn-card-link {
+  display: none;
+  position: absolute;
+  left: 7px; bottom: 9px;
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  background: var(--jn-acc);
+  cursor: crosshair;
+}
+.jn-card.selected .jn-card-link {
+  display: block;
+}
+
+.jn-link-hit {
+  stroke: transparent;
+  stroke-width: 18;
+  fill: none;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+.jn-link-label {
+  font-size: 11px;
+  fill: var(--jn-muted);
+  stroke: var(--jn-bg);
+  stroke-width: 4px;
+  paint-order: stroke;
+  text-anchor: middle;
+  pointer-events: none;
+}
+.jn-link-preview {
+  stroke: var(--jn-acc);
+  stroke-width: 2;
+  stroke-dasharray: 6 5;
+  pointer-events: none;
+}
+
+.jn-link-toolbar {
+  position: absolute;
+  display: none;
+  gap: 5px;
+  align-items: center;
+  padding: 5px;
+  z-index: 6;
+  background: var(--jn-panel);
+  border: 1px solid var(--jn-line);
+  border-radius: 10px;
+  box-shadow: 0 8px 20px #0007;
+  transform: translate(-50%, -135%);
+}
+.jn-link-toolbar input {
+  width: 100px;
+  background: var(--jn-bg);
+  color: var(--jn-text);
+  border: 1px solid var(--jn-line);
+  border-radius: 6px;
+  padding: 4px 6px;
+}
+.jn-link-toolbar button {
+  background: var(--jn-bg);
+  color: var(--jn-text);
+  border: 1px solid var(--jn-line);
+  border-radius: 6px;
+  padding: 4px 7px;
+  cursor: pointer;
+  min-width: 28px;
+}
+.jn-link-toolbar button:hover {
+  border-color: var(--jn-acc);
+}
+.jn-link-colors {
+  display: flex;
+  gap: 4px;
+}
+.jn-link-color {
+  width: 18px; height: 18px;
+  padding: 0;
+  min-width: 18px;
+  border-radius: 50%;
+}
+.jn-link-color.on {
+  border: 2px solid var(--jn-text);
+}
