@@ -55,6 +55,18 @@ export default class NoteEditor {
       return;
     }
 
+    if (note.system.deleted) {
+      this.root.innerHTML = `
+        <div class="journalinator-eh"><b>${foundry.utils.escapeHTML(note.name)}</b></div>
+        <p class="journalinator-meta">This note is in the trash.</p>
+        <button type="button" class="journalinator-restore">Restore</button>
+      `;
+      this.root.querySelector(".journalinator-restore").addEventListener("click", () => {
+        requestWrite({ type: "restoreNote", noteId: this.noteId });
+      });
+      return;
+    }
+
     const allNotes = notesStore.getAllNotes();
     const authorColor = game.users.get(note.system.authorId)?.color ?? "#8d8d97";
     const authorName = game.users.get(note.system.authorId)?.name ?? "unknown";
@@ -71,6 +83,7 @@ export default class NoteEditor {
         <span class="jn-dot" style="background:${authorColor}"></span>
         <b>${foundry.utils.escapeHTML(note.name)}</b>
         <button type="button" class="journalinator-authors-toggle">${this.showAuthors ? "Hide authors" : "Authors"}</button>
+        <button type="button" class="journalinator-delete" title="Move to trash">&#128465;</button>
       </div>
       <div class="journalinator-meta">Linked from</div>
       <div class="journalinator-chips">${backlinks}</div>
@@ -123,6 +136,11 @@ export default class NoteEditor {
     this.root.querySelector(".journalinator-authors-toggle")?.addEventListener("click", () => {
       this.showAuthors = !this.showAuthors;
       this.render();
+    });
+
+    this.root.querySelector(".journalinator-delete")?.addEventListener("click", () => {
+      this.#stopEditing();
+      requestWrite({ type: "deleteNote", noteId: this.noteId });
     });
 
     this.root.querySelectorAll(".journalinator-chip").forEach(el => {

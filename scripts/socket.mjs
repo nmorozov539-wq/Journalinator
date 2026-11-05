@@ -1,6 +1,7 @@
 import { getContainerIds } from "./store/containers.mjs";
 import { CARD_STYLES, seedTilt } from "./styles/registry.mjs";
 import { reconcileTypedLinks } from "./wikilinks.mjs";
+import { maybeSnapshot } from "./snapshots.mjs";
 import {
   authoritativeRequestLock, authoritativeReleaseLock, authoritativeHeartbeat,
   authoritativeHolds, authoritativeSnapshot, receiveLockBroadcast
@@ -103,6 +104,7 @@ async function reconcileAndSave(shared, page, blocks, senderUserId, extraSystemU
     "system.updatedAt": Date.now(),
     ...extraSystemUpdates
   });
+  await maybeSnapshot(page);
 }
 
 /** Credits added characters (capped per save, spec §12) to whoever just saved. */
@@ -315,6 +317,56 @@ async function handleMessage(message, senderUserId) {
         createdBy: senderUserId
       }];
       await sourcePage.update({ "system.links": links });
+      return;
+    }
+
+    case "deleteNote": {
+      const page = shared.pages.get(message.noteId);
+      if (!page) return;
+      const layout = layoutPage(shared);
+      const lastCard = layout?.system.cards[message.noteId] ?? null;
+      await page.update({ "system.deleted": { at: Date.now(), by: senderUserId, lastCard } });
+      if (layout) await layout.update({ [`system.cards.-=${message.noteId}`]: null });
+      return;
+    }
+
+    case "restoreNote": {
+      const page = shared.pages.get(message.noteId);
+      if (!page || !page.system.deleted) return;
+      const layout = layoutPage(shared);
+      const lastCard = page.system.deleted.lastCard;
+      let spot;
+      if (layout && lastCard) {
+        const cards = layout.system.cards ?? {};
+        const w = lastCard.width ?? 190, h = lastCard.height ?? 90;
+        const occupied = Object.values(cards).some(c => {
+          const cw = c.width ?? 200, ch = c.height ?? 90;
+          return !(lastCard.x + w + 16 < c.x || lastCard.x > c.x + cw + 16 || lastCard.y + h + 16 < c.y || lastCard.y > c.y + ch + 16);
+        });
+        spot = occupied ? findFreeSpot(cards, w, h, lastCard.x, lastCard.y) : { x: lastCard.x, y: lastCard.y };
+      } else {
+        spot = findFreeSpot(layout?.system.cards ?? {}, 190, 90, 0, 0);
+      }
+      await page.update({ "system.deleted": null });
+      if (layout) {
+        await layout.update({
+          [`system.cards.${message.noteId}`]: { x: spot.x, y: spot.y, width: lastCard?.width ?? null, height: lastCard?.height ?? null, rotation: lastCard?.rotation ?? 0 }
+        });
+      }
+      return;
+    }
+
+    case "emptyTrash": {
+      if (!game.users.get(senderUserId)?.isGM) return; // only the GM may permanently empty the trash (spec §10/§11)
+      const trashed = shared.pages.filter(p => p.type === `${MODULE_ID}.note` && p.system.deleted);
+      await JournalEntryPage.deleteDocuments(trashed.map(p => p.id), { parent: shared });
+      const ids2 = getContainerIds();
+      const historyPage = ids2?.historyPage ? game.journal.get(ids2.history)?.pages.get(ids2.historyPage) : null;
+      if (historyPage) {
+        const updates = {};
+        for (const p of trashed) updates[`system.snapshots.-=${p.id}`] = null;
+        if (Object.keys(updates).length) await historyPage.update(updates);
+      }
       return;
     }
   }

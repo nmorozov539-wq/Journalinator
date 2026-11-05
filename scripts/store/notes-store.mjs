@@ -14,11 +14,21 @@ class NotesStore {
     return game.journal.get(ids.shared) ?? null;
   }
 
+  /** Live, non-deleted notes — everything the canvas, search, and backlinks should see. */
   getAllNotes() {
     const shared = this.#sharedEntry();
     if (!shared) return [];
     return shared.pages
-      .filter(p => p.type === `${MODULE_ID}.note`)
+      .filter(p => p.type === `${MODULE_ID}.note` && !p.system.deleted)
+      .map(p => this.#mergeWithSecrets(p));
+  }
+
+  /** Notes currently in the trash (spec §11) — for the Trash dialog only. */
+  getTrashedNotes() {
+    const shared = this.#sharedEntry();
+    if (!shared) return [];
+    return shared.pages
+      .filter(p => p.type === `${MODULE_ID}.note` && p.system.deleted)
       .map(p => this.#mergeWithSecrets(p));
   }
 

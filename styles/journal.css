@@ -44,7 +44,8 @@
 }
 
 .journalinator-new,
-.journalinator-add-label {
+.journalinator-add-label,
+.journalinator-trash {
   background: var(--jn-bg);
   color: var(--jn-text);
   border: 1px solid var(--jn-line);
@@ -54,8 +55,41 @@
   white-space: nowrap;
 }
 .journalinator-new:hover,
-.journalinator-add-label:hover {
+.journalinator-add-label:hover,
+.journalinator-trash:hover {
   border-color: var(--jn-acc);
+}
+
+.jn-trash-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 300px;
+  overflow: auto;
+}
+.jn-trash-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--jn-bg);
+  border: 1px solid var(--jn-line);
+  border-radius: 6px;
+}
+.jn-trash-restore,
+.jn-trash-empty {
+  background: var(--jn-bg);
+  color: var(--jn-text);
+  border: 1px solid var(--jn-line);
+  border-radius: 6px;
+  padding: 4px 9px;
+  cursor: pointer;
+}
+.jn-trash-empty {
+  margin-top: 10px;
+  border-color: #a85a5a;
+  color: #e8b9b9;
 }
 
 .journalinator-body {
@@ -293,7 +327,9 @@
   border-radius: 50%;
 }
 
-.journalinator-authors-toggle {
+.journalinator-authors-toggle,
+.journalinator-delete,
+.journalinator-restore {
   background: var(--jn-bg);
   color: var(--jn-text);
   border: 1px solid var(--jn-line);
@@ -301,6 +337,9 @@
   padding: 3px 8px;
   font-size: 11px;
   cursor: pointer;
+}
+.journalinator-delete:hover {
+  border-color: #a85a5a;
 }
 
 .journalinator-meta {

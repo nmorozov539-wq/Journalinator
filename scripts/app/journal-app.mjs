@@ -79,7 +79,8 @@ export default class JournalApp extends ApplicationV2 {
       allNotes: notes,
       notes: filtered,
       layout: notesStore.getLayout(),
-      gmOnline: !!game.users.activeGM
+      gmOnline: !!game.users.activeGM,
+      trashCount: notesStore.getTrashedNotes().length
     };
   }
 
@@ -92,6 +93,7 @@ export default class JournalApp extends ApplicationV2 {
         <input type="search" class="journalinator-search" placeholder="Search notes...">
         <button type="button" class="journalinator-new">+ New Note</button>
         <button type="button" class="journalinator-add-label">+ Label</button>
+        <button type="button" class="journalinator-trash">Trash${context.trashCount ? ` (${context.trashCount})` : ""}</button>
       </header>
       ${!context.gmOnline ? `<div class="journalinator-offline-banner">Read-only — the GM is offline</div>` : ""}
       <div class="journalinator-body">
@@ -131,6 +133,39 @@ export default class JournalApp extends ApplicationV2 {
 
     root.querySelector(".journalinator-add-label")?.addEventListener("click", () => {
       this.#canvas.addLabelButton();
+    });
+
+    root.querySelector(".journalinator-trash")?.addEventListener("click", () => this.#openTrash());
+  }
+
+  async #openTrash() {
+    const trashed = notesStore.getTrashedNotes();
+    const rows = trashed
+      .map(n => `<div class="jn-trash-row"><span>${foundry.utils.escapeHTML(n.name)}</span><button type="button" class="jn-trash-restore" data-id="${n._id}">Restore</button></div>`)
+      .join("") || `<p class="journalinator-empty">Trash is empty.</p>`;
+
+    await foundry.applications.api.DialogV2.wait({
+      window: { title: "Trash" },
+      content: `<div class="jn-trash-list">${rows}</div>` +
+        (game.user.isGM && trashed.length ? `<button type="button" class="jn-trash-empty">Empty Trash</button>` : ""),
+      buttons: [{ action: "close", label: "Close", default: true }],
+      rejectClose: false,
+      render: (event, dialog) => {
+        dialog.element.querySelectorAll(".jn-trash-restore").forEach(btn => {
+          btn.addEventListener("click", () => {
+            requestWrite({ type: "restoreNote", noteId: btn.dataset.id });
+            dialog.close();
+          });
+        });
+        dialog.element.querySelector(".jn-trash-empty")?.addEventListener("click", async () => {
+          const confirmed = await foundry.applications.api.DialogV2.confirm({
+            window: { title: "Empty Trash" },
+            content: "<p>Permanently delete every note in the trash? This cannot be undone.</p>"
+          });
+          if (confirmed) requestWrite({ type: "emptyTrash" });
+          dialog.close();
+        });
+      }
     });
   }
 

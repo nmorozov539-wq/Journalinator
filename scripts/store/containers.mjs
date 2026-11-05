@@ -23,7 +23,9 @@ export async function ensureContainers() {
   if (!game.user.isGM) return;
 
   let ids = game.settings.get(MODULE_ID, SETTING_KEY);
-  if (ids && ids.shared && game.journal.get(ids.shared)) return ids;
+  if (ids && ids.shared && game.journal.get(ids.shared)) {
+    return await ensureHistoryPage(ids); // upgrade path for worlds created before Phase 5
+  }
 
   const shared = await JournalEntry.create({
     name: "Journalinator: Shared Journal",
@@ -55,13 +57,34 @@ export async function ensureContainers() {
     system: {}
   }, { parent: shared });
 
+  const historyPage = await JournalEntryPage.create({
+    name: "__history__",
+    type: `${MODULE_ID}.history`,
+    system: {}
+  }, { parent: history });
+
   ids = {
     shared: shared.id,
     history: history.id,
     secrets: secrets.id,
     layoutPage: layoutPage.id,
-    statsPage: statsPage.id
+    statsPage: statsPage.id,
+    historyPage: historyPage.id
   };
+  await game.settings.set(MODULE_ID, SETTING_KEY, ids);
+  return ids;
+}
+
+/** Adds the history sub-type page for worlds whose containers were created before Phase 5. */
+async function ensureHistoryPage(ids) {
+  if (ids.historyPage && game.journal.get(ids.history)?.pages.get(ids.historyPage)) return ids;
+  const history = game.journal.get(ids.history);
+  const historyPage = await JournalEntryPage.create({
+    name: "__history__",
+    type: `${MODULE_ID}.history`,
+    system: {}
+  }, { parent: history });
+  ids = { ...ids, historyPage: historyPage.id };
   await game.settings.set(MODULE_ID, SETTING_KEY, ids);
   return ids;
 }
