@@ -32,6 +32,38 @@ function enqueueWrite(message, senderUserId) {
   return writeQueue;
 }
 
+/** Case-insensitive lookup among live (non-deleted) notes. */
+function findNoteByTitle(shared, title, excludeId = null) {
+  const normalized = (title ?? "").trim().toLowerCase();
+  if (!normalized) return null;
+  return shared.pages.find(p =>
+    p.type === `${MODULE_ID}.note` &&
+    p.id !== excludeId &&
+    !p.system.deleted &&
+    (p.name ?? "").trim().toLowerCase() === normalized
+  ) ?? null;
+}
+
+/** `Untitled`, then `Untitled 2`, `Untitled 3`, ... — used when the title is generated, not typed. */
+function uniqueTitle(shared, base) {
+  const stem = (base ?? "").trim() || "Untitled";
+  if (!findNoteByTitle(shared, stem)) return stem;
+  let suffix = 2;
+  while (findNoteByTitle(shared, `${stem} ${suffix}`)) suffix++;
+  return `${stem} ${suffix}`;
+}
+
+/** Shows a rejection to the requesting user. Socket broadcasts don't echo to the sender. */
+function notifyUser(userId, reason) {
+  if (!userId) return;
+  const text = reason.startsWith("Journalinator:") ? reason : `Journalinator: ${reason}`;
+  if (userId === game.user.id) {
+    ui.notifications?.warn(text);
+    return;
+  }
+  game.socket.emit(CHANNEL, { type: "writeRejected", forUserId: userId, reason: text });
+}
+
 /**
  * The server appends the sender's verified user id as the socket relay's own trailing argument
  * (see dist/server/sockets.mjs handleCustomSocket), so `senderUserId` below is never something
@@ -55,6 +87,11 @@ export function registerSocket() {
       receiveLockBroadcast(message);
       return;
     }
+    if (message.type === "writeRejected") {
+      if (senderUserId !== game.users.activeGM?.id) return;
+      if (message.forUserId === game.user.id) ui.notifications?.warn(message.reason);
+      return;
+    }
     if (!game.user.isGM) return;
     if (game.users.activeGM?.id !== game.user.id) return;
     enqueueWrite(message, senderUserId);
@@ -74,7 +111,7 @@ function findFreeSpot(cards, w, h, nearX, nearY) {
       const y = nearY + Math.sin(k * 0.785) * r * 45;
       const overlaps = Object.values(cards).some(c => {
         const cw = c.width ?? 200, ch = c.height ?? 90;
-        return x + w + 16 < c.x || x > c.x + cw + 16 || y + h + 16 < c.y || y > c.y + ch + 16;
+        return !(x + w + 16 < c.x || x > c.x + cw + 16 || y + h + 16 < c.y || y > c.y + ch + 16);
       });
       if (!overlaps) return { x, y };
     }
@@ -82,10 +119,25 @@ function findFreeSpot(cards, w, h, nearX, nearY) {
   return { x: nearX, y: nearY };
 }
 
-async function createNotePage(shared, { title, style, x, y, authorId }) {
+async function createNotePage(shared, { title, style, x, y, authorId, autoTitle = false }) {
   style = CARD_STYLES[style] ? style : "sticky";
+  const requestedTitle = (title ?? "").trim() || "Untitled";
+  const finalTitle = autoTitle ? uniqueTitle(shared, requestedTitle) : requestedTitle;
+
+  if (!autoTitle && findNoteByTitle(shared, finalTitle)) {
+    notifyUser(authorId, `A note titled "${finalTitle}" already exists.`);
+    return null;
+  }
+
+  const layout = layoutPage(shared);
+  const existingCards = layout?.system.cards ?? {};
+  const cardWidth = CARD_STYLES[style]?.defaultWidth ?? 190;
+  const nearX = Number.isFinite(x) ? x : 0;
+  const nearY = Number.isFinite(y) ? y : 0;
+  const spot = findFreeSpot(existingCards, cardWidth, 90, nearX, nearY);
+
   const page = await JournalEntryPage.create({
-    name: title,
+    name: finalTitle,
     type: `${MODULE_ID}.note`,
     system: {
       style,
@@ -96,10 +148,9 @@ async function createNotePage(shared, { title, style, x, y, authorId }) {
     }
   }, { parent: shared });
 
-  const layout = layoutPage(shared);
   if (layout) {
     await layout.update({
-      [`system.cards.${page.id}`]: { x: x ?? 0, y: y ?? 0, rotation: seedTilt(style) }
+      [`system.cards.${page.id}`]: { x: spot.x, y: spot.y, rotation: seedTilt(style) }
     });
   }
   await recordActivity(authorId, { notes: 1 });
@@ -114,12 +165,17 @@ async function reconcileAndSave(shared, page, blocks, senderUserId, extraSystemU
     senderUserId,
     findNoteByTitle: {
       byId: id => shared.pages.get(id),
-      byTitle: title => shared.pages.find(p => p.type === `${MODULE_ID}.note` && !p.system.deleted && p.name.toLowerCase() === title.toLowerCase())
+      byTitle: title => findNoteByTitle(shared, title)
     },
     createNoteNear: async title => {
-      const existingCards = layout?.system.cards ?? {};
-      const { x, y } = findFreeSpot(existingCards, 190, 90, sourceCard.x + 220, sourceCard.y);
-      return createNotePage(shared, { title, style: "sticky", x, y, authorId: senderUserId });
+      const existing = findNoteByTitle(shared, title);
+      if (existing) return existing;
+      const page = await createNotePage(shared, {
+        title, style: "sticky", x: sourceCard.x + 220, y: sourceCard.y, authorId: senderUserId
+      });
+      const fallback = page ?? findNoteByTitle(shared, title);
+      if (!fallback) throw new Error(`Journalinator: could not create or resolve "${title}"`);
+      return fallback;
     }
   });
 
@@ -149,7 +205,36 @@ async function handleMessage(message, senderUserId) {
 
   switch (message.type) {
     case "createNote": {
-      await createNotePage(shared, { title: message.title, style: message.style, x: message.x, y: message.y, authorId: senderUserId });
+      await createNotePage(shared, {
+        title: message.title, style: message.style, x: message.x, y: message.y,
+        authorId: senderUserId, autoTitle: message.autoTitle === true
+      });
+      return;
+    }
+
+    case "renameNote": {
+      const page = shared.pages.get(message.noteId);
+      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
+      const title = (message.title ?? "").trim();
+      if (!title) {
+        notifyUser(senderUserId, "A note title cannot be empty.");
+        return;
+      }
+      if (findNoteByTitle(shared, title, page.id)) {
+        notifyUser(senderUserId, `A note titled "${title}" already exists.`);
+        return;
+      }
+
+      const oldTitle = (page.name ?? "").trim();
+      const formerNames = [...(page.system.formerNames ?? [])];
+      if (oldTitle && !formerNames.some(name => name.trim().toLowerCase() === oldTitle.toLowerCase())) {
+        formerNames.push(oldTitle);
+      }
+      // Keep former names bounded and never list the current title twice.
+      const nextFormerNames = formerNames
+        .filter(name => name.trim().toLowerCase() !== title.toLowerCase())
+        .slice(-20);
+      await page.update({ name: title, "system.formerNames": nextFormerNames, "system.updatedAt": Date.now() });
       return;
     }
 
@@ -326,12 +411,14 @@ async function handleMessage(message, senderUserId) {
 
     case "newLinkedNote": {
       const sourcePage = shared.pages.get(message.sourceId);
-      if (!sourcePage) return;
+      if (!sourcePage || sourcePage.system.deleted) return;
       const layout = layoutPage(shared);
       const sourceCard = layout?.system.cards[message.sourceId] ?? { x: 0, y: 0 };
-      const existingCards = layout?.system.cards ?? {};
-      const { x, y } = findFreeSpot(existingCards, 190, 90, sourceCard.x + 220, sourceCard.y);
-      const newPage = await createNotePage(shared, { title: message.title ?? "Untitled", style: "sticky", x, y, authorId: senderUserId });
+      const newPage = await createNotePage(shared, {
+        title: message.title ?? "Untitled", style: "sticky",
+        x: sourceCard.x + 220, y: sourceCard.y, authorId: senderUserId
+      });
+      if (!newPage) return;
       const links = [...(sourcePage.system.links ?? []), {
         id: foundry.utils.randomID(),
         targetId: newPage.id,
@@ -375,7 +462,17 @@ async function handleMessage(message, senderUserId) {
       } else {
         spot = findFreeSpot(layout?.system.cards ?? {}, 190, 90, 0, 0);
       }
-      await page.update({ "system.deleted": null });
+
+      const oldTitle = (page.name ?? "").trim();
+      const restoredTitle = findNoteByTitle(shared, oldTitle, page.id)
+        ? uniqueTitle(shared, oldTitle)
+        : page.name;
+      const restoreUpdate = { "system.deleted": null };
+      if (restoredTitle !== page.name) restoreUpdate.name = restoredTitle;
+      await page.update(restoreUpdate);
+      if (restoredTitle !== page.name) {
+        notifyUser(senderUserId, `Restored as "${restoredTitle}" because another note already uses "${oldTitle}".`);
+      }
       if (layout) {
         await layout.update({
           [`system.cards.${message.noteId}`]: { x: spot.x, y: spot.y, width: lastCard?.width ?? null, height: lastCard?.height ?? null, rotation: lastCard?.rotation ?? 0 }

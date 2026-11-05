@@ -461,6 +461,16 @@ export default class JournalCanvas {
     this.callbacks.onAddLabelAt(x, y);
   }
 
+  /** World-space top-left for a new card centered in the current viewport. */
+  newCardPosition(width = 190, height = 90) {
+    const rect = this.root.getBoundingClientRect();
+    const center = this.#toWorld(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return {
+      x: Math.round(center.x - width / 2),
+      y: Math.round(center.y - height / 2)
+    };
+  }
+
   /** Pans to and selects a note — used by backlink chips in the editor. */
   focusNote(noteId) {
     const card = this.layout.cards?.[noteId];

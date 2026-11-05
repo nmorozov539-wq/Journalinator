@@ -26,6 +26,7 @@ export default class NoteModel extends foundry.abstract.TypeDataModel {
       updatedAt: new fields.NumberField({ required: true }),
       editCount: new fields.NumberField({ required: true, initial: 0 }),
       contributions: new fields.TypedObjectField(new fields.NumberField({ initial: 0 })),
+      formerNames: new fields.ArrayField(new fields.StringField({ required: true, blank: true }), { initial: [] }),
       deleted: new fields.SchemaField({
         at: new fields.NumberField({ required: true }),
         by: new fields.StringField({ required: true }),

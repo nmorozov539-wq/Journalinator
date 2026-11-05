@@ -475,6 +475,7 @@
 
 .journalinator-authors-toggle,
 .journalinator-delete,
+.journalinator-rename,
 .journalinator-restore {
   background: var(--jn-bg);
   color: var(--jn-text);
@@ -486,6 +487,9 @@
 }
 .journalinator-delete:hover {
   border-color: #a85a5a;
+}
+.journalinator-rename:hover {
+  border-color: var(--jn-acc);
 }
 
 .journalinator-meta {

@@ -44,7 +44,7 @@ export default class JournalApp extends ApplicationV2 {
   });
   #canvas = new JournalCanvas({
     onSelectNote: id => { this.#selectedNoteId = id; this.render(); },
-    onCreateNoteAt: (x, y) => requestWrite({ type: "createNote", title: "Untitled", x, y }),
+    onCreateNoteAt: (x, y) => requestWrite({ type: "createNote", title: "Untitled", x, y, autoTitle: true }),
     onMoveCard: (noteId, x, y) => requestWrite({ type: "moveCard", noteId, x, y }),
     onResizeCard: (noteId, width, height) => requestWrite({ type: "resizeCard", noteId, width, height }),
     onResetCardSize: noteId => requestWrite({ type: "resizeCard", noteId, width: null, height: null }),
@@ -208,7 +208,7 @@ export default class JournalApp extends ApplicationV2 {
     root.querySelector(".journalinator-new")?.addEventListener("click", async () => {
       const title = await this.#promptText("New Note", "");
       if (!title) return;
-      requestWrite({ type: "createNote", title });
+      requestWrite({ type: "createNote", title, ...this.#canvas.newCardPosition() });
     });
 
     root.querySelector(".journalinator-add-label")?.addEventListener("click", () => {
@@ -268,7 +268,7 @@ export default class JournalApp extends ApplicationV2 {
   #createFromSwitcher(title) {
     this.#query = "";
     this.#switcherOpen = false;
-    requestWrite({ type: "createNote", title });
+    requestWrite({ type: "createNote", title, ...this.#canvas.newCardPosition() });
     this.render();
   }
 

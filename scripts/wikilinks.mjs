@@ -30,16 +30,29 @@ export async function reconcileTypedLinks(sourceNote, blocks, { findNoteByTitle,
   const existingLinks = sourceNote.system.links ?? [];
   const nextLinks = [];
   const handledTitles = new Set();
+  const keyFor = value => (value ?? "").trim().toLowerCase();
 
   for (const link of existingLinks) {
     if (link.origin !== "typed") { nextLinks.push(link); continue; }
     const targetNote = findNoteByTitle.byId(link.targetId);
-    const key = targetNote ? targetNote.name.toLowerCase() : null;
-    const stillReferenced = key && referenced.has(key);
-    if (stillReferenced) {
-      const { label } = referenced.get(key);
+    const currentKey = targetNote ? keyFor(targetNote.name) : null;
+    let referenceKey = currentKey && referenced.has(currentKey) ? currentKey : null;
+
+    // If the target was renamed, the block still contains the old [[title]]. Keep the link
+    // pointing at the renamed note instead of treating the old title as a brand-new note —
+    // unless another live note has since taken that title, in which case that note wins.
+    if (!referenceKey && targetNote) {
+      referenceKey = [...referenced.keys()].find(key => {
+        if (!(targetNote.system.formerNames ?? []).some(name => keyFor(name) === key)) return false;
+        const currentOwner = findNoteByTitle.byTitle(key);
+        return !currentOwner || currentOwner.id === targetNote.id;
+      }) ?? null;
+    }
+
+    if (referenceKey) {
+      const { label } = referenced.get(referenceKey);
       nextLinks.push(link.edited ? link : { ...link, label });
-      handledTitles.add(key);
+      handledTitles.add(referenceKey);
     } else if (link.edited) {
       nextLinks.push(link); // edited typed links survive even if the [[...]] text is gone
     }

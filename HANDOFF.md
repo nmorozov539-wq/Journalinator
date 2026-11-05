@@ -55,8 +55,17 @@ Foundry.
    the hook. Switching notes also saves explicitly before clearing state. The scene-control
    button reuses `foundry.applications.instances` instead of creating a second app with the
    same id, and the search-blur timer is cancelled on close so it cannot re-render a closed app.
+6. **Titles are unique, notes can be renamed, and new notes appear in view.** The GM rejects
+   duplicate live titles (case-insensitive) and sends a targeted rejection notice to the
+   requester. Generated titles use `Untitled`, `Untitled 2`, etc. The editor has a rename
+   button; renames update `formerNames` so existing typed links keep pointing at the renamed
+   note instead of turning the old title into a new ghost note. Restoring a note whose title
+   was reused auto-suffixes it. `+ New Note`, quick-switcher create, and double-click create all
+   place cards through `findFreeSpot`; toolbar/switcher creates start at the viewport center.
+   This also fixed an inverted overlap test in `findFreeSpot`: it previously treated separated
+   cards as overlapping and happily returned occupied coordinates.
 
-These are deliberately small, low-risk fixes. The larger issues below are not addressed.
+These are incremental fixes; the larger issues below remain.
 
 ---
 
@@ -130,6 +139,8 @@ ciphertext lengths can reveal information even when content is encrypted.
   former GM cannot resurrect stale locks.
 - Queued GM writes re-check active-GM status before applying, so a former GM cannot finish a
   write after a failover.
+- Live note titles are unique (case-insensitive); duplicate creates and renames are rejected
+  and the requesting client gets a targeted notification.
 
 ### 4.3 Remaining GM-side weaknesses
 
@@ -155,9 +166,12 @@ consistent.
 **All payload fields are hostile.** The sender id is trustworthy; everything else is not.
 Validate every field in `handleMessage`:
 
-- `createNote`: trim title, reject duplicate titles among non-deleted notes, reject empty
-  titles, coerce style to a registry key.
-- `newLinkedNote`: same title checks; validate source exists and is not deleted.
+- `createNote`: title uniqueness/empty-title checks and style coercion are implemented; keep
+  length limits and any new fields validated.
+- `newLinkedNote`: title checks are implemented; source existence/deletion is checked; still
+  validate the title field itself at the boundary.
+- `renameNote`: title uniqueness/empty-title checks are implemented; add a length cap if the
+  UI or Foundry name limits become an issue.
 - `saveBlock`: validate text is a string, note exists and is not deleted, sender holds the
   lock, block belongs to the note.
 - `splitBlock` / `mergeBlockUp`: same, plus require both locks for merge and keep the
@@ -169,7 +183,7 @@ Validate every field in `handleMessage`:
   never allow `id`/`targetId` to change through `...message.fields`.
 - `moveCard` / `resizeCard`: note/card must exist; clamp absurd dimensions and coordinates.
 - `deleteNote`: make idempotent; do not overwrite `lastCard` if the note is already deleted.
-- `restoreNote`: ensure the page is actually deleted; free-spot logic is fine.
+- `restoreNote`: title collisions are auto-suffixed; keep the deleted/free-spot checks.
 - `emptyTrash` / `addSessionMarker`: keep the sender `isGM` check; also handle the case where
   the sender user no longer exists.
 
@@ -193,11 +207,10 @@ ordering is still well-defined.
 
 ### 4.4 Suggested GM-side order
 
-1. Payload validation table above.
-2. Title uniqueness + rename support + viewport-centered note placement.
-3. Term/epoch for failover ordering if it becomes important.
-4. Secrets storage spike (section 3).
-5. Only then Phase 8 UI.
+1. Remaining payload validation, especially `updateLink` field whitelisting and color/style validation.
+2. Term/epoch for failover ordering if it becomes important.
+3. Secrets storage spike (section 3).
+4. Only then Phase 8 UI.
 
 ---
 
@@ -205,18 +218,16 @@ ordering is still well-defined.
 
 ### High impact
 
-- **No title uniqueness enforcement.** Spec §4.1/§6.8 require unique non-deleted titles; the
-  GM never checks. This can make typed-link resolution ambiguous and break declassification
-  later. There is also no rename path at all — the editor shows the title as plain text.
-- **New notes stack at `(0,0)`.** `createNotePage` falls back to `x ?? 0, y ?? 0`; the
-  `+ New Note` button and quick-switcher create send no coordinates. Quick-switcher create
-  should place the note near the viewport center, and both should use `findFreeSpot`.
 - **Drafts are memory-only.** A disconnect or page reload loses the rescued text, while spec
   §6.5 implies it should survive a dropped connection. Persist to `localStorage` keyed by
   note/block and offer recovery.
 
 ### Medium impact
 
+- **Renamed notes leave stale typed-link text.** Existing `[[Old Title]]` text resolves to the
+  renamed note because `formerNames` is recorded, but the visible text is not rewritten and a
+  freshly typed `[[Old Title]]` will create a new note. Rewriting wikilink text on rename (or
+  resolving aliases for new links) is the next refinement.
 - **Stats sessions ignore post-marker days.** `deriveSessions` treats each marker as a single
   date, so activity on days after a marker but before the next marker is omitted. Define
   marker ranges instead.
@@ -277,11 +288,21 @@ ordering is still well-defined.
 - [ ] Edit a block, click another note, and confirm the first note saved before the switch.
 - [ ] Click the scene-control button several times while the app is open; only one window and
   one editor lock listener should exist.
+- [ ] Create two notes with the same title; the second is rejected and the requesting client
+  sees a notification. Rename a note to an existing title; same result.
+- [ ] Double-click empty canvas twice; titles become `Untitled` and `Untitled 2`, and the cards
+  do not overlap.
+- [ ] Use `+ New Note` and the quick switcher with the canvas panned; the new card appears near
+  the viewport center, not at `(0,0)`.
+- [ ] Rename a note that is the target of an existing `[[Old Title]]` link, then save the
+  source note. The link must still target the renamed note, not create a new note.
+- [ ] Restore a trashed note whose title was reused; it should return with a suffixed title and
+  the requester should see a notice.
 - [ ] Run `node --check` over every `.mjs` file.
 
 ## 7. Suggested next steps
 
-1. Add payload validation, title uniqueness/rename, and viewport-centered note placement.
+1. Add the remaining payload validation, especially link color/direction/style and updateLink field whitelisting.
 2. Add explicit term/epoch handling for failover ordering if failover becomes important.
 3. Spike the encrypted-secrets design before Phase 8.
 4. Add a README and unit tests for the pure modules.

@@ -109,6 +109,7 @@ export default class NoteEditor {
       <div class="journalinator-eh">
         <span class="jn-dot" style="background:${authorColor}"></span>
         <b>${foundry.utils.escapeHTML(note.name)}</b>
+        <button type="button" class="journalinator-rename" title="Rename note">&#9998;</button>
         <button type="button" class="journalinator-authors-toggle">${this.showAuthors ? "Hide authors" : "Authors"}</button>
         <button type="button" class="journalinator-delete" title="Move to trash">&#128465;</button>
       </div>
@@ -161,6 +162,12 @@ export default class NoteEditor {
   }
 
   #bindHandlers(note) {
+    this.root.querySelector(".journalinator-rename")?.addEventListener("click", async () => {
+      const title = await this.#promptText("Rename Note", note.name);
+      if (!title || title === note.name) return;
+      requestWrite({ type: "renameNote", noteId: this.noteId, title });
+    });
+
     this.root.querySelector(".journalinator-authors-toggle")?.addEventListener("click", () => {
       this.showAuthors = !this.showAuthors;
       this.render();
