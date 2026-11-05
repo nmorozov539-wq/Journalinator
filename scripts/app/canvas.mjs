@@ -1,4 +1,4 @@
-import { CARD_STYLES } from "../styles/registry.mjs";
+import { CARD_STYLES, tintFor } from "../styles/registry.mjs";
 import { hasAnyLock } from "../locks.mjs";
 
 const DRAG_THRESHOLD = 5;
@@ -25,6 +25,8 @@ export default class JournalCanvas {
     this.linksById = new Map();
     this.selectedNoteId = null;
     this.selectedLinkId = null;
+    this.previewMode = "full"; // "full" | "lines" — hover tooltip preview style (spec §9/§13)
+    this.dimMatch = () => true; // (note) => does it match the active search/filters?
 
     this.root = document.createElement("div");
     this.root.className = "jn-canvas";
@@ -43,9 +45,10 @@ export default class JournalCanvas {
     this.#bindPointerEvents();
   }
 
-  update(notes, layout) {
+  update(notes, layout, { dimMatch } = {}) {
     this.notes = notes;
     this.layout = layout ?? { cards: {}, labels: {} };
+    if (dimMatch) this.dimMatch = dimMatch;
 
     const seenCards = new Set();
     for (const note of notes) {
@@ -96,9 +99,11 @@ export default class JournalCanvas {
     el.className = `jn-card ${styleDef.cssClass}`;
     el.classList.toggle("selected", note._id === this.selectedNoteId);
     el.classList.toggle("jn-being-edited", hasAnyLock(note._id));
+    el.classList.toggle("jn-dimmed", !this.dimMatch(note));
     el.style.left = `${cardData.x}px`;
     el.style.top = `${cardData.y}px`;
     el.style.setProperty("--jn-rotation", `${cardData.rotation ?? 0}deg`);
+    el.style.setProperty("--jn-tint", note.system.style === "sticky" ? tintFor(note._id) : "transparent");
     if (cardData.width) { el.style.width = `${cardData.width}px`; el.classList.add("jn-sized"); }
     else { el.style.width = ""; el.classList.remove("jn-sized"); }
     if (cardData.height) { el.style.height = `${cardData.height}px`; }
@@ -163,6 +168,8 @@ export default class JournalCanvas {
     const colorsUsed = new Set();
     let body = "";
 
+    const dimmedIds = new Set(this.notes.filter(n => !this.dimMatch(n)).map(n => n._id));
+
     for (const note of this.notes) {
       for (const link of note.system.links ?? []) {
         if (!this.cardEls.has(note._id) || !this.cardEls.has(link.targetId)) continue;
@@ -176,8 +183,9 @@ export default class JournalCanvas {
         colorsUsed.add(color);
         const selected = link.id === this.selectedLinkId;
         const markerId = `jn-arrow-${color.replace("#", "")}`;
+        const dimmed = dimmedIds.has(note._id) || dimmedIds.has(link.targetId);
 
-        body += `<g data-id="${link.id}">
+        body += `<g data-id="${link.id}" opacity="${dimmed ? 0.15 : 1}">
           <path d="${d}" fill="none" stroke="${color}" stroke-width="${selected ? 3.5 : 2}"
             ${link.lineStyle === "dashed" ? 'stroke-dasharray="7 6"' : ""}
             ${link.direction !== "none" ? `marker-end="url(#${markerId})"` : ""}
@@ -435,7 +443,8 @@ export default class JournalCanvas {
     if (!note) { this.tooltip.style.display = "none"; return; }
     const author = game.users.get(note.system.authorId);
     const text = note.system.blocks.map(b => b.text).join(" ");
-    this.tooltip.innerHTML = `<b>${foundry.utils.escapeHTML(note.name)}</b><div>${foundry.utils.escapeHTML(text)}</div><div class="jn-tooltip-by">by ${foundry.utils.escapeHTML(author?.name ?? "unknown")}</div>`;
+    const lines = this.previewMode === "lines" ? " jn-tooltip-lines" : "";
+    this.tooltip.innerHTML = `<b>${foundry.utils.escapeHTML(note.name)}</b><div class="jn-tooltip-text${lines}">${foundry.utils.escapeHTML(text)}</div><div class="jn-tooltip-by">by ${foundry.utils.escapeHTML(author?.name ?? "unknown")}</div>`;
     const rect = this.root.getBoundingClientRect();
     this.tooltip.style.display = "block";
     let left = clientX - rect.left + 16;
