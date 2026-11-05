@@ -4,7 +4,7 @@ import StatsModel from "./data/stats-model.mjs";
 import HistoryModel from "./data/history-model.mjs";
 import { registerContainerSettings, ensureContainers, registerSidebarHiding } from "./store/containers.mjs";
 import { registerSocket } from "./socket.mjs";
-import { startExpirySweep } from "./locks.mjs";
+import { startExpirySweep, startLockResync } from "./locks.mjs";
 import JournalApp from "./app/journal-app.mjs";
 
 const MODULE_ID = "fvtt-journalinator";
@@ -24,6 +24,7 @@ Hooks.once("ready", async () => {
   await ensureContainers();
   registerSocket();
   startExpirySweep();
+  startLockResync();
 });
 
 Hooks.on("getSceneControlButtons", controls => {

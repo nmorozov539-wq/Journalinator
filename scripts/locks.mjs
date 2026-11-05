@@ -11,18 +11,24 @@ const SWEEP_INTERVAL_MS = 5000;
  * `applyLocal()` so the UI (editor.mjs, canvas.mjs) only ever needs to listen to one hook,
  * `"journalinatorLocksChanged"`, regardless of whether this client is the GM.
  *
- * Known simplification: a GM failover (the active GM disconnecting mid-session) rebuilds this
- * client's `authoritative` map empty the next time it's touched, per spec §6.6 — but we don't
- * proactively detect "I just became the active GM" to do that eagerly; it only self-corrects
- * once something touches a lock. Good enough for now; revisit if failover turns out to matter
- * more than the spec's own "acceptable, tolerate a brief window" caveat suggests.
+ * A full `lockState` snapshot *replaces* the mirror rather than merging into it, and
+ * `startLockResync()` requests a fresh snapshot whenever the active GM changes. Without that,
+ * stale locks from a failed GM would live forever in every client's mirror: the new GM starts
+ * with an empty authoritative map, and a stale mirror makes the block unclickable, so the
+ * client never even asks for a new lock.
  */
 const mirror = new Map();
 let authoritative = null;
 let activeGMAtLastTouch = null;
+let lastActiveGMId = null;
 
 function key(noteId, blockId) {
   return `${noteId}:${blockId}`;
+}
+
+function splitKey(k) {
+  const separator = k.indexOf(":");
+  return [k.slice(0, separator), k.slice(separator + 1)];
 }
 
 function ensureAuthoritative() {
@@ -44,6 +50,37 @@ function applyLocal(noteId, blockId, lock) {
   if (lock) mirror.set(k, lock);
   else mirror.delete(k);
   Hooks.callAll("journalinatorLocksChanged", noteId, blockId, lock);
+}
+
+/**
+ * Replaces the whole mirror from a `lockState` snapshot. Emits a null hook for every lock that
+ * disappeared and a hook for every lock whose holder changed, so open editors can drop stale
+ * locks and rescue drafts promptly.
+ */
+function replaceLocal(entries) {
+  const next = new Map();
+  for (const { noteId, blockId, lock } of entries) {
+    if (lock) next.set(key(noteId, blockId), lock);
+  }
+
+  const removed = [...mirror.keys()].filter(k => !next.has(k));
+  const changed = [...next.entries()].filter(([k, lock]) => {
+    const current = mirror.get(k);
+    return !current || current.userId !== lock.userId ||
+      current.userName !== lock.userName || current.userColor !== lock.userColor;
+  });
+
+  mirror.clear();
+  for (const [k, lock] of next) mirror.set(k, lock);
+
+  for (const k of removed) {
+    const [noteId, blockId] = splitKey(k);
+    Hooks.callAll("journalinatorLocksChanged", noteId, blockId, null);
+  }
+  for (const [k, lock] of changed) {
+    const [noteId, blockId] = splitKey(k);
+    Hooks.callAll("journalinatorLocksChanged", noteId, blockId, lock);
+  }
 }
 
 function broadcastLockUpdate(noteId, blockId, lock) {
@@ -113,9 +150,26 @@ export function startExpirySweep() {
 /** Called by socket.mjs for every client when a lock broadcast arrives. */
 export function receiveLockBroadcast(message) {
   if (message.type === "lockUpdate") applyLocal(message.noteId, message.blockId, message.lock);
-  else if (message.type === "lockState") {
-    for (const { noteId, blockId, lock } of message.locks) applyLocal(noteId, blockId, lock);
-  }
+  else if (message.type === "lockState") replaceLocal(message.locks ?? []);
+}
+
+/**
+ * Requests a fresh authoritative snapshot whenever the active GM changes. A GM failover loses
+ * every ephemeral lock by definition; replacing the mirror is what makes clients stop showing
+ * locks that no longer exist, and lets them request new locks normally.
+ */
+export function startLockResync() {
+  lastActiveGMId = game.users.activeGM?.id ?? null;
+
+  const check = () => {
+    const currentGM = game.users.activeGM?.id ?? null;
+    if (currentGM === lastActiveGMId) return;
+    lastActiveGMId = currentGM;
+    replaceLocal([]);
+    if (currentGM) requestLockState();
+  };
+
+  for (const hook of ["createUser", "updateUser", "deleteUser", "userConnected"]) Hooks.on(hook, check);
 }
 
 // --- Client-facing API used by the editor UI ---
@@ -149,8 +203,13 @@ export function sendHeartbeat(noteId, blockId) {
 }
 
 export function requestLockState() {
-  if (game.users.activeGM?.id === game.user.id) {
-    for (const { noteId, blockId, lock } of authoritativeSnapshot()) applyLocal(noteId, blockId, lock);
+  const activeGM = game.users.activeGM;
+  if (!activeGM) {
+    replaceLocal([]);
+    return;
+  }
+  if (activeGM.id === game.user.id) {
+    replaceLocal(authoritativeSnapshot());
   } else {
     game.socket.emit(CHANNEL, { type: "requestLockState" });
   }

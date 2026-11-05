@@ -32,7 +32,7 @@ Foundry.
 
 ---
 
-## 2. What changed in this patch
+## 2. Recent fixes
 
 1. **GM writes are now serialized.** `scripts/socket.mjs` has a `writeQueue` promise chain;
    both socket requests and the active GM's direct `requestWrite` path go through
@@ -44,6 +44,11 @@ Foundry.
 3. **Link labels save on change, not per keystroke.** The link toolbar label input uses
    `onchange` instead of `oninput`, giving one socket message/world write per label edit
    (spec §6.2) instead of one per character.
+4. **Lock snapshots replace the mirror, and active-GM changes force a resync.**
+   `receiveLockBroadcast` now treats `lockState` as a full replacement, emitting null hooks for
+   locks that disappeared. `startLockResync()` watches user documents and, when
+   `game.users.activeGM` changes, clears the mirror and requests a fresh snapshot. This removes
+   the stale-lock-after-failover bug where a block stayed unclickable forever.
 
 These are deliberately small, low-risk fixes. The larger issues below are not addressed.
 
@@ -100,7 +105,8 @@ ciphertext lengths can reveal information even when content is encrypted.
    result to players.
 6. Locks are ephemeral GM memory. Every client keeps a mirror; only the active GM keeps the
    authoritative grant/deny/expire map. Lock broadcasts are informational and are applied by
-   every client.
+   every client. A full `lockState` replaces the mirror, and an active-GM change triggers a
+   fresh snapshot.
 7. Layout updates use keyed paths (`system.cards.<id>.x`), so independent card moves do not
    clobber one another. Note content and links are whole-array fields and must be serialized.
 
@@ -111,22 +117,29 @@ ciphertext lengths can reveal information even when content is encrypted.
 - A failed handler is caught and logged; the queue continues.
 - Sender attribution comes from the socket layer, not the payload.
 - Locks are not persisted, so lock traffic causes no world writes.
+- A `lockState` snapshot is authoritative: it replaces the local mirror instead of merging, so
+  locks that no longer exist on the GM cannot survive in client memory.
+- Active-GM changes clear the mirror and request a fresh snapshot.
+- Lock broadcasts are accepted only from the current active GM, so a late broadcast from a
+  former GM cannot resurrect stale locks.
+- Queued GM writes re-check active-GM status before applying, so a former GM cannot finish a
+  write after a failover.
 
 ### 4.3 Remaining GM-side weaknesses
 
-**Lock mirror resync is broken.** `receiveLockBroadcast` applies `lockState` entries but never
-clears the local mirror. After a GM failover, the new GM's authoritative map starts empty,
-stale locks remain visible on clients, and those clients cannot click the block to re-request
-because the mirror says someone else holds it. Fix by replacing the whole mirror on a
-`lockState` snapshot, emitting a lock-change hook for keys that disappeared, and requesting a
-snapshot when the active GM changes. The current `open()` path only requests state when the
-selected note changes.
+**Lock mirror resync is now handled.** `receiveLockBroadcast` treats `lockState` as a full
+replacement, `startLockResync()` watches `createUser`/`updateUser`/`deleteUser`/`userConnected`
+so an active-GM change clears the mirror and requests a fresh snapshot, and lock broadcasts are
+ignored unless they come from the current active GM. `userConnected` is the important one:
+Foundry v14 updates `user.active` from activity data rather than a normal document update.
+Remaining work: a queued write that was accepted before a failover is dropped rather than
+retried, and ordering across a very fast double-failover is still implicit rather than enforced
+by a term number.
 
-**Failover needs an epoch/term.** During a GM handoff, late messages or broadcasts from the old
-GM can arrive after the new GM has taken over. Add a monotonically increasing term to lock
-broadcasts and reject messages from an older term. Also re-check `game.users.activeGM` inside
-each queued job; the queue can still hold work when the GM loses active status, and
-`handleMessage` itself does not re-check.
+**Failover hardening still worth doing.** Add a monotonically increasing term/epoch to lock and
+write messages if failover behavior becomes important. A term makes ordering explicit and lets
+clients reject stale messages deterministically rather than relying on sender identity checks.
+The sender checks above are the minimum; a term is the robust version.
 
 **The queue is global.** A slow handler blocks every other write. Most handlers are short, so
 this is acceptable for now, but a per-note queue would allow parallel work on different notes.
@@ -174,12 +187,11 @@ ordering is still well-defined.
 
 ### 4.4 Suggested GM-side order
 
-1. Lock-state replacement + resync on active-GM change.
-2. Term/epoch for failover and stale-message rejection.
-3. Payload validation table above.
-4. Title uniqueness + rename support.
-5. Secrets storage spike (section 3).
-6. Only then Phase 8 UI.
+1. Term/epoch for failover and stale-message rejection.
+2. Payload validation table above.
+3. Title uniqueness + rename support.
+4. Secrets storage spike (section 3).
+5. Only then Phase 8 UI.
 
 ---
 
@@ -257,13 +269,17 @@ ordering is still well-defined.
   changes survive (write queue).
 - [ ] Delete a note, then type a `[[Title]]` matching the trashed note's title; a new live note
   is created instead of linking to the trash.
-- [ ] Edit a link label by typing several characters and blurring/Enter; only one socket
-  request is sent and the label persists.
+- [ ] Edit a link label by typing several characters and blurring; only one socket request is
+  sent and the label persists.
+- [ ] With a block locked, disconnect the active GM so another GM takes over. The stale lock
+  must clear, and the block must become clickable again without a page reload.
+- [ ] Remove every GM; confirm existing lock pills/highlights disappear rather than persisting
+  against an absent GM.
 - [ ] Run `node --check` over every `.mjs` file.
 
 ## 7. Suggested next steps
 
-1. Fix lock mirror replacement and resync on GM change.
+1. Add explicit term/epoch handling for failover ordering if failover becomes important.
 2. Add validation and title uniqueness/rename.
 3. Fix editor teardown and unsaved-state handling.
 4. Spike the encrypted-secrets design before Phase 8.

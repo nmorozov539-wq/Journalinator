@@ -22,7 +22,12 @@ let writeQueue = Promise.resolve();
 
 function enqueueWrite(message, senderUserId) {
   writeQueue = writeQueue
-    .then(() => handleMessage(message, senderUserId))
+    .then(() => {
+      // A job can outlive the sender's active-GM status during a failover. Dropping it is
+      // safer than letting a former GM apply world writes after the new GM takes over.
+      if (game.users.activeGM?.id !== game.user.id) return;
+      return handleMessage(message, senderUserId);
+    })
     .catch(err => console.error("Journalinator: write failed", err));
   return writeQueue;
 }
@@ -44,6 +49,9 @@ function enqueueWrite(message, senderUserId) {
 export function registerSocket() {
   game.socket.on(CHANNEL, (message, senderUserId) => {
     if (message.type === "lockUpdate" || message.type === "lockState") {
+      // Only the current active GM owns lock truth. This also rejects a late broadcast from a
+      // former GM arriving just after a failover, which would otherwise resurrect stale locks.
+      if (senderUserId !== game.users.activeGM?.id) return;
       receiveLockBroadcast(message);
       return;
     }
