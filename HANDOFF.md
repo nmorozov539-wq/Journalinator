@@ -49,6 +49,12 @@ Foundry.
    locks that disappeared. `startLockResync()` watches user documents and, when
    `game.users.activeGM` changes, clears the mirror and requests a fresh snapshot. This removes
    the stale-lock-after-failover bug where a block stayed unclickable forever.
+5. **Editor lifecycle is cleaned up.** `NoteEditor` now activates/deactivates its lock hook
+   instead of registering it forever in the constructor. On app close it saves the in-progress
+   block, releases active and pending locks, stops the heartbeat, clears drafts, and removes
+   the hook. Switching notes also saves explicitly before clearing state. The scene-control
+   button reuses `foundry.applications.instances` instead of creating a second app with the
+   same id, and the search-blur timer is cancelled on close so it cannot re-render a closed app.
 
 These are deliberately small, low-risk fixes. The larger issues below are not addressed.
 
@@ -187,9 +193,9 @@ ordering is still well-defined.
 
 ### 4.4 Suggested GM-side order
 
-1. Term/epoch for failover and stale-message rejection.
-2. Payload validation table above.
-3. Title uniqueness + rename support.
+1. Payload validation table above.
+2. Title uniqueness + rename support + viewport-centered note placement.
+3. Term/epoch for failover ordering if it becomes important.
 4. Secrets storage spike (section 3).
 5. Only then Phase 8 UI.
 
@@ -205,15 +211,6 @@ ordering is still well-defined.
 - **New notes stack at `(0,0)`.** `createNotePage` falls back to `x ?? 0, y ?? 0`; the
   `+ New Note` button and quick-switcher create send no coordinates. Quick-switcher create
   should place the note near the viewport center, and both should use `findFreeSpot`.
-- **Editor lifecycle leaks.** `NoteEditor` registers a global `journalinatorLocksChanged`
-  listener in its constructor and never removes it. `JournalApp._onClose` does not call an
-  editor destroy method, so closing the app while editing leaves the heartbeat running and the
-  block locked. `onChange: () => new JournalApp().render(true)` creates a new app instance on
-  every scene-control click; consider a module-level singleton (or verify the correct v14
-  `singleton` option before using it).
-- **Unsaved edits when switching notes.** `NoteEditor.open()` calls `#stopEditing()` without
-  saving and then clears `drafts`. It usually works only because clicking elsewhere blurs the
-  textarea first. Save explicitly before switching, or keep per-note drafts.
 - **Drafts are memory-only.** A disconnect or page reload loses the rescued text, while spec
   §6.5 implies it should survive a dropped connection. Persist to `localStorage` keyed by
   note/block and offer recovery.
@@ -263,7 +260,7 @@ ordering is still well-defined.
 
 ---
 
-## 6. Testing checklist for this patch
+## 6. Testing checklist
 
 - [ ] Two clients save different blocks of the same note at nearly the same moment; both
   changes survive (write queue).
@@ -275,12 +272,17 @@ ordering is still well-defined.
   must clear, and the block must become clickable again without a page reload.
 - [ ] Remove every GM; confirm existing lock pills/highlights disappear rather than persisting
   against an absent GM.
+- [ ] Edit a block, close the app without clicking away, and reopen it. The text must be saved,
+  the block must be unlocked for other clients, and there must be no heartbeat left running.
+- [ ] Edit a block, click another note, and confirm the first note saved before the switch.
+- [ ] Click the scene-control button several times while the app is open; only one window and
+  one editor lock listener should exist.
 - [ ] Run `node --check` over every `.mjs` file.
 
 ## 7. Suggested next steps
 
-1. Add explicit term/epoch handling for failover ordering if failover becomes important.
-2. Add validation and title uniqueness/rename.
-3. Fix editor teardown and unsaved-state handling.
-4. Spike the encrypted-secrets design before Phase 8.
-5. Add a README and unit tests for the pure modules.
+1. Add payload validation, title uniqueness/rename, and viewport-centered note placement.
+2. Add explicit term/epoch handling for failover ordering if failover becomes important.
+3. Spike the encrypted-secrets design before Phase 8.
+4. Add a README and unit tests for the pure modules.
+5. Only then Phase 8 UI.

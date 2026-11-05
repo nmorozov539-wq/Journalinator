@@ -29,20 +29,43 @@ export default class NoteEditor {
     this.drafts = new Map();
     this.showAuthors = false;
     this.heartbeatTimer = null;
+    this.hookId = null;
+  }
 
-    Hooks.on("journalinatorLocksChanged", (noteId, blockId, lock) => {
+  /**
+   * Registers the lock listener for the lifetime of an open app. Kept separate from the
+   * constructor so a closed app leaves no global hook behind.
+   */
+  activate() {
+    if (this.hookId !== null) return;
+    this.hookId = Hooks.on("journalinatorLocksChanged", (noteId, blockId, lock) => {
       if (noteId !== this.noteId) return;
       this.#onLockChanged(blockId, lock);
     });
   }
 
+  /**
+   * Saves any in-progress block, releases every lock this editor may hold or still be
+   * requesting, stops the heartbeat, and unregisters the hook. Called when the app closes.
+   */
+  deactivate() {
+    this.#stopEditing({ save: true });
+    this.#releasePendingLocks();
+    this.#stopHeartbeat();
+    this.drafts.clear();
+    this.noteId = null;
+    if (this.hookId !== null) {
+      Hooks.off("journalinatorLocksChanged", this.hookId);
+      this.hookId = null;
+    }
+  }
+
   /** Switches the open note if it changed; always call render() afterward to (re)draw. */
   open(noteId) {
     if (this.noteId === noteId) return;
-    this.#stopEditing();
+    this.#stopEditing({ save: true });
+    this.#releasePendingLocks();
     this.noteId = noteId;
-    this.pendingBlockId = null;
-    this.pendingMerge = null;
     this.drafts.clear();
     if (noteId) requestLockState();
   }
@@ -235,6 +258,15 @@ export default class NoteEditor {
   #stopHeartbeat() {
     clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = null;
+  }
+
+  /** Releases locks we asked for but have not yet promoted to an active block edit. */
+  #releasePendingLocks() {
+    if (!this.noteId) return;
+    if (this.pendingBlockId) releaseLock(this.noteId, this.pendingBlockId);
+    if (this.pendingMerge) releaseLock(this.noteId, this.pendingMerge.prevBlockId);
+    this.pendingBlockId = null;
+    this.pendingMerge = null;
   }
 
   #stopEditing({ save = false } = {}) {

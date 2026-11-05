@@ -42,7 +42,12 @@ Hooks.on("getSceneControlButtons", controls => {
         title: "Open Journalinator",
         icon: "fa-solid fa-note-sticky",
         button: true,
-        onChange: () => new JournalApp().render(true)
+        onChange: () => {
+          // Reuse the open instance instead of stacking a second app with the same id.
+          const existing = foundry.applications.instances.get(JournalApp.DEFAULT_OPTIONS.id);
+          if (existing) existing.render({ force: true });
+          else new JournalApp().render({ force: true });
+        }
       }
     }
   };

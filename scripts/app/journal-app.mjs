@@ -38,6 +38,7 @@ export default class JournalApp extends ApplicationV2 {
   #switcherHighlight = 0;
   #hookIds = [];
   #onGlobalKeydown = null;
+  #searchBlurTimer = null;
   #editor = new NoteEditor({
     onFocusNote: id => this.#canvas.focusNote(id)
   });
@@ -63,6 +64,7 @@ export default class JournalApp extends ApplicationV2 {
   });
 
   _onFirstRender() {
+    this.#editor.activate();
     const rerender = () => this.render();
     for (const hook of [
       "createJournalEntryPage", "updateJournalEntryPage", "deleteJournalEntryPage",
@@ -84,9 +86,13 @@ export default class JournalApp extends ApplicationV2 {
   }
 
   _onClose() {
+    this.#editor.deactivate();
+    clearTimeout(this.#searchBlurTimer);
+    this.#searchBlurTimer = null;
     for (const [hook, id] of this.#hookIds) Hooks.off(hook, id);
     this.#hookIds = [];
-    removeEventListener("keydown", this.#onGlobalKeydown);
+    if (this.#onGlobalKeydown) removeEventListener("keydown", this.#onGlobalKeydown);
+    this.#onGlobalKeydown = null;
   }
 
   #matchesQuery(note, q) {
@@ -182,7 +188,8 @@ export default class JournalApp extends ApplicationV2 {
     });
     search?.addEventListener("blur", () => {
       // let a dropdown click register before closing
-      setTimeout(() => { this.#switcherOpen = false; this.render(); }, 150);
+      clearTimeout(this.#searchBlurTimer);
+      this.#searchBlurTimer = setTimeout(() => { this.#switcherOpen = false; this.render(); }, 150);
     });
     search?.addEventListener("keydown", ev => this.#onSearchKeydown(ev));
 
