@@ -77,6 +77,10 @@ export default class NoteEditor {
       .filter(n => (n.system.links ?? []).some(l => l.targetId === note._id))
       .map(n => `<button type="button" class="journalinator-chip" data-id="${n._id}">${foundry.utils.escapeHTML(n.name)}</button>`)
       .join("") || `<small class="journalinator-meta">None yet</small>`;
+    const contributors = Object.entries(note.system.contributions ?? {})
+      .sort((a, b) => b[1] - a[1])
+      .map(([userId, chars]) => `${foundry.utils.escapeHTML(game.users.get(userId)?.name ?? "someone")} (${chars})`)
+      .join(", ");
 
     this.root.innerHTML = `
       <div class="journalinator-eh">
@@ -96,6 +100,7 @@ export default class NoteEditor {
         <button type="button" class="journalinator-new-linked">+ New Linked Note</button>
       </div>
       <p class="journalinator-meta">by ${foundry.utils.escapeHTML(authorName)} &middot; ${note.system.editCount ?? 0} edits</p>
+      ${contributors ? `<p class="journalinator-meta">Characters added: ${contributors}</p>` : ""}
       <div class="jn-doc ${this.showAuthors ? "jn-show-authors" : ""}">
         ${note.system.blocks.map(b => this.#renderBlockHTML(note, b)).join("")}
       </div>

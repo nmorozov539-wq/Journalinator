@@ -2,6 +2,7 @@ import { getContainerIds } from "./store/containers.mjs";
 import { CARD_STYLES, seedTilt } from "./styles/registry.mjs";
 import { reconcileTypedLinks } from "./wikilinks.mjs";
 import { maybeSnapshot } from "./snapshots.mjs";
+import { recordActivity, addSessionMarker } from "./stats.mjs";
 import {
   authoritativeRequestLock, authoritativeReleaseLock, authoritativeHeartbeat,
   authoritativeHolds, authoritativeSnapshot, receiveLockBroadcast
@@ -78,6 +79,7 @@ async function createNotePage(shared, { title, style, x, y, authorId }) {
       [`system.cards.${page.id}`]: { x: x ?? 0, y: y ?? 0, rotation: seedTilt(style) }
     });
   }
+  await recordActivity(authorId, { notes: 1 });
   return page;
 }
 
@@ -113,7 +115,7 @@ function creditContribution(page, senderUserId, oldText, newText) {
   const credited = Math.min(CONTRIBUTION_CAP, added);
   const contributions = { ...(page.system.contributions ?? {}) };
   contributions[senderUserId] = (contributions[senderUserId] ?? 0) + credited;
-  return contributions;
+  return { contributions, credited };
 }
 
 async function handleMessage(message, senderUserId) {
@@ -138,12 +140,13 @@ async function handleMessage(message, senderUserId) {
 
       const oldText = blocks[index].text;
       const nextBlocks = blocks.map((b, i) => i === index ? { ...b, text: message.text, authorId: senderUserId } : b);
-      const contributions = creditContribution(page, senderUserId, oldText, message.text);
+      const { contributions, credited } = creditContribution(page, senderUserId, oldText, message.text);
 
       await reconcileAndSave(shared, page, nextBlocks, senderUserId, {
         "system.contributions": contributions,
         "system.editCount": (page.system.editCount ?? 0) + 1
       });
+      await recordActivity(senderUserId, { chars: credited });
       return;
     }
 
@@ -276,6 +279,7 @@ async function handleMessage(message, senderUserId) {
         createdBy: senderUserId
       }];
       await page.update({ "system.links": links });
+      await recordActivity(senderUserId, { links: 1 });
       return;
     }
 
@@ -317,6 +321,7 @@ async function handleMessage(message, senderUserId) {
         createdBy: senderUserId
       }];
       await sourcePage.update({ "system.links": links });
+      await recordActivity(senderUserId, { links: 1 });
       return;
     }
 
@@ -367,6 +372,12 @@ async function handleMessage(message, senderUserId) {
         for (const p of trashed) updates[`system.snapshots.-=${p.id}`] = null;
         if (Object.keys(updates).length) await historyPage.update(updates);
       }
+      return;
+    }
+
+    case "addSessionMarker": {
+      if (!game.users.get(senderUserId)?.isGM) return; // only the GM adds session markers (spec §10)
+      await addSessionMarker(message.label);
       return;
     }
   }

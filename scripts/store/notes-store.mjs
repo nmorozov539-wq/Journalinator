@@ -32,6 +32,15 @@ class NotesStore {
       .map(p => this.#mergeWithSecrets(p));
   }
 
+  /** Every note ever, trash included — for journal-wide stats (spec §12), which are historical totals. */
+  getAllNotesIncludingTrashed() {
+    const shared = this.#sharedEntry();
+    if (!shared) return [];
+    return shared.pages
+      .filter(p => p.type === `${MODULE_ID}.note`)
+      .map(p => this.#mergeWithSecrets(p));
+  }
+
   getNote(noteId) {
     const shared = this.#sharedEntry();
     const page = shared?.pages.get(noteId) ?? null;
