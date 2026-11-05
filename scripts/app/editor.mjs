@@ -4,6 +4,8 @@ import { requestLock, releaseLock, sendHeartbeat, requestLockState, getLock, isH
 import { CARD_STYLES } from "../styles/registry.mjs";
 
 const HEARTBEAT_INTERVAL_MS = 8000;
+const DRAFT_SAVE_DELAY_MS = 300;
+const DRAFT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 /**
  * The note editor: one continuous document (spec §9), paragraph by paragraph, each block
@@ -13,9 +15,10 @@ const HEARTBEAT_INTERVAL_MS = 8000;
  *
  * Known rough edge: an unrelated hook still calls render() here (there's no surgical per-block
  * DOM patching yet), so a block you're actively typing in gets its <textarea> torn down and
- * rebuilt on every unrelated edit anywhere in the journal. Content is preserved via `drafts`
- * (captured right before the rebuild), so nothing is lost, but the cursor jumps to the end of
- * the text each time. Good enough for Phase 4; worth revisiting in the polish phase.
+ * rebuilt on every unrelated edit anywhere in the journal. Content is preserved via persistent
+ * `drafts` (captured on input and right before each rebuild, mirrored to localStorage), so
+ * nothing is lost, but the cursor jumps to the end of the text each time. Good enough for
+ * Phase 4; worth revisiting in the polish phase.
  */
 export default class NoteEditor {
   constructor(callbacks) {
@@ -30,6 +33,8 @@ export default class NoteEditor {
     this.showAuthors = false;
     this.heartbeatTimer = null;
     this.hookId = null;
+    this.draftTimer = null;
+    this.onPageHide = null;
   }
 
   /**
@@ -42,6 +47,8 @@ export default class NoteEditor {
       if (noteId !== this.noteId) return;
       this.#onLockChanged(blockId, lock);
     });
+    this.onPageHide = () => this.#persistCurrentDraft();
+    addEventListener("pagehide", this.onPageHide);
   }
 
   /**
@@ -50,10 +57,15 @@ export default class NoteEditor {
    */
   deactivate() {
     this.#stopEditing({ save: true });
+    this.#clearDraftTimer();
     this.#releasePendingLocks();
     this.#stopHeartbeat();
     this.drafts.clear();
     this.noteId = null;
+    if (this.onPageHide) {
+      removeEventListener("pagehide", this.onPageHide);
+      this.onPageHide = null;
+    }
     if (this.hookId !== null) {
       Hooks.off("journalinatorLocksChanged", this.hookId);
       this.hookId = null;
@@ -66,7 +78,7 @@ export default class NoteEditor {
     this.#stopEditing({ save: true });
     this.#releasePendingLocks();
     this.noteId = noteId;
-    this.drafts.clear();
+    this.#loadDrafts(noteId);
     if (noteId) requestLockState();
   }
 
@@ -89,6 +101,8 @@ export default class NoteEditor {
       });
       return;
     }
+
+    this.#pruneSavedDrafts(note);
 
     const allNotes = notesStore.getAllNotes();
     const authorColor = game.users.get(note.system.authorId)?.color ?? "#8d8d97";
@@ -152,6 +166,7 @@ export default class NoteEditor {
     if (lockedByOther) tag = `<span class="jn-tag">${foundry.utils.escapeHTML(lock.userName)} is editing&hellip;</span>`;
     else if (mine) tag = `<span class="jn-tag">You're editing</span>`;
     else if (pending) tag = `<span class="jn-tag">Requesting&hellip;</span>`;
+    else if (!editing && this.drafts.has(block.blockId)) tag = `<span class="jn-tag jn-draft-tag">unsaved draft</span>`;
 
     if (editing) {
       const text = this.drafts.get(block.blockId) ?? block.text;
@@ -210,6 +225,7 @@ export default class NoteEditor {
 
     const textarea = this.root.querySelector(".jn-block-input");
     if (textarea) {
+      textarea.addEventListener("input", () => this.#queueDraftSave());
       textarea.addEventListener("blur", () => this.#stopEditing({ save: true }));
       textarea.addEventListener("keydown", ev => this.#onTextareaKeydown(ev, note));
     }
@@ -247,9 +263,13 @@ export default class NoteEditor {
     if (this.editingBlockId === blockId && !mine) {
       // lost the lock involuntarily (expired, or a conflicting grant elsewhere) — rescue the draft
       const textarea = this.root.querySelector(".jn-block-input");
-      if (textarea) this.drafts.set(blockId, textarea.value);
+      if (textarea) {
+        this.drafts.set(blockId, textarea.value);
+        this.#persistDraft(blockId, textarea.value);
+      }
       this.editingBlockId = null;
       this.#stopHeartbeat();
+      this.#clearDraftTimer();
       this.render();
       return;
     }
@@ -279,22 +299,154 @@ export default class NoteEditor {
   #stopEditing({ save = false } = {}) {
     if (!this.editingBlockId) return;
     const blockId = this.editingBlockId;
+    const noteId = this.noteId;
+    this.#clearDraftTimer();
     const textarea = this.root.querySelector(".jn-block-input");
-    const note = notesStore.getNote(this.noteId);
+    const note = notesStore.getNote(noteId);
     const originalText = note?.system.blocks.find(b => b.blockId === blockId)?.text ?? "";
+    let write = null;
+
     if (save && textarea && textarea.value !== originalText) {
-      requestWrite({ type: "saveBlock", noteId: this.noteId, blockId, text: textarea.value });
+      this.drafts.set(blockId, textarea.value);
+      this.#persistDraft(blockId, textarea.value);
+      write = requestWrite({ type: "saveBlock", noteId, blockId, text: textarea.value });
+    } else if (save && !textarea && this.drafts.has(blockId)) {
+      // No textarea to send, but a persisted draft exists; keep it for recovery.
+    } else {
+      this.#removeDraft(blockId);
     }
-    releaseLock(this.noteId, blockId);
-    this.drafts.delete(blockId);
+
+    // For the active GM, requestWrite is queued; releasing first would let the queued
+    // saveBlock fail its lock check. Wait for the write before releasing in that case.
+    if (write) this.#releaseAfterWrite(write, noteId, blockId);
+    else releaseLock(noteId, blockId);
     this.editingBlockId = null;
     this.#stopHeartbeat();
+  }
+
+  #releaseAfterWrite(write, noteId, ...blockIds) {
+    Promise.resolve(write).finally(() => {
+      for (const blockId of blockIds) {
+        const reacquired = this.noteId === noteId && (
+          this.editingBlockId === blockId ||
+          this.pendingBlockId === blockId ||
+          this.pendingMerge?.prevBlockId === blockId
+        );
+        if (!reacquired) releaseLock(noteId, blockId);
+      }
+    });
   }
 
   #captureDraftBeforeRebuild() {
     if (!this.editingBlockId) return;
     const textarea = this.root.querySelector(".jn-block-input");
-    if (textarea) this.drafts.set(this.editingBlockId, textarea.value);
+    if (textarea) {
+      this.drafts.set(this.editingBlockId, textarea.value);
+      this.#persistDraft(this.editingBlockId, textarea.value);
+    }
+  }
+
+  #queueDraftSave() {
+    if (!this.editingBlockId) return;
+    this.#clearDraftTimer();
+    this.draftTimer = setTimeout(() => {
+      this.draftTimer = null;
+      this.#persistCurrentDraft();
+    }, DRAFT_SAVE_DELAY_MS);
+  }
+
+  #clearDraftTimer() {
+    clearTimeout(this.draftTimer);
+    this.draftTimer = null;
+  }
+
+  #persistCurrentDraft() {
+    if (!this.editingBlockId) return;
+    const textarea = this.root.querySelector(".jn-block-input");
+    if (!textarea) return;
+    this.drafts.set(this.editingBlockId, textarea.value);
+    this.#persistDraft(this.editingBlockId, textarea.value);
+  }
+
+  #draftPrefix(noteId = this.noteId) {
+    const worldId = game.world?.id ?? "world";
+    const userId = game.user?.id ?? "user";
+    return `journalinator.draft.${worldId}.${userId}.${noteId}.`;
+  }
+
+  #storage() {
+    try {
+      return globalThis.localStorage ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  #persistDraft(blockId, text) {
+    const storage = this.#storage();
+    if (!storage || !this.noteId) return;
+    try {
+      storage.setItem(this.#draftPrefix() + blockId, JSON.stringify({ text, at: Date.now() }));
+    } catch {
+      // Quota/private-mode failures are non-fatal; the in-memory draft still works.
+    }
+  }
+
+  #removeDraft(blockId) {
+    this.drafts.delete(blockId);
+    const storage = this.#storage();
+    if (!storage || !this.noteId) return;
+    try {
+      storage.removeItem(this.#draftPrefix() + blockId);
+    } catch {
+      // ignore
+    }
+  }
+
+  #loadDrafts(noteId) {
+    this.drafts.clear();
+    if (!noteId) return;
+    const storage = this.#storage();
+    if (!storage) return;
+    const note = notesStore.getNote(noteId);
+    const blockText = new Map((note?.system.blocks ?? []).map(block => [block.blockId, block.text]));
+    const prefix = this.#draftPrefix(noteId);
+
+    try {
+      const keys = [];
+      for (let i = 0; i < storage.length; i++) {
+        const key = storage.key(i);
+        if (key?.startsWith(prefix)) keys.push(key);
+      }
+      for (const key of keys) {
+        const blockId = key.slice(prefix.length);
+        let raw;
+        try {
+          raw = JSON.parse(storage.getItem(key) ?? "null");
+        } catch {
+          storage.removeItem(key);
+          continue;
+        }
+        const stale = !raw || typeof raw.text !== "string" ||
+          !Number.isFinite(raw.at) || Date.now() - raw.at > DRAFT_TTL_MS;
+        const blockGone = Boolean(note) && !blockText.has(blockId);
+        const alreadySaved = Boolean(note) && blockText.get(blockId) === raw?.text;
+        if (stale || blockGone || alreadySaved) {
+          storage.removeItem(key);
+          continue;
+        }
+        this.drafts.set(blockId, raw.text);
+      }
+    } catch {
+      // Storage can be unavailable; memory drafts still work for this session.
+    }
+  }
+
+  #pruneSavedDrafts(note) {
+    for (const [blockId, text] of [...this.drafts]) {
+      const block = note.system.blocks.find(b => b.blockId === blockId);
+      if (!block || block.text === text) this.#removeDraft(blockId);
+    }
   }
 
   #onTextareaKeydown(ev, note) {
@@ -303,13 +455,15 @@ export default class NoteEditor {
 
     if (ev.key === "Enter" && textarea.value.slice(0, textarea.selectionStart).endsWith("\n")) {
       ev.preventDefault();
+      const noteId = this.noteId;
       const beforeText = textarea.value.slice(0, textarea.selectionStart).replace(/\n+$/, "");
       const afterText = textarea.value.slice(textarea.selectionStart);
-      this.drafts.delete(blockId);
+      this.#clearDraftTimer();
+      this.#removeDraft(blockId);
       this.editingBlockId = null;
       this.#stopHeartbeat();
-      requestWrite({ type: "splitBlock", noteId: this.noteId, blockId, beforeText, afterText });
-      releaseLock(this.noteId, blockId);
+      const write = requestWrite({ type: "splitBlock", noteId, blockId, beforeText, afterText });
+      this.#releaseAfterWrite(write, noteId, blockId);
       return;
     }
 
@@ -329,12 +483,13 @@ export default class NoteEditor {
   }
 
   #performMerge(blockId, prevBlockId) {
-    this.drafts.delete(blockId);
+    const noteId = this.noteId;
+    this.#clearDraftTimer();
+    this.#removeDraft(blockId);
     this.editingBlockId = null;
     this.#stopHeartbeat();
-    requestWrite({ type: "mergeBlockUp", noteId: this.noteId, blockId });
-    releaseLock(this.noteId, blockId);
-    releaseLock(this.noteId, prevBlockId);
+    const write = requestWrite({ type: "mergeBlockUp", noteId, blockId });
+    this.#releaseAfterWrite(write, noteId, blockId, prevBlockId);
   }
 
   async #promptText(title, initial) {

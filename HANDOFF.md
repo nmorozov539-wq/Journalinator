@@ -71,6 +71,13 @@ Foundry.
    geometry are type- and range-checked, and note-page type checks reject attempts to target
    layout/stats/history pages. Card images are CSS-escaped, and link colors/IDs are sanitized
    again at render time before entering SVG.
+8. **Labels are validated, and drafts survive reload/disconnect.** `addLabel`/`updateLabel`
+   now type/range-check text, coordinates, size, and color, require the label to exist, and
+   clamp geometry. Editor drafts are persisted to `localStorage` (world/user/note/block keyed),
+   saved on input and `pagehide`, loaded when a note opens, and shown as an “unsaved draft” tag
+   until the saved block text matches. Drafts expire after 30 days and are pruned once saved.
+   Block save/split/merge now release their locks only after the queued GM write completes, so
+   the active GM cannot release a lock before the queued write validates it.
 
 These are incremental fixes; the larger issues below remain.
 
@@ -190,8 +197,9 @@ Validate every field in `handleMessage`:
 - `deleteNote`: idempotent; a second delete leaves `lastCard` intact.
 - `restoreNote`: page type, deleted state, and title collisions are handled; free-spot logic is
   intact.
-- `addLabel` / `updateLabel`: still need type/range validation for `text`, `x`, `y`, `size`,
-  `color`, and a check that the label exists before updating.
+- `addLabel` / `updateLabel`: text, coordinates, size, and color are validated; updates
+  require an existing label and geometry is clamped.
+- `removeLabel`: requires an existing label.
 - `emptyTrash` / `addSessionMarker`: keep the sender `isGM` check; also handle the case where
   the sender user no longer exists.
 
@@ -215,23 +223,18 @@ ordering is still well-defined.
 
 ### 4.4 Suggested GM-side order
 
-1. Finish label validation (`addLabel`/`updateLabel`).
-2. Term/epoch for failover ordering if it becomes important.
-3. Secrets storage spike (section 3).
-4. Only then Phase 8 UI.
+1. Term/epoch for failover ordering if it becomes important.
+2. Secrets storage spike (section 3).
+3. Only then Phase 8 UI.
 
 ---
 
 ## 5. Other known bugs and gaps
 
-### High impact
-
-- **Drafts are memory-only.** A disconnect or page reload loses the rescued text, while spec
-  §6.5 implies it should survive a dropped connection. Persist to `localStorage` keyed by
-  note/block and offer recovery.
-
 ### Medium impact
 
+- **Drafts have no explicit discard action.** They persist until saved or 30 days elapse. A
+  split/merge failure path also clears the current block's draft rather than rescuing it.
 - **Renamed notes leave stale typed-link text.** Existing `[[Old Title]]` text resolves to the
   renamed note because `formerNames` is recorded, but the visible text is not rewritten and a
   freshly typed `[[Old Title]]` will create a new note. Rewriting wikilink text on rename (or
@@ -244,8 +247,6 @@ ordering is still well-defined.
 - **Contribution credit is net length, not a real diff.** Replacing 100 characters with 100
   different characters credits zero. It is a reasonable MVP approximation; document it or
   move to a proper diff.
-- **Label geometry/color still need validation.** `addLabel`/`updateLabel` accept arbitrary
-  fields; add type/range checks and require the label to exist before updating.
 - **Link toolbar is rebuilt on every document update.** Even with `onchange`, typing can lose
   focus if an unrelated update re-renders the toolbar. Consider updating just the input value
   or not rebuilding while it has focus.
@@ -303,12 +304,18 @@ ordering is still well-defined.
   confirm the stored link is unchanged and nothing unusual appears in the canvas SVG.
 - [ ] Try a self-link and a duplicate link; both are rejected. Try setting an unknown style or a
   non-note page id; both are rejected.
+- [ ] Add/update a label with invalid coordinates, size, or color; the label is unchanged or
+  not created. Update/remove a missing label; no write occurs.
+- [ ] Edit a block, reload the page before blurring, reopen the note; the text must be restored
+  as an “unsaved draft” and save correctly when clicked.
+- [ ] Lose a block lock involuntarily; the draft tag appears and survives a reload.
+- [ ] Save a draft successfully and confirm the tag disappears and the localStorage key is
+  removed.
 - [ ] Run `node --check` over every `.mjs` file.
 
 ## 7. Suggested next steps
 
-1. Finish label validation (`addLabel`/`updateLabel`) and any remaining geometry range checks.
-2. Add explicit term/epoch handling for failover ordering if failover becomes important.
-3. Spike the encrypted-secrets design before Phase 8.
-4. Add a README and unit tests for the pure modules.
-5. Only then Phase 8 UI.
+1. Add explicit term/epoch handling for failover ordering if failover becomes important.
+2. Spike the encrypted-secrets design before Phase 8.
+3. Add a README and unit tests for the pure modules.
+4. Only then Phase 8 UI.

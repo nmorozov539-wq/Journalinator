@@ -13,7 +13,11 @@ const CHANNEL = `module.${MODULE_ID}`;
 const CONTRIBUTION_CAP = 2000;
 const MAX_TITLE_LENGTH = 200;
 const MAX_LABEL_LENGTH = 200;
+const MAX_LABEL_TEXT_LENGTH = 500;
 const MAX_BLOCK_LENGTH = 200000;
+const MAX_COORDINATE = 1000000;
+const MIN_LABEL_SIZE = 8;
+const MAX_LABEL_SIZE = 96;
 const LINK_DIRECTIONS = new Set(["none", "one", "two"]);
 const LINK_LINE_STYLES = new Set(["solid", "dashed"]);
 const LINK_COLORS = new Set(["", "#a393f2", "#d6a45c", "#d77b91"]);
@@ -82,6 +86,24 @@ function sanitizeLinkFields(fields) {
   }
   if (LINK_LINE_STYLES.has(fields.lineStyle)) clean.lineStyle = fields.lineStyle;
   return Object.keys(clean).length ? clean : null;
+}
+
+/** Accepts empty, a hex color, or a simple CSS color name; rejects anything else. */
+function sanitizeLabelColor(value) {
+  if (value === undefined || value === null || value === "") return "";
+  if (typeof value !== "string") return null;
+  const color = value.trim().toLowerCase();
+  if (/^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/.test(color) ||
+      /^[a-z]{3,20}$/.test(color)) return color;
+  return null;
+}
+
+function clampCoordinate(value) {
+  return Math.max(-MAX_COORDINATE, Math.min(MAX_COORDINATE, value));
+}
+
+function clampLabelSize(value) {
+  return Math.max(MIN_LABEL_SIZE, Math.min(MAX_LABEL_SIZE, value));
 }
 
 /**
@@ -383,14 +405,22 @@ async function handleMessage(message, senderUserId) {
     case "addLabel": {
       const layout = layoutPage(shared);
       if (!layout) return;
+      if (message.text !== undefined && typeof message.text !== "string") return;
+      const text = (message.text ?? "Label").slice(0, MAX_LABEL_TEXT_LENGTH);
+      const x = message.x === undefined ? 0 : message.x;
+      const y = message.y === undefined ? 0 : message.y;
+      const size = message.size === undefined ? 14 : message.size;
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(size)) return;
+      const color = sanitizeLabelColor(message.color);
+      if (color === null) return;
       const labelId = foundry.utils.randomID();
       await layout.update({
         [`system.labels.${labelId}`]: {
-          text: message.text ?? "Label",
-          x: message.x ?? 0,
-          y: message.y ?? 0,
-          size: message.size ?? 14,
-          color: message.color ?? ""
+          text,
+          x: clampCoordinate(x),
+          y: clampCoordinate(y),
+          size: clampLabelSize(size),
+          color
         }
       });
       return;
@@ -399,10 +429,33 @@ async function handleMessage(message, senderUserId) {
     case "updateLabel": {
       const layout = layoutPage(shared);
       if (!layout) return;
+      if (typeof message.labelId !== "string" || !layout.system.labels?.[message.labelId]) return;
       const updates = {};
-      for (const field of ["text", "x", "y", "size", "color"]) {
-        if (field in message) updates[`system.labels.${message.labelId}.${field}`] = message[field];
+      let changed = false;
+
+      if ("text" in message) {
+        if (typeof message.text !== "string") return;
+        updates[`system.labels.${message.labelId}.text`] = message.text.slice(0, MAX_LABEL_TEXT_LENGTH);
+        changed = true;
       }
+      for (const field of ["x", "y"]) {
+        if (!(field in message)) continue;
+        if (!Number.isFinite(message[field])) return;
+        updates[`system.labels.${message.labelId}.${field}`] = clampCoordinate(message[field]);
+        changed = true;
+      }
+      if ("size" in message) {
+        if (!Number.isFinite(message.size)) return;
+        updates[`system.labels.${message.labelId}.size`] = clampLabelSize(message.size);
+        changed = true;
+      }
+      if ("color" in message) {
+        const color = sanitizeLabelColor(message.color);
+        if (color === null) return;
+        updates[`system.labels.${message.labelId}.color`] = color;
+        changed = true;
+      }
+      if (!changed) return;
       await layout.update(updates);
       return;
     }
@@ -410,6 +463,7 @@ async function handleMessage(message, senderUserId) {
     case "removeLabel": {
       const layout = layoutPage(shared);
       if (!layout) return;
+      if (typeof message.labelId !== "string" || !layout.system.labels?.[message.labelId]) return;
       await layout.update({ [`system.labels.-=${message.labelId}`]: null });
       return;
     }

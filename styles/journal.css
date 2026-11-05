@@ -548,6 +548,10 @@
   background: var(--jn-lc, var(--jn-acc));
   color: #17171a;
 }
+.jn-draft-tag {
+  background: var(--jn-muted);
+  color: #17171a;
+}
 .jn-block-input {
   width: 100%;
   box-sizing: border-box;
