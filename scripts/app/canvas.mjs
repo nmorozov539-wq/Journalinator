@@ -4,6 +4,14 @@ import { hasAnyLock } from "../locks.mjs";
 const DRAG_THRESHOLD = 5;
 const LINK_COLORS = ["", "#a393f2", "#d6a45c", "#d77b91"];
 const LINK_DEFAULT_COLOR = "#8e8e9a";
+const LINK_DIRECTIONS = new Set(["none", "one", "two"]);
+const SAFE_LINK_COLORS = new Set(LINK_COLORS);
+
+/** Maps anything outside the toolbar palette to the default color before it reaches SVG markup. */
+function safeLinkColor(color) {
+  const normalized = typeof color === "string" ? color.toLowerCase() : "";
+  return SAFE_LINK_COLORS.has(normalized) ? normalized : "";
+}
 
 /**
  * The note canvas: pan/zoom viewport, absolutely-positioned cards, free text labels, and now
@@ -117,7 +125,8 @@ export default class JournalCanvas {
     const image = el.querySelector(".jn-card-image");
     if (note.system.image) {
       image.hidden = false;
-      image.style.backgroundImage = `url("${note.system.image}")`;
+      const imageUrl = String(note.system.image).replace(/["\\]/g, "\\$&");
+      image.style.backgroundImage = `url("${imageUrl}")`;
     } else {
       image.hidden = true;
     }
@@ -179,18 +188,20 @@ export default class JournalCanvas {
         const c1 = [p.x + p.nx * o, p.y + p.ny * o], c2 = [r.x + r.nx * o, r.y + r.ny * o];
         const d = `M${p.x},${p.y} C${c1} ${c2} ${r.x},${r.y}`;
         const mx = (p.x + 3 * c1[0] + 3 * c2[0] + r.x) / 8, my = (p.y + 3 * c1[1] + 3 * c2[1] + r.y) / 8;
-        const color = link.color || LINK_DEFAULT_COLOR;
+        const color = safeLinkColor(link.color) || LINK_DEFAULT_COLOR;
+        const direction = LINK_DIRECTIONS.has(link.direction) ? link.direction : "none";
         colorsUsed.add(color);
         const selected = link.id === this.selectedLinkId;
         const markerId = `jn-arrow-${color.replace("#", "")}`;
         const dimmed = dimmedIds.has(note._id) || dimmedIds.has(link.targetId);
+        const linkId = foundry.utils.escapeHTML(String(link.id ?? ""));
 
-        body += `<g data-id="${link.id}" opacity="${dimmed ? 0.15 : 1}">
+        body += `<g data-id="${linkId}" opacity="${dimmed ? 0.15 : 1}">
           <path d="${d}" fill="none" stroke="${color}" stroke-width="${selected ? 3.5 : 2}"
             ${link.lineStyle === "dashed" ? 'stroke-dasharray="7 6"' : ""}
-            ${link.direction !== "none" ? `marker-end="url(#${markerId})"` : ""}
-            ${link.direction === "two" ? `marker-start="url(#${markerId})"` : ""}/>
-          <path class="jn-link-hit" data-id="${link.id}" d="${d}"/>
+            ${direction !== "none" ? `marker-end="url(#${markerId})"` : ""}
+            ${direction === "two" ? `marker-start="url(#${markerId})"` : ""}/>
+          <path class="jn-link-hit" data-id="${linkId}" d="${d}"/>
           ${link.label ? `<text class="jn-link-label" x="${mx}" y="${my + 4}">${foundry.utils.escapeHTML(link.label)}</text>` : ""}
         </g>`;
 
@@ -214,10 +225,12 @@ export default class JournalCanvas {
     this.linkToolbar.style.left = `${link.mx * this.view.k + this.view.x}px`;
     this.linkToolbar.style.top = `${link.my * this.view.k + this.view.y}px`;
     this.linkToolbar.style.display = "flex";
+    const currentColor = safeLinkColor(link.color);
+    const direction = LINK_DIRECTIONS.has(link.direction) ? link.direction : "none";
     this.linkToolbar.innerHTML = `
       <input type="text" class="jn-link-label-input" placeholder="Label" value="${foundry.utils.escapeHTML(link.label ?? "")}">
-      <button type="button" class="jn-link-dir" title="Direction">${{ none: "—", one: "→", two: "↔" }[link.direction]}</button>
-      <span class="jn-link-colors">${LINK_COLORS.map(c => `<button type="button" class="jn-link-color${c === (link.color || "") ? " on" : ""}" data-color="${c}" style="background:${c || LINK_DEFAULT_COLOR}"></button>`).join("")}</span>
+      <button type="button" class="jn-link-dir" title="Direction">${{ none: "—", one: "→", two: "↔" }[direction]}</button>
+      <span class="jn-link-colors">${LINK_COLORS.map(c => `<button type="button" class="jn-link-color${c === currentColor ? " on" : ""}" data-color="${c}" style="background:${c || LINK_DEFAULT_COLOR}"></button>`).join("")}</span>
       <button type="button" class="jn-link-dash" title="Line style">${link.lineStyle === "dashed" ? "┄┄" : "──"}</button>
       <button type="button" class="jn-link-delete" title="Delete link">✕</button>
     `;
@@ -227,7 +240,7 @@ export default class JournalCanvas {
     // per label edit, matching the block-save rule in spec §6.2.
     this.linkToolbar.querySelector(".jn-link-label-input").onchange = ev => update({ label: ev.target.value });
     this.linkToolbar.querySelector(".jn-link-dir").onclick = () =>
-      update({ direction: { none: "one", one: "two", two: "none" }[link.direction] });
+      update({ direction: { none: "one", one: "two", two: "none" }[direction] });
     this.linkToolbar.querySelectorAll(".jn-link-color").forEach(btn => {
       btn.onclick = () => update({ color: btn.dataset.color });
     });

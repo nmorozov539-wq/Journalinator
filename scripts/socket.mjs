@@ -11,6 +11,12 @@ import {
 const MODULE_ID = "fvtt-journalinator";
 const CHANNEL = `module.${MODULE_ID}`;
 const CONTRIBUTION_CAP = 2000;
+const MAX_TITLE_LENGTH = 200;
+const MAX_LABEL_LENGTH = 200;
+const MAX_BLOCK_LENGTH = 200000;
+const LINK_DIRECTIONS = new Set(["none", "one", "two"]);
+const LINK_LINE_STYLES = new Set(["solid", "dashed"]);
+const LINK_COLORS = new Set(["", "#a393f2", "#d6a45c", "#d77b91"]);
 
 /**
  * All GM-side write handling is serialized through this promise chain. Socket handlers are
@@ -62,6 +68,20 @@ function notifyUser(userId, reason) {
     return;
   }
   game.socket.emit(CHANNEL, { type: "writeRejected", forUserId: userId, reason: text });
+}
+
+/** Keeps only the fields a link toolbar is allowed to change, with validated values. */
+function sanitizeLinkFields(fields) {
+  if (!fields || typeof fields !== "object") return null;
+  const clean = {};
+  if (typeof fields.label === "string") clean.label = fields.label.slice(0, MAX_LABEL_LENGTH);
+  if (LINK_DIRECTIONS.has(fields.direction)) clean.direction = fields.direction;
+  if (typeof fields.color === "string") {
+    const color = fields.color.toLowerCase();
+    if (LINK_COLORS.has(color)) clean.color = color;
+  }
+  if (LINK_LINE_STYLES.has(fields.lineStyle)) clean.lineStyle = fields.lineStyle;
+  return Object.keys(clean).length ? clean : null;
 }
 
 /**
@@ -120,10 +140,14 @@ function findFreeSpot(cards, w, h, nearX, nearY) {
 }
 
 async function createNotePage(shared, { title, style, x, y, authorId, autoTitle = false }) {
-  style = CARD_STYLES[style] ? style : "sticky";
+  style = typeof style === "string" && Object.hasOwn(CARD_STYLES, style) ? style : "sticky";
   const requestedTitle = (title ?? "").trim() || "Untitled";
   const finalTitle = autoTitle ? uniqueTitle(shared, requestedTitle) : requestedTitle;
 
+  if (finalTitle.length > MAX_TITLE_LENGTH) {
+    notifyUser(authorId, `Titles must be ${MAX_TITLE_LENGTH} characters or fewer.`);
+    return null;
+  }
   if (!autoTitle && findNoteByTitle(shared, finalTitle)) {
     notifyUser(authorId, `A note titled "${finalTitle}" already exists.`);
     return null;
@@ -220,6 +244,10 @@ async function handleMessage(message, senderUserId) {
         notifyUser(senderUserId, "A note title cannot be empty.");
         return;
       }
+      if (title.length > MAX_TITLE_LENGTH) {
+        notifyUser(senderUserId, `Titles must be ${MAX_TITLE_LENGTH} characters or fewer.`);
+        return;
+      }
       if (findNoteByTitle(shared, title, page.id)) {
         notifyUser(senderUserId, `A note titled "${title}" already exists.`);
         return;
@@ -240,7 +268,8 @@ async function handleMessage(message, senderUserId) {
 
     case "saveBlock": {
       const page = shared.pages.get(message.noteId);
-      if (!page) return;
+      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
+      if (typeof message.text !== "string" || message.text.length > MAX_BLOCK_LENGTH) return;
       if (!authoritativeHolds(message.noteId, message.blockId, senderUserId)) return; // doesn't hold the lock — ignore
       const blocks = page.system.blocks ?? [];
       const index = blocks.findIndex(b => b.blockId === message.blockId);
@@ -260,7 +289,9 @@ async function handleMessage(message, senderUserId) {
 
     case "splitBlock": {
       const page = shared.pages.get(message.noteId);
-      if (!page) return;
+      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
+      if (typeof message.beforeText !== "string" || typeof message.afterText !== "string") return;
+      if (message.beforeText.length + message.afterText.length > MAX_BLOCK_LENGTH) return;
       if (!authoritativeHolds(message.noteId, message.blockId, senderUserId)) return;
       const blocks = page.system.blocks ?? [];
       const index = blocks.findIndex(b => b.blockId === message.blockId);
@@ -279,7 +310,7 @@ async function handleMessage(message, senderUserId) {
 
     case "mergeBlockUp": {
       const page = shared.pages.get(message.noteId);
-      if (!page) return;
+      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
       const blocks = page.system.blocks ?? [];
       const index = blocks.findIndex(b => b.blockId === message.blockId);
       if (index <= 0) return; // no previous block to merge into
@@ -306,19 +337,26 @@ async function handleMessage(message, senderUserId) {
 
     case "setNoteStyle": {
       const page = shared.pages.get(message.noteId);
-      if (!page) return;
+      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
+      if (typeof message.style !== "string" || !Object.hasOwn(CARD_STYLES, message.style)) return;
       await page.update({ "system.style": message.style });
       return;
     }
 
     case "setNoteImage": {
       const page = shared.pages.get(message.noteId);
-      if (!page) return;
-      await page.update({ "system.image": message.image || null });
+      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
+      if (message.image !== null && typeof message.image !== "string") return;
+      const image = typeof message.image === "string" ? message.image.trim() : null;
+      if (image && image.length > 1000) return;
+      await page.update({ "system.image": image || null });
       return;
     }
 
     case "moveCard": {
+      const note = shared.pages.get(message.noteId);
+      if (!note || note.type !== `${MODULE_ID}.note` || note.system.deleted) return;
+      if (!Number.isFinite(message.x) || !Number.isFinite(message.y)) return;
       const layout = layoutPage(shared);
       if (!layout) return;
       await layout.update({
@@ -329,6 +367,10 @@ async function handleMessage(message, senderUserId) {
     }
 
     case "resizeCard": {
+      const note = shared.pages.get(message.noteId);
+      if (!note || note.type !== `${MODULE_ID}.note` || note.system.deleted) return;
+      const validSize = value => value === null || (Number.isFinite(value) && value > 0);
+      if (!validSize(message.width) || !validSize(message.height)) return;
       const layout = layoutPage(shared);
       if (!layout) return;
       await layout.update({
@@ -374,8 +416,13 @@ async function handleMessage(message, senderUserId) {
 
     case "createLink": {
       const page = shared.pages.get(message.sourceId);
-      if (!page) return;
-      const links = [...(page.system.links ?? []), {
+      const target = shared.pages.get(message.targetId);
+      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
+      if (!target || target.type !== `${MODULE_ID}.note` || target.system.deleted) return;
+      if (message.sourceId === message.targetId) return;
+      const links = [...(page.system.links ?? [])];
+      if (links.some(link => link.targetId === message.targetId)) return;
+      links.push({
         id: foundry.utils.randomID(),
         targetId: message.targetId,
         label: "",
@@ -385,7 +432,7 @@ async function handleMessage(message, senderUserId) {
         origin: "drawn",
         edited: false,
         createdBy: senderUserId
-      }];
+      });
       await page.update({ "system.links": links });
       await recordActivity(senderUserId, { links: 1 });
       return;
@@ -393,17 +440,21 @@ async function handleMessage(message, senderUserId) {
 
     case "updateLink": {
       const page = shared.pages.get(message.noteId);
-      if (!page) return;
-      const links = (page.system.links ?? []).map(link =>
-        link.id === message.linkId ? { ...link, ...message.fields, edited: true } : link
+      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
+      const links = page.system.links ?? [];
+      if (!links.some(link => link.id === message.linkId)) return;
+      const fields = sanitizeLinkFields(message.fields);
+      if (!fields) return;
+      const nextLinks = links.map(link =>
+        link.id === message.linkId ? { ...link, ...fields, edited: true } : link
       );
-      await page.update({ "system.links": links });
+      await page.update({ "system.links": nextLinks });
       return;
     }
 
     case "deleteLink": {
       const page = shared.pages.get(message.noteId);
-      if (!page) return;
+      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
       const links = (page.system.links ?? []).filter(link => link.id !== message.linkId);
       await page.update({ "system.links": links });
       return;
@@ -411,7 +462,7 @@ async function handleMessage(message, senderUserId) {
 
     case "newLinkedNote": {
       const sourcePage = shared.pages.get(message.sourceId);
-      if (!sourcePage || sourcePage.system.deleted) return;
+      if (!sourcePage || sourcePage.type !== `${MODULE_ID}.note` || sourcePage.system.deleted) return;
       const layout = layoutPage(shared);
       const sourceCard = layout?.system.cards[message.sourceId] ?? { x: 0, y: 0 };
       const newPage = await createNotePage(shared, {
@@ -437,7 +488,7 @@ async function handleMessage(message, senderUserId) {
 
     case "deleteNote": {
       const page = shared.pages.get(message.noteId);
-      if (!page) return;
+      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
       const layout = layoutPage(shared);
       const lastCard = layout?.system.cards[message.noteId] ?? null;
       await page.update({ "system.deleted": { at: Date.now(), by: senderUserId, lastCard } });
@@ -447,7 +498,7 @@ async function handleMessage(message, senderUserId) {
 
     case "restoreNote": {
       const page = shared.pages.get(message.noteId);
-      if (!page || !page.system.deleted) return;
+      if (!page || page.type !== `${MODULE_ID}.note` || !page.system.deleted) return;
       const layout = layoutPage(shared);
       const lastCard = page.system.deleted.lastCard;
       let spot;

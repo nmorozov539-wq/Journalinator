@@ -64,6 +64,13 @@ Foundry.
    place cards through `findFreeSpot`; toolbar/switcher creates start at the viewport center.
    This also fixed an inverted overlap test in `findFreeSpot`: it previously treated separated
    cards as overlapping and happily returned occupied coordinates.
+7. **The GM write path now validates hostile payloads.** `updateLink` whitelists only
+   `label`/`direction`/`color`/`lineStyle`, validates each against its allowed set, and rejects
+   edits that would change a link's `id` or `targetId`. `createLink` rejects self-links,
+   duplicates, and deleted/missing targets. Styles/images/title lengths/block text/card
+   geometry are type- and range-checked, and note-page type checks reject attempts to target
+   layout/stats/history pages. Card images are CSS-escaped, and link colors/IDs are sanitized
+   again at render time before entering SVG.
 
 These are incremental fixes; the larger issues below remain.
 
@@ -166,24 +173,25 @@ consistent.
 **All payload fields are hostile.** The sender id is trustworthy; everything else is not.
 Validate every field in `handleMessage`:
 
-- `createNote`: title uniqueness/empty-title checks and style coercion are implemented; keep
-  length limits and any new fields validated.
-- `newLinkedNote`: title checks are implemented; source existence/deletion is checked; still
-  validate the title field itself at the boundary.
-- `renameNote`: title uniqueness/empty-title checks are implemented; add a length cap if the
-  UI or Foundry name limits become an issue.
-- `saveBlock`: validate text is a string, note exists and is not deleted, sender holds the
-  lock, block belongs to the note.
-- `splitBlock` / `mergeBlockUp`: same, plus require both locks for merge and keep the
-  original block id.
-- `setNoteStyle`: validate against `CARD_STYLES`; currently any string is accepted.
-- `setNoteImage`: rely on `FilePathField` validation, but reject non-image paths explicitly.
-- `createLink`: target exists, is not the source, is not deleted; dedupe repeated links.
-- `updateLink`: whitelist `label`, `direction`, `color`, `lineStyle`; validate each value;
-  never allow `id`/`targetId` to change through `...message.fields`.
-- `moveCard` / `resizeCard`: note/card must exist; clamp absurd dimensions and coordinates.
-- `deleteNote`: make idempotent; do not overwrite `lastCard` if the note is already deleted.
-- `restoreNote`: title collisions are auto-suffixed; keep the deleted/free-spot checks.
+- `createNote`: title uniqueness/empty-title/length checks and style coercion are implemented.
+- `newLinkedNote`: title checks and source note type/deletion checks are implemented.
+- `renameNote`: title uniqueness/empty-title/length checks and note-page type checks are implemented.
+- `saveBlock`: text is type- and length-checked, note/page type and deletion are checked, and
+  the lock is required.
+- `splitBlock` / `mergeBlockUp`: same, plus both locks are required for merge and the original
+  block id is kept.
+- `setNoteStyle`: validated against `CARD_STYLES`.
+- `setNoteImage`: accepts null or a bounded string; `FilePathField` handles the rest.
+- `createLink`: target/source are note pages, live, distinct, and duplicates are rejected.
+- `updateLink`: only `label`/`direction`/`color`/`lineStyle` are accepted, each validated;
+  `id`/`targetId` cannot be changed.
+- `moveCard` / `resizeCard`: note/page type and deletion are checked; coordinates must be
+  finite and dimensions positive or null.
+- `deleteNote`: idempotent; a second delete leaves `lastCard` intact.
+- `restoreNote`: page type, deleted state, and title collisions are handled; free-spot logic is
+  intact.
+- `addLabel` / `updateLabel`: still need type/range validation for `text`, `x`, `y`, `size`,
+  `color`, and a check that the label exists before updating.
 - `emptyTrash` / `addSessionMarker`: keep the sender `isGM` check; also handle the case where
   the sender user no longer exists.
 
@@ -207,7 +215,7 @@ ordering is still well-defined.
 
 ### 4.4 Suggested GM-side order
 
-1. Remaining payload validation, especially `updateLink` field whitelisting and color/style validation.
+1. Finish label validation (`addLabel`/`updateLabel`).
 2. Term/epoch for failover ordering if it becomes important.
 3. Secrets storage spike (section 3).
 4. Only then Phase 8 UI.
@@ -236,20 +244,13 @@ ordering is still well-defined.
 - **Contribution credit is net length, not a real diff.** Replacing 100 characters with 100
   different characters credits zero. It is a reasonable MVP approximation; document it or
   move to a proper diff.
-- **Link color is injected into raw SVG.** `scripts/app/canvas.mjs` interpolates
-  `link.color` into `stroke`, marker ids, and attribute strings. A hostile client can send
-  arbitrary SVG/attribute content through `updateLink`. Validate against the allowed palette
-  (and validate `direction`/`lineStyle`) on the GM.
-- **Card image paths go into CSS `url("...")` without escaping.** Escape quotes/backslashes,
-  or build the style with `CSS.escape`/a safe allowlist.
+- **Label geometry/color still need validation.** `addLabel`/`updateLabel` accept arbitrary
+  fields; add type/range checks and require the label to exist before updating.
 - **Link toolbar is rebuilt on every document update.** Even with `onchange`, typing can lose
   focus if an unrelated update re-renders the toolbar. Consider updating just the input value
   or not rebuilding while it has focus.
 - **Search/filter interaction.** The quick-switcher list ignores author/style filter chips;
   the spec says filters combine with search. Decide whether the dropdown should apply them too.
-- **`createLink` does not prevent self-links or duplicates.**
-- **`deleteNote` is not idempotent.** Calling it twice overwrites `lastCard` with `null`,
-  losing the restore position.
 - **`emptyTrash` assumes the history entry/page still exists.** If the history container was
   deleted, the page lookup is null and snapshot cleanup is skipped; the delete itself still
   works. `ensureContainers` also only repairs a missing history page, not missing layout/stats
@@ -298,11 +299,15 @@ ordering is still well-defined.
   source note. The link must still target the renamed note, not create a new note.
 - [ ] Restore a trashed note whose title was reused; it should return with a suffixed title and
   the requester should see a notice.
+- [ ] Send an `updateLink` message with `id`/`targetId` or an invalid color/direction/style and
+  confirm the stored link is unchanged and nothing unusual appears in the canvas SVG.
+- [ ] Try a self-link and a duplicate link; both are rejected. Try setting an unknown style or a
+  non-note page id; both are rejected.
 - [ ] Run `node --check` over every `.mjs` file.
 
 ## 7. Suggested next steps
 
-1. Add the remaining payload validation, especially link color/direction/style and updateLink field whitelisting.
+1. Finish label validation (`addLabel`/`updateLabel`) and any remaining geometry range checks.
 2. Add explicit term/epoch handling for failover ordering if failover becomes important.
 3. Spike the encrypted-secrets design before Phase 8.
 4. Add a README and unit tests for the pure modules.
