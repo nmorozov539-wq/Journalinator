@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#11100d">
+    <meta name="description" content="Investigation Board — совместный журнал и бесконечная доска расследований для Foundry VTT 14.">
+    <meta property="og:title" content="Investigation Board для Foundry VTT">
+    <meta property="og:description" content="Заметки, улики и связи на одном совместном холсте.">
+    <meta property="og:type" content="website">
+    <title>Investigation Board — Foundry VTT</title>
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="assets/site.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#content">Перейти к содержимому</a>
+
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="Investigation Board — в начало">
+        <span class="brand-mark" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </span>
+        <span>Investigation Board</span>
+      </a>
+      <nav class="site-nav" aria-label="Главная навигация">
+        <a href="#features">Возможности</a>
+        <a href="#controls">Управление</a>
+        <a href="#install">Установка</a>
+        <a class="nav-github" href="https://github.com/Larkar789/investigation-board">GitHub <span aria-hidden="true">↗</span></a>
+      </nav>
+    </header>
+
+    <main id="content">
+      <section class="hero" id="top">
+        <div class="hero-copy">
+          <div class="eyebrow"><span class="status-dot"></span> Alpha для Foundry VTT 14.367</div>
+          <h1>Расследование,<br><em>которое видят все.</em></h1>
+          <p class="hero-lead">Совместный журнал и бесконечный холст для улик, версий и связей. Игроки собирают материалы в одном месте, а история расследования складывается прямо во время сессии.</p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="https://github.com/Larkar789/investigation-board/releases/latest">
+              <span aria-hidden="true">↓</span> Скачать alpha
+            </a>
+            <a class="button button-secondary" href="https://github.com/Larkar789/investigation-board">
+              Исходный код <span aria-hidden="true">↗</span>
+            </a>
+          </div>
+          <div class="hero-meta" aria-label="Сведения о совместимости">
+            <span><strong>v0.3.0-alpha.1</strong> текущая версия</span>
+            <span><strong>Foundry 14</strong> совместимость</span>
+            <span><strong>RU / EN</strong> локализация</span>
+          </div>
+        </div>
+
+        <div class="board-shell" aria-label="Макет интерфейса Investigation Board">
+          <div class="window-bar">
+            <div class="window-dots" aria-hidden="true"><i></i><i></i><i></i></div>
+            <span>Дело «Чёрная вода»</span>
+            <div class="window-users" aria-label="Три участника онлайн">
+              <b>Л</b><b>М</b><b>А</b>
+            </div>
+          </div>
+          <div class="app-preview">
+            <aside class="preview-drawer">
+              <div class="preview-label">Заметки <span>6</span></div>
+              <div class="preview-search">⌕&nbsp;&nbsp; Найти улику…</div>
+              <div class="drawer-note active"><i class="pin red"></i><span><b>Сгоревшая записка</b><small>Найдена в кабинете</small></span></div>
+              <div class="drawer-note"><i class="pin amber"></i><span><b>Мэри Уэллс</b><small>Свидетель</small></span></div>
+              <div class="drawer-note"><i class="pin blue"></i><span><b>Портовый журнал</b><small>12 октября</small></span></div>
+              <div class="drawer-note faded"><i class="pin"></i><span><b>Старый маяк</b><small>Место</small></span></div>
+            </aside>
+
+            <div class="preview-canvas">
+              <div class="canvas-tools"><span>−</span><b>76%</b><span>+</span><i></i><span>⌖</span></div>
+              <svg class="connections" viewBox="0 0 650 450" preserveAspectRatio="none" aria-hidden="true">
+                <path class="thread thread-red" d="M112 122 C245 60, 270 162, 392 120"></path>
+                <path class="thread thread-amber" d="M170 165 C210 250, 315 250, 352 305"></path>
+                <path class="thread thread-blue" d="M450 165 C500 220, 490 275, 443 312"></path>
+                <circle cx="112" cy="122" r="4"></circle><circle cx="392" cy="120" r="4"></circle>
+              </svg>
+              <article class="evidence-card sticky card-a">
+                <div class="tape"></div>
+                <div class="card-type">УЛИКА</div>
+                <h3>Сгоревшая записка</h3>
+                <p>«…встретимся у старого маяка после полуночи»</p>
+                <footer><span>Ларкар</span><span>2 связи</span></footer>
+                <i class="link-handle"></i>
+              </article>
+              <article class="evidence-card paper card-b">
+                <div class="red-stamp">ВАЖНО</div>
+                <div class="card-type">ПЕРСОНА</div>
+                <h3>Капитан Морроу</h3>
+                <ul><li>скрыл маршрут судна</li><li>знал смотрителя маяка</li></ul>
+                <footer><span>Мария</span><span>3 связи</span></footer>
+                <i class="link-handle"></i>
+              </article>
+              <article class="evidence-card dark-card card-c">
+                <div class="card-type">МЕСТО</div>
+                <h3>Старый маяк</h3>
+                <p>Заброшен семь лет назад. Свет видели ночью 12 октября.</p>
+                <footer><span>Алекс</span><span>1 связь</span></footer>
+                <i class="link-handle"></i>
+              </article>
+              <span class="connection-label label-a">подозреваемый</span>
+              <span class="connection-label label-b">встреча</span>
+            </div>
+
+            <aside class="preview-editor">
+              <div class="editor-heading"><span>Редактор</span><b>×</b></div>
+              <label>Название</label>
+              <div class="editor-input">Сгоревшая записка</div>
+              <label>Текст</label>
+              <div class="editor-area"><strong>Фрагмент документа</strong><br><br>В нижней части сохранилась фраза:<br><mark>«…у старого маяка…»</mark></div>
+              <div class="lock-state"><span>●</span> Вы редактируете</div>
+              <button type="button" tabindex="-1">Сохранить запись</button>
+            </aside>
+          </div>
+        </div>
+      </section>
+
+      <section class="statement" aria-label="Краткое описание">
+        <p>Не просто набор стикеров.</p>
+        <h2>Живой журнал кампании, где каждая улика сохраняет контекст, автора и связи.</h2>
+      </section>
+
+      <section class="features section" id="features">
+        <div class="section-heading">
+          <span class="section-number">01</span>
+          <div><p class="kicker">Возможности</p><h2>Всё дело — перед глазами</h2></div>
+        </div>
+        <div class="feature-grid">
+          <article class="feature feature-wide">
+            <div class="feature-icon network-icon" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+            <p class="feature-index">01 / СВЯЗИ</p>
+            <h3>Соединяйте факты</h3>
+            <p>Протяните линию от одной карточки к другой. Настройте подпись, направление, цвет и стиль — гипотеза останется читаемой даже в большом деле.</p>
+          </article>
+          <article class="feature">
+            <div class="feature-icon" aria-hidden="true">⌁</div>
+            <p class="feature-index">02 / ХОЛСТ</p>
+            <h3>Без ограничений по сцене</h3>
+            <p>Масштабируйте, перемещайтесь правой кнопкой мыши и раскладывайте материалы так, как думает ваша группа.</p>
+          </article>
+          <article class="feature">
+            <div class="feature-icon" aria-hidden="true">✎</div>
+            <p class="feature-index">03 / ЗАМЕТКИ</p>
+            <h3>Пишите вместе</h3>
+            <p>Блокировки редактирования через GM защищают изменения игроков, а вклад каждого участника остаётся видимым.</p>
+          </article>
+          <article class="feature">
+            <div class="feature-icon" aria-hidden="true">[[ ]]</div>
+            <p class="feature-index">04 / WIKILINKS</p>
+            <h3>Ссылайтесь на записи</h3>
+            <p>Используйте <code>[[название]]</code>, чтобы связать текстовые заметки. Обратные ссылки покажут, где ещё упоминается улика.</p>
+          </article>
+          <article class="feature feature-dark">
+            <div class="feature-icon" aria-hidden="true">⌕</div>
+            <p class="feature-index">05 / ПОИСК</p>
+            <h3>Не теряйте важное</h3>
+            <p>Поиск, фильтры по стилю и размещению, переход к карточке и корзина с восстановлением помогают держать большое дело в порядке.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="workflow section">
+        <div class="section-heading">
+          <span class="section-number">02</span>
+          <div><p class="kicker">Рабочий процесс</p><h2>От находки до версии</h2></div>
+        </div>
+        <ol class="workflow-list">
+          <li><span>1</span><div><h3>Запишите</h3><p>Создайте улику в общем журнале прямо во время сцены.</p></div></li>
+          <li><span>2</span><div><h3>Разместите</h3><p>Перетащите запись на холст и выберите визуальный стиль.</p></div></li>
+          <li><span>3</span><div><h3>Свяжите</h3><p>Проведите нити между персонажами, местами и событиями.</p></div></li>
+          <li><span>4</span><div><h3>Проверьте</h3><p>Используйте wikilinks, обратные ссылки и поиск для проверки гипотезы.</p></div></li>
+        </ol>
+      </section>
+
+      <section class="controls section" id="controls">
+        <div class="section-heading light">
+          <span class="section-number">03</span>
+          <div><p class="kicker">Управление</p><h2>Привычно с первого движения</h2></div>
+        </div>
+        <div class="controls-grid">
+          <div class="control"><span class="mouse-icon wheel"><i></i></span><div><h3>Колесо мыши</h3><p>Масштаб к положению указателя</p></div></div>
+          <div class="control"><span class="mouse-icon right"><i></i></span><div><h3>Правая кнопка</h3><p>Перемещение по холсту в любой момент</p></div></div>
+          <div class="control"><span class="drag-icon">↔</span><div><h3>Заголовок карточки</h3><p>Перемещение записи по доске</p></div></div>
+          <div class="control"><span class="node-icon">●━●</span><div><h3>Круглый коннектор</h3><p>Создание связи между карточками</p></div></div>
+          <div class="control"><span class="key-icon">Ctrl</span><div><h3>Ctrl + Shift + I</h3><p>Открыть Investigation Board</p></div></div>
+          <div class="control"><span class="corner-icon">⌟</span><div><h3>Нижний угол</h3><p>Изменение размера карточки</p></div></div>
+        </div>
+      </section>
+
+      <section class="install section" id="install">
+        <div class="install-card">
+          <div class="install-copy">
+            <p class="kicker">Установка</p>
+            <h2>Добавьте доску<br>в свою кампанию</h2>
+            <p>Alpha-версия предназначена для Foundry VTT 14.367. Перед обновлением мира сделайте резервную копию.</p>
+            <a class="button button-primary" href="https://github.com/Larkar789/investigation-board/releases/latest"><span aria-hidden="true">↓</span> Скачать v0.3.0-alpha.1</a>
+          </div>
+          <ol class="install-steps">
+            <li><span>01</span><div><h3>Скачайте архив</h3><p>Откройте последний GitHub Release и загрузите ZIP-файл модуля.</p></div></li>
+            <li><span>02</span><div><h3>Распакуйте модуль</h3><p>Поместите папку <code>investigation-board</code> в <code>Data/modules/</code> вашего Foundry.</p></div></li>
+            <li><span>03</span><div><h3>Активируйте в мире</h3><p>Перезапустите Foundry и включите модуль в управлении модулями.</p></div></li>
+          </ol>
+        </div>
+        <div class="alpha-note">
+          <strong>Статус alpha</strong>
+          <p>Основной совместный журнал уже работает. Скрытый GM-слой запланирован на следующую итерацию и пока не включён.</p>
+          <a href="Collaborative%20Notes%20Canvas%20Module%20Spec.md">Прочитать функциональную спецификацию →</a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <a class="brand footer-brand" href="#top"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span><span>Investigation Board</span></a>
+      <p>Независимый модуль сообщества для Foundry Virtual Tabletop.</p>
+      <div><a href="https://github.com/Larkar789/investigation-board">GitHub</a><a href="https://github.com/Larkar789/investigation-board/issues">Сообщить об ошибке</a><a href="Collaborative%20Notes%20Canvas%20Module%20Spec.md">Спецификация</a></div>
+    </footer>
+  </body>
+</html>

@@ -2,6 +2,8 @@
 
 An Obsidian-inspired shared notes journal and investigation canvas for Foundry Virtual Tabletop v14. This is the `fork/collaborative-notes-canvas` variant of Investigation Board.
 
+[Project page](https://larkar789.github.io/investigation-board/) · [Latest release](https://github.com/Larkar789/investigation-board/releases/latest) · [Source code](https://github.com/Larkar789/investigation-board)
+
 ## Included in this alpha
 
 - One shared journal and one infinite canvas.

@@ -3,6 +3,9 @@
   "title": "Investigation Board — Collaborative Journal",
   "description": "An Obsidian-inspired shared notes journal with an infinite investigation canvas, block locks, curved links, trash, and contribution statistics.",
   "version": "0.3.0-alpha.1",
+  "url": "https://larkar789.github.io/investigation-board/",
+  "manifest": "https://raw.githubusercontent.com/Larkar789/investigation-board/fork/collaborative-notes-canvas/investigation-board/module.json",
+  "download": "https://github.com/Larkar789/investigation-board/releases/download/v0.3.0-alpha.1/investigation-board-0.3.0-alpha.1.zip",
   "authors": [
     {
       "name": "Investigation Board contributors"
