@@ -2,6 +2,19 @@ import { notesStore } from "../store/notes-store.mjs";
 import { requestWrite } from "../socket.mjs";
 import { requestLock, releaseLock, sendHeartbeat, requestLockState, getLock, isHeldByMe } from "../locks.mjs";
 import { CARD_STYLES } from "../styles/registry.mjs";
+import * as secrets from "../secrets/secret-actions.mjs";
+import { stripSecretPrefix } from "../secrets/model.mjs";
+
+const { DialogV2 } = foundry.applications.api;
+const esc = text => foundry.utils.escapeHTML(String(text ?? ""));
+
+/** Runs a GM vault action and surfaces failures (e.g. the vault was locked meanwhile). */
+function gm(job) {
+  return Promise.resolve().then(job).catch(err => {
+    console.error(err);
+    ui.notifications.error(err.message);
+  });
+}
 
 const HEARTBEAT_INTERVAL_MS = 8000;
 const DRAFT_SAVE_DELAY_MS = 300;
@@ -22,11 +35,12 @@ const DRAFT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
  */
 export default class NoteEditor {
   constructor(callbacks) {
-    this.callbacks = callbacks; // { onFocusNote(id) }
+    this.callbacks = callbacks; // { onFocusNote(id), onSelectNote(id) }
     this.root = document.createElement("div");
     this.root.className = "journalinator-editor-inner";
     this.noteId = null;
     this.editingBlockId = null;
+    this.editingSecret = false; // editing a GM-only block: local, no lock, saved to the vault
     this.pendingBlockId = null;
     this.pendingMerge = null; // { blockId, prevBlockId }
     this.drafts = new Map();
@@ -111,9 +125,11 @@ export default class NoteEditor {
       .map(([key, def]) => `<option value="${key}" ${note.system.style === key ? "selected" : ""}>${def.label}</option>`)
       .join("");
     const backlinks = allNotes
-      .filter(n => (n.system.links ?? []).some(l => l.targetId === note._id))
-      .map(n => `<button type="button" class="journalinator-chip" data-id="${n._id}">${foundry.utils.escapeHTML(n.name)}</button>`)
+      .map(n => [n, (n.system.links ?? []).find(l => l.targetId === note._id)])
+      .filter(([, link]) => link)
+      .map(([n, link]) => `<button type="button" class="journalinator-chip${link.hidden ? " jn-chip-hidden" : ""}" data-id="${n._id}"${link.hidden ? ' title="GM-only link"' : ""}>${foundry.utils.escapeHTML(n.name)}</button>`)
       .join("") || `<small class="journalinator-meta">None yet</small>`;
+    const gmView = notesStore.merged;
     const contributors = Object.entries(note.system.contributions ?? {})
       .sort((a, b) => b[1] - a[1])
       .map(([userId, chars]) => `${foundry.utils.escapeHTML(game.users.get(userId)?.name ?? "someone")} (${chars})`)
@@ -125,8 +141,18 @@ export default class NoteEditor {
         <b>${foundry.utils.escapeHTML(note.name)}</b>
         <button type="button" class="journalinator-rename" title="Rename note">&#9998;</button>
         <button type="button" class="journalinator-authors-toggle">${this.showAuthors ? "Hide authors" : "Authors"}</button>
-        <button type="button" class="journalinator-delete" title="Move to trash">&#128465;</button>
+        <button type="button" class="journalinator-delete" title="${note.secret ? "Delete permanently" : "Move to trash"}">&#128465;</button>
       </div>
+      ${note.secret ? `
+        <div class="jn-gm-banner">
+          <span>GM only &middot; players can't see this note</span>
+          <button type="button" class="journalinator-declassify">Declassify&hellip;</button>
+        </div>` : ""}
+      ${gmView && !note.secret ? `
+        <div class="journalinator-row jn-gm-row">
+          <button type="button" class="journalinator-hint-toggle${note.system.hint ? " on" : ""}" title="Hint notes are visible to players and marked as coming from the GM">&#10022; ${note.system.hint ? "GM hint" : "Mark as hint"}</button>
+          <button type="button" class="journalinator-add-hidden">+ Hidden block</button>
+        </div>` : ""}
       <div class="journalinator-meta">Linked from</div>
       <div class="journalinator-chips">${backlinks}</div>
       <div class="journalinator-row">
@@ -137,7 +163,7 @@ export default class NoteEditor {
         ${note.system.image ? `<button type="button" class="journalinator-clear-image">Remove Image</button>` : ""}
         <button type="button" class="journalinator-new-linked">+ New Linked Note</button>
       </div>
-      <p class="journalinator-meta">by ${foundry.utils.escapeHTML(authorName)} &middot; ${note.system.editCount ?? 0} edits</p>
+      <p class="journalinator-meta">by ${foundry.utils.escapeHTML(authorName)}${note.secret ? "" : ` &middot; ${note.system.editCount ?? 0} edits`}</p>
       ${contributors ? `<p class="journalinator-meta">Characters added: ${contributors}</p>` : ""}
       <div class="jn-doc ${this.showAuthors ? "jn-show-authors" : ""}">
         ${note.system.blocks.map(b => this.#renderBlockHTML(note, b)).join("")}
@@ -150,7 +176,7 @@ export default class NoteEditor {
   }
 
   #renderBlockHTML(note, block) {
-    const lock = getLock(note._id, block.blockId);
+    const lock = block.hidden ? null : getLock(note._id, block.blockId);
     const mine = lock?.userId === game.user.id;
     const lockedByOther = lock && !mine;
     const pending = this.pendingBlockId === block.blockId && !lock;
@@ -161,6 +187,7 @@ export default class NoteEditor {
     if (lockedByOther || mine) classes.push("jn-locked");
     if (pending) classes.push("jn-pending");
     if (editing) classes.push("editing");
+    if (block.hidden && !note.secret) classes.push("jn-hidden-block");
 
     let tag = "";
     if (lockedByOther) tag = `<span class="jn-tag">${foundry.utils.escapeHTML(lock.userName)} is editing&hellip;</span>`;
@@ -173,14 +200,50 @@ export default class NoteEditor {
       return `<div class="${classes.join(" ")}" data-block-id="${block.blockId}" style="${vars}">${tag}<textarea class="jn-block-input">${foundry.utils.escapeHTML(text)}</textarea></div>`;
     }
     const cursor = lockedByOther ? "not-allowed" : "text";
-    return `<p class="${classes.join(" ")}" data-block-id="${block.blockId}" style="${vars};cursor:${cursor}" title="${foundry.utils.escapeHTML(author?.name ?? "")}">${tag}${foundry.utils.escapeHTML(block.text)}</p>`;
+    const empty = block.hidden && !block.text ? `<span class="jn-empty-block">Empty hidden block</span>` : "";
+    return `<p class="${classes.join(" ")}" data-block-id="${block.blockId}" style="${vars};cursor:${cursor}" title="${foundry.utils.escapeHTML(author?.name ?? "")}">${tag}${this.#gmBlockActions(note, block, lockedByOther)}${foundry.utils.escapeHTML(block.text)}${empty}</p>`;
+  }
+
+  /** Hover controls for GMs: hide a shared block, reveal/delete a hidden one, add a hidden block after. */
+  #gmBlockActions(note, block, lockedByOther) {
+    if (!notesStore.merged) return "";
+    const buttons = [];
+    if (note.secret) {
+      if (note.system.blocks.length > 1) buttons.push(`<button type="button" data-act="delete" title="Delete block">&#10005;</button>`);
+    } else if (block.hidden) {
+      buttons.push(`<button type="button" data-act="reveal" title="Show this block to players">Reveal</button>`);
+      buttons.push(`<button type="button" data-act="delete" title="Delete hidden block">&#10005;</button>`);
+    } else if (!lockedByOther) {
+      buttons.push(`<button type="button" data-act="hide" title="Take this block off the shared note">Hide</button>`);
+    }
+    buttons.push(`<button type="button" data-act="add" title="Add a GM-only block after this one">+</button>`);
+    return `<span class="jn-block-gm">${buttons.join("")}</span>`;
   }
 
   #bindHandlers(note) {
+    const noteId = this.noteId;
     this.root.querySelector(".journalinator-rename")?.addEventListener("click", async () => {
+      if (note.secret) {
+        const base = await this.#promptText("Rename Secret Note", stripSecretPrefix(note.name));
+        if (base) gm(() => secrets.renameSecretNote(noteId, base));
+        return;
+      }
       const title = await this.#promptText("Rename Note", note.name);
       if (!title || title === note.name) return;
-      requestWrite({ type: "renameNote", noteId: this.noteId, title });
+      requestWrite({ type: "renameNote", noteId, title });
+    });
+
+    this.root.querySelector(".journalinator-declassify")?.addEventListener("click", () => this.#declassifyNote(note));
+    this.root.querySelector(".journalinator-hint-toggle")?.addEventListener("click", () => {
+      requestWrite({ type: "gmSetHint", noteId, hint: !note.system.hint });
+    });
+    this.root.querySelector(".journalinator-add-hidden")?.addEventListener("click", () => this.#addHiddenAfter(null));
+    this.root.querySelectorAll(".jn-block-gm button").forEach(btn => {
+      btn.addEventListener("click", ev => {
+        ev.stopPropagation();
+        const blockId = btn.closest(".jn-block").dataset.blockId;
+        this.#gmBlockAction(note, blockId, btn.dataset.act);
+      });
     });
 
     this.root.querySelector(".journalinator-authors-toggle")?.addEventListener("click", () => {
@@ -188,9 +251,20 @@ export default class NoteEditor {
       this.render();
     });
 
-    this.root.querySelector(".journalinator-delete")?.addEventListener("click", () => {
+    this.root.querySelector(".journalinator-delete")?.addEventListener("click", async () => {
+      if (note.secret) {
+        const ok = await DialogV2.confirm({
+          window: { title: "Delete Secret Note" },
+          content: `<p>Permanently delete <b>${esc(note.name)}</b>? Secret notes have no trash.</p>`
+        });
+        if (!ok) return;
+        this.#stopEditing();
+        await gm(() => secrets.deleteSecretNote(noteId));
+        this.callbacks.onSelectNote?.(null);
+        return;
+      }
       this.#stopEditing();
-      requestWrite({ type: "deleteNote", noteId: this.noteId });
+      requestWrite({ type: "deleteNote", noteId });
     });
 
     this.root.querySelectorAll(".journalinator-chip").forEach(el => {
@@ -198,25 +272,36 @@ export default class NoteEditor {
     });
 
     this.root.querySelector(".journalinator-style")?.addEventListener("change", ev => {
-      requestWrite({ type: "setNoteStyle", noteId: this.noteId, style: ev.target.value });
+      if (note.secret) gm(() => secrets.setSecretNoteStyle(noteId, ev.target.value));
+      else requestWrite({ type: "setNoteStyle", noteId, style: ev.target.value });
     });
+
+    const setImage = image => note.secret
+      ? gm(() => secrets.setSecretNoteImage(noteId, image))
+      : requestWrite({ type: "setNoteImage", noteId, image });
 
     this.root.querySelector(".journalinator-set-image")?.addEventListener("click", () => {
       new foundry.applications.apps.FilePicker({
         type: "image",
         current: note.system.image ?? "",
-        callback: path => requestWrite({ type: "setNoteImage", noteId: this.noteId, image: path })
+        callback: path => setImage(path)
       }).render(true);
     });
 
-    this.root.querySelector(".journalinator-clear-image")?.addEventListener("click", () => {
-      requestWrite({ type: "setNoteImage", noteId: this.noteId, image: null });
-    });
+    this.root.querySelector(".journalinator-clear-image")?.addEventListener("click", () => setImage(null));
 
     this.root.querySelector(".journalinator-new-linked")?.addEventListener("click", async () => {
-      const title = await this.#promptText("New Linked Note", "");
+      const title = await this.#promptText(note.secret ? "New Linked Secret Note" : "New Linked Note", "");
       if (!title) return;
-      requestWrite({ type: "newLinkedNote", sourceId: this.noteId, title });
+      if (!note.secret) {
+        requestWrite({ type: "newLinkedNote", sourceId: noteId, title });
+        return;
+      }
+      const card = notesStore.getLayout()?.cards?.[noteId] ?? { x: 0, y: 0 };
+      gm(async () => {
+        const newId = await secrets.createSecretNote({ title, x: card.x + 220, y: card.y });
+        if (newId) await secrets.addHiddenLink(noteId, newId);
+      });
     });
 
     this.root.querySelectorAll(".jn-block:not(.editing)").forEach(el => {
@@ -233,6 +318,14 @@ export default class NoteEditor {
 
   #clickBlock(blockId) {
     if (this.editingBlockId === blockId || this.pendingBlockId === blockId) return;
+    if (notesStore.isHiddenBlock(this.noteId, blockId)) {
+      // GM-only blocks take no lock: lock traffic is broadcast and would reveal the block exists.
+      this.#stopEditing({ save: true });
+      this.editingBlockId = blockId;
+      this.editingSecret = true;
+      this.render();
+      return;
+    }
     const lock = getLock(this.noteId, blockId);
     if (lock && lock.userId !== game.user.id) return; // locked by someone else — not clickable
     this.pendingBlockId = blockId;
@@ -306,14 +399,24 @@ export default class NoteEditor {
     const originalText = note?.system.blocks.find(b => b.blockId === blockId)?.text ?? "";
     let write = null;
 
+    const secret = this.editingSecret;
+    this.editingSecret = false;
+
     if (save && textarea && textarea.value !== originalText) {
       this.drafts.set(blockId, textarea.value);
       this.#persistDraft(blockId, textarea.value);
-      write = requestWrite({ type: "saveBlock", noteId, blockId, text: textarea.value });
+      if (secret) write = gm(() => secrets.saveSecretBlock(noteId, blockId, textarea.value));
+      else if (this.#blocksSecretMention(textarea.value)) write = null; // kept as a draft
+      else write = requestWrite({ type: "saveBlock", noteId, blockId, text: textarea.value });
     } else if (save && !textarea && this.drafts.has(blockId)) {
       // No textarea to send, but a persisted draft exists; keep it for recovery.
     } else {
       this.#removeDraft(blockId);
+    }
+
+    if (secret) {
+      this.editingBlockId = null;
+      return;
     }
 
     // For the active GM, requestWrite is queued; releasing first would let the queued
@@ -458,6 +561,15 @@ export default class NoteEditor {
       const noteId = this.noteId;
       const beforeText = textarea.value.slice(0, textarea.selectionStart).replace(/\n+$/, "");
       const afterText = textarea.value.slice(textarea.selectionStart);
+      if (this.editingSecret) {
+        this.#clearDraftTimer();
+        this.#removeDraft(blockId);
+        this.editingBlockId = null;
+        this.editingSecret = false;
+        gm(() => secrets.splitSecretBlock(noteId, blockId, beforeText, afterText));
+        return;
+      }
+      if (this.#blocksSecretMention(beforeText + afterText)) return;
       this.#clearDraftTimer();
       this.#removeDraft(blockId);
       this.editingBlockId = null;
@@ -471,8 +583,19 @@ export default class NoteEditor {
       const blocks = note.system.blocks;
       const index = blocks.findIndex(b => b.blockId === blockId);
       if (index <= 0) return; // first block — nothing to merge into
+      // Hidden and shared blocks never merge into each other.
+      if (!!blocks[index - 1].hidden !== this.editingSecret) return;
       ev.preventDefault();
       const prevBlockId = blocks[index - 1].blockId;
+      if (this.editingSecret) {
+        const noteId = this.noteId;
+        this.#clearDraftTimer();
+        this.#removeDraft(blockId);
+        this.editingBlockId = null;
+        this.editingSecret = false;
+        gm(() => secrets.mergeSecretBlockUp(noteId, blockId));
+        return;
+      }
       if (isHeldByMe(this.noteId, prevBlockId)) {
         this.#performMerge(blockId, prevBlockId);
       } else {
@@ -490,6 +613,78 @@ export default class NoteEditor {
     this.#stopHeartbeat();
     const write = requestWrite({ type: "mergeBlockUp", noteId, blockId });
     this.#releaseAfterWrite(write, noteId, blockId, prevBlockId);
+  }
+
+  /**
+   * GMs only: refuses to send shared text that links a secret note by its `GM-XXXX` title, which
+   * would otherwise create a public note carrying that title. The text stays as a local draft.
+   */
+  #blocksSecretMention(text) {
+    if (!notesStore.merged) return false;
+    const mentions = secrets.prefixedSecretMentions(text);
+    if (!mentions.length) return false;
+    ui.notifications.error(`Journalinator: this shared block links a secret note (${mentions.join(", ")}). Remove that [[link]] or the GM- prefix; the text is kept as a draft.`);
+    return true;
+  }
+
+  async #confirmBareMentions(text, what) {
+    const mentions = secrets.bareSecretMentions(text);
+    if (!mentions.length) return true;
+    return DialogV2.confirm({
+      window: { title: "Secret Notes Mentioned" },
+      content: `<p>This ${what} links <b>${mentions.map(esc).join(", ")}</b>, which only exist as secret notes. Players will get empty public notes with those names.</p><p>Continue?</p>`
+    });
+  }
+
+  async #addHiddenAfter(afterBlockId) {
+    const noteId = this.noteId;
+    this.#stopEditing({ save: true });
+    const newId = await gm(() => secrets.addHiddenBlock(noteId, afterBlockId));
+    if (!newId || this.noteId !== noteId) return;
+    this.editingBlockId = newId;
+    this.editingSecret = true;
+    this.render();
+  }
+
+  async #gmBlockAction(note, blockId, act) {
+    const noteId = note._id;
+    const block = note.system.blocks.find(b => b.blockId === blockId);
+    if (!block) return;
+    if (act === "add") return this.#addHiddenAfter(blockId);
+
+    if (this.editingBlockId === blockId) this.#stopEditing({ save: true });
+
+    if (act === "delete") {
+      const ok = !block.text || await DialogV2.confirm({
+        window: { title: "Delete Hidden Block" },
+        content: "<p>Delete this GM-only block? This can't be undone.</p>"
+      });
+      if (ok) gm(() => secrets.deleteSecretBlock(noteId, blockId));
+      return;
+    }
+
+    if (act === "reveal") {
+      if (!(await this.#confirmBareMentions(block.text, "block"))) return;
+      gm(() => secrets.declassifyBlock(noteId, blockId));
+      return;
+    }
+
+    if (act === "hide") {
+      const ok = await DialogV2.confirm({
+        window: { title: "Hide Block" },
+        content: "<p>Players have already seen this block, and older versions stay in the note's history. Hiding takes it off the shared note from now on.</p><p>Hide it?</p>"
+      });
+      if (ok) gm(() => secrets.hideSharedBlock(noteId, blockId));
+    }
+  }
+
+  async #declassifyNote(note) {
+    const title = await this.#promptText("Declassify Note: public title", stripSecretPrefix(note.name));
+    if (!title) return;
+    const text = note.system.blocks.map(b => b.text).join("\n");
+    if (!(await this.#confirmBareMentions(text, "note"))) return;
+    this.#stopEditing({ save: true });
+    gm(() => secrets.declassifyNote(note._id, title));
   }
 
   async #promptText(title, initial) {

@@ -5,7 +5,7 @@ import { maybeSnapshot } from "./snapshots.mjs";
 import { recordActivity, addSessionMarker } from "./stats.mjs";
 import {
   authoritativeRequestLock, authoritativeReleaseLock, authoritativeHeartbeat,
-  authoritativeHolds, authoritativeSnapshot, receiveLockBroadcast
+  authoritativeHolds, authoritativeSnapshot, receiveLockBroadcast, authoritativeLockHolder
 } from "./locks.mjs";
 
 const MODULE_ID = "fvtt-journalinator";
@@ -21,6 +21,13 @@ const MAX_LABEL_SIZE = 96;
 const LINK_DIRECTIONS = new Set(["none", "one", "two"]);
 const LINK_LINE_STYLES = new Set(["solid", "dashed"]);
 const LINK_COLORS = new Set(["", "#a393f2", "#d6a45c", "#d77b91"]);
+const DOCUMENT_ID_RE = /^[a-zA-Z0-9]{16}$/;
+const MAX_DECLASSIFIED_BLOCKS = 500;
+const MAX_DECLASSIFIED_LINKS = 200;
+
+function senderIsGM(senderUserId) {
+  return !!game.users.get(senderUserId)?.isGM;
+}
 
 /**
  * All GM-side write handling is serialized through this promise chain. Socket handlers are
@@ -42,7 +49,14 @@ function enqueueWrite(message, senderUserId) {
   return writeQueue;
 }
 
-/** Case-insensitive lookup among live (non-deleted) notes. */
+/**
+ * Case-insensitive lookup among live (non-deleted) notes.
+ *
+ * Everything in this file reads the *shared* journal only — never notesStore, never the vault —
+ * even when this client is a GM with secrets unlocked. That is what keeps a player from probing
+ * secret titles (a duplicate-title rejection, a typed [[link]] resolving to a hidden note, a
+ * free-spot search that avoids hidden cards would each leak one).
+ */
 function findNoteByTitle(shared, title, excludeId = null) {
   const normalized = (title ?? "").trim().toLowerCase();
   if (!normalized) return null;
@@ -71,7 +85,9 @@ function notifyUser(userId, reason) {
     ui.notifications?.warn(text);
     return;
   }
-  game.socket.emit(CHANNEL, { type: "writeRejected", forUserId: userId, reason: text });
+  // Addressed to the requester only: rejection reasons can name titles (e.g. a declassified
+  // note's title that collided), which must not reach other clients.
+  game.socket.emit(CHANNEL, { type: "writeRejected", forUserId: userId, reason: text }, { recipients: [userId] });
 }
 
 /** Keeps only the fields a link toolbar is allowed to change, with validated values. */
@@ -241,6 +257,59 @@ function creditContribution(page, senderUserId, oldText, newText) {
   const contributions = { ...(page.system.contributions ?? {}) };
   contributions[senderUserId] = (contributions[senderUserId] ?? 0) + credited;
   return { contributions, credited };
+}
+
+/**
+ * Validates a declassified note sent by a GM (gmCreateNote). The GM client already knows the
+ * content is going public, so this is ordinary hostile-payload validation, not secrecy.
+ */
+function cleanDeclassifiedNote(shared, message) {
+  if (typeof message.noteId !== "string" || !DOCUMENT_ID_RE.test(message.noteId)) return null;
+  if (shared.pages.get(message.noteId)) return null; // already declassified (idempotent)
+  const title = (message.title ?? "").trim();
+  if (!title || title.length > MAX_TITLE_LENGTH) return null;
+  const style = typeof message.style === "string" && Object.hasOwn(CARD_STYLES, message.style) ? message.style : "sticky";
+  const image = typeof message.image === "string" && message.image.trim().length <= 1000 ? message.image.trim() || null : null;
+
+  if (!Array.isArray(message.blocks) || !message.blocks.length || message.blocks.length > MAX_DECLASSIFIED_BLOCKS) return null;
+  const blocks = [];
+  const blockIds = new Set();
+  for (const block of message.blocks) {
+    if (!block || typeof block.text !== "string" || block.text.length > MAX_BLOCK_LENGTH) return null;
+    const blockId = typeof block.blockId === "string" && DOCUMENT_ID_RE.test(block.blockId) && !blockIds.has(block.blockId)
+      ? block.blockId : foundry.utils.randomID();
+    blockIds.add(blockId);
+    blocks.push({ blockId, text: block.text });
+  }
+
+  const links = [];
+  for (const link of (Array.isArray(message.links) ? message.links : []).slice(0, MAX_DECLASSIFIED_LINKS)) {
+    const target = shared.pages.get(link?.targetId);
+    if (!target || target.type !== `${MODULE_ID}.note` || target.system.deleted) continue;
+    if (link.targetId === message.noteId || links.some(l => l.targetId === link.targetId)) continue;
+    links.push({
+      id: foundry.utils.randomID(),
+      targetId: link.targetId,
+      label: "", direction: "one", color: "", lineStyle: "solid",
+      ...sanitizeLinkFields(link),
+      origin: "drawn",
+      edited: false,
+      createdBy: "",
+      hint: false
+    });
+  }
+
+  const card = message.card ?? {};
+  const num = (value, fallback) => Number.isFinite(value) ? value : fallback;
+  const size = value => Number.isFinite(value) && value > 0 ? value : null;
+  return {
+    noteId: message.noteId, title, style, image, blocks, links,
+    card: {
+      x: clampCoordinate(num(card.x, 0)), y: clampCoordinate(num(card.y, 0)),
+      width: size(card.width), height: size(card.height),
+      rotation: Math.max(-10, Math.min(10, num(card.rotation, 0)))
+    }
+  };
 }
 
 async function handleMessage(message, senderUserId) {
@@ -600,6 +669,124 @@ async function handleMessage(message, senderUserId) {
       return;
     }
 
+    // --- GM tier (spec §14). Hidden content never arrives here: these messages only carry
+    // content at the moment it becomes public (declassification) or remove shared content.
+
+    case "gmInsertBlock": {
+      if (!senderIsGM(senderUserId)) return;
+      const page = shared.pages.get(message.noteId);
+      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
+      const block = message.block;
+      if (!block || typeof block.text !== "string" || block.text.length > MAX_BLOCK_LENGTH) return;
+      if (typeof block.blockId !== "string" || !DOCUMENT_ID_RE.test(block.blockId)) return;
+      const blocks = page.system.blocks ?? [];
+      if (blocks.some(b => b.blockId === block.blockId)) return; // already declassified
+      let index = typeof message.beforeBlockId === "string"
+        ? blocks.findIndex(b => b.blockId === message.beforeBlockId)
+        : -1;
+      if (index === -1) index = blocks.length;
+      const nextBlocks = [...blocks];
+      nextBlocks.splice(index, 0, { blockId: block.blockId, text: block.text, authorId: senderUserId });
+      await reconcileAndSave(shared, page, nextBlocks, senderUserId, {
+        "system.editCount": (page.system.editCount ?? 0) + 1
+      });
+      return;
+    }
+
+    case "gmRemoveBlock": {
+      if (!senderIsGM(senderUserId)) return;
+      const page = shared.pages.get(message.noteId);
+      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
+      const blocks = page.system.blocks ?? [];
+      if (!blocks.some(b => b.blockId === message.blockId)) return;
+      if (blocks.length <= 1) {
+        notifyUser(senderUserId, "A note needs at least one visible block, so its only block can't be hidden.");
+        return;
+      }
+      const holder = authoritativeLockHolder(message.noteId, message.blockId);
+      if (holder && holder !== senderUserId) {
+        notifyUser(senderUserId, "Someone is editing that block right now; try again when they're done.");
+        return;
+      }
+      await reconcileAndSave(shared, page, blocks.filter(b => b.blockId !== message.blockId), senderUserId);
+      return;
+    }
+
+    case "gmCreateNote": {
+      if (!senderIsGM(senderUserId)) return;
+      const note = cleanDeclassifiedNote(shared, message);
+      if (!note) return;
+      if (findNoteByTitle(shared, note.title)) {
+        notifyUser(senderUserId, `A note titled "${note.title}" already exists; pick another title to declassify.`);
+        return;
+      }
+      const page = await JournalEntryPage.create({
+        _id: note.noteId,
+        name: note.title,
+        type: `${MODULE_ID}.note`,
+        system: {
+          style: note.style,
+          image: note.image,
+          blocks: note.blocks.map(b => ({ ...b, authorId: senderUserId })),
+          links: note.links,
+          authorId: senderUserId,
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        }
+      }, { parent: shared, keepId: true });
+      if (!page) return;
+      const layout = layoutPage(shared);
+      if (layout) await layout.update({ [`system.cards.${page.id}`]: note.card });
+      // Typed [[links]] in the now-public text resolve in the shared namespace only.
+      await reconcileAndSave(shared, page, page.system.blocks, senderUserId);
+      return;
+    }
+
+    case "gmAddLink": {
+      if (!senderIsGM(senderUserId)) return;
+      const page = shared.pages.get(message.sourceId);
+      const target = shared.pages.get(message.link?.targetId);
+      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
+      if (!target || target.type !== `${MODULE_ID}.note` || target.system.deleted) return;
+      if (page.id === target.id) return;
+      const links = [...(page.system.links ?? [])];
+      if (links.some(link => link.targetId === target.id)) return;
+      links.push({
+        id: foundry.utils.randomID(),
+        targetId: target.id,
+        label: "", direction: "one", color: "", lineStyle: "solid",
+        ...sanitizeLinkFields(message.link),
+        origin: "drawn",
+        edited: true,
+        createdBy: senderUserId,
+        hint: message.link?.hint === true
+      });
+      await page.update({ "system.links": links });
+      return;
+    }
+
+    case "gmSetHint": {
+      if (!senderIsGM(senderUserId)) return;
+      const page = shared.pages.get(message.noteId);
+      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
+      if (typeof message.hint !== "boolean") return;
+      await page.update({ "system.hint": message.hint });
+      return;
+    }
+
+    case "gmSetLinkHint": {
+      if (!senderIsGM(senderUserId)) return;
+      const page = shared.pages.get(message.noteId);
+      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
+      if (typeof message.hint !== "boolean") return;
+      const links = page.system.links ?? [];
+      if (!links.some(link => link.id === message.linkId)) return;
+      await page.update({
+        "system.links": links.map(link => link.id === message.linkId ? { ...link, hint: message.hint } : link)
+      });
+      return;
+    }
+
     case "addSessionMarker": {
       if (!game.users.get(senderUserId)?.isGM) return; // only the GM adds session markers (spec §10)
       await addSessionMarker(message.label);
@@ -608,10 +795,19 @@ async function handleMessage(message, senderUserId) {
   }
 }
 
-/** Sends a write request to the active GM. If we are the active GM, applies it directly. */
+/**
+ * Sends a write request to the active GM. If we are the active GM, applies it directly.
+ *
+ * Requests are addressed to the active GM only (the server's custom-socket relay honours
+ * `recipients`, see dist/server/sockets.mjs handleCustomSocket). Plain emits are broadcast to
+ * every client, which would hand a GM's declassification payload to players before the active
+ * GM had accepted it.
+ */
 export function requestWrite(message) {
-  if (game.users.activeGM?.id === game.user.id) {
+  const activeGM = game.users.activeGM;
+  if (!activeGM) return;
+  if (activeGM.id === game.user.id) {
     return enqueueWrite(message, game.user.id);
   }
-  game.socket.emit(CHANNEL, message);
+  game.socket.emit(CHANNEL, message, { recipients: [activeGM.id] });
 }

@@ -16,8 +16,9 @@ export function registerContainerSettings() {
  * players, but does NOT keep its content out of player browsers: Foundry v14 sends every
  * JournalEntry's full data to every connected client regardless of ownership (traced in
  * dist/packages/world.mjs — World.#p() calls db.JournalEntry.dump() with no permission filter).
- * Ownership here is a UI convenience, not a secrecy boundary. True secrecy (Phase 8, GM tier)
- * will need content that is never written into a synced JournalEntry at all.
+ * Ownership here is a UI convenience, not a secrecy boundary. The GM tier (spec §14) keeps its
+ * secrets on the GM Secrets entry as an encrypted vault (scripts/secrets/), so players only ever
+ * receive ciphertext.
  */
 export async function ensureContainers() {
   if (!game.user.isGM) return;

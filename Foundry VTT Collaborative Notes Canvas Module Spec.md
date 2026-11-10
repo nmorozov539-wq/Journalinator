@@ -82,8 +82,8 @@ All data lives in Foundry's world data, so it is backed up with the world and mo
 Three `JournalEntry` documents, created by the GM client on first run:
 
 1. **Shared journal.** Players: Observer. GM: Owner. Holds one `note` page per note, one `layout` page, and one `stats` page.
-2. **History.** GM only. Holds per-note snapshots, which keeps the shared document light.
-3. **GM secrets.** Players: None. Empty in v1, but the read layer treats it as a source from day one (see 5.7 and 14).
+2. **History.** GM only in the UI. Holds per-note snapshots, which keeps the shared document light. Snapshots only ever contain shared content, so players being able to read this entry (see 5.9) is harmless.
+3. **GM secrets.** Players: None in the UI. Holds the encrypted GM vault as two flags, `keyring` and `vault` (see 14). Ownership is a UI convenience here, not the secrecy boundary: the encryption is.
 
 The containers are hidden from the normal Journal sidebar so nobody edits them by hand. Pages of our sub-type get a registered sheet that simply opens the module's fullscreen app.
 
@@ -134,7 +134,8 @@ If the module is deactivated, its sub-type pages become invalid and disappear fr
 
 ### 5.9 Must verify before relying on this
 
-- **Player clients never receive None-ownership documents.** The GM secrets design depends on it. Test by logging in as a player and inspecting `game.journal` and the raw data received.
+- ~~**Player clients never receive None-ownership documents.**~~ **Verified false on v14 (build 367).** Every client receives every world document regardless of ownership (`World` data dumps `JournalEntry`, `Setting`, `ChatMessage` etc. with no permission filter), compendium `get` requests are not permission-checked on the server, and every document change is broadcast to every client. Nothing stored on the server is private, which is why GM secrets are encrypted (see 14).
+- **Module socket messages can be addressed.** Verified: the server's custom-socket relay honours `{ recipients: [userIds] }` and still appends the verified sender id. Write requests go to the active GM only, and rejection notices go to the requester only.
 - **Socket handlers receive a trustworthy sender user ID.** Authorship and stats depend on it. The sender must come from Foundry's socket layer, never from a field in the payload.
 - Exact v14 APIs for the fullscreen application window, sheet registration for the sub-type, and hiding the containers from the sidebar. Read the official v14 docs rather than relying on model memory.
 
@@ -285,20 +286,61 @@ The look is settled by the **HTML demo**, which is published as an artifact and 
 - **Search:** typing dims non-matching cards and links, and the quick switcher drops down under the search box.
 - **Editor panel:** a plain document with no borders, resizable by its left edge.
 
-## 14. GM tier (later phase, design for it now)
+## 14. GM tier
 
-- The GM has their own **hidden notes and canvas elements**, with the same base toolset.
-- The GM can **declassify** parts of a note as players discover them (for example a character dossier revealed piece by piece).
-- The GM can leave **hint notes and links** on the canvas.
-- **Hard rule: hidden content is never sent to player clients.** It is not hidden by CSS or UI; the player's browser never receives it.
-- **Hard rule: hiding must not leak volume.** Hidden text leaves no gaps, no redaction bars sized to the content, and no length hints. For players, hidden parts are simply absent. If a closing flourish is wanted, it is a fixed line such as “...he never actually knew what his actions led to” that does not vary with the hidden amount.
+- The GM has their own **hidden notes, blocks, links, and labels**, with the same base toolset.
+- The GM can **declassify** parts of a note as players discover them (a character dossier revealed piece by piece), or a whole note.
+- The GM can mark shared notes and links as **hints**: visible to players, marked as coming from the GM.
+- **Hard rule: hidden content is never sent to player clients in readable form.** It is not hidden by CSS or UI; the player's browser never receives the plaintext.
+- **Hard rule: hiding must not leak volume.** Hidden text leaves no gaps, no redaction bars sized to the content, and no length hints. For players, hidden parts are simply absent. A closing flourish, if wanted, is an ordinary shared block the GM writes.
 
-**How storage enforces this (see 5):**
+### 14.1 Storage: an encrypted vault
 
-- Hidden blocks, GM-only notes, and GM-only links live in the **GM secrets** entry, whose ownership is None for players. Pages there use the note schema plus anchor data (`afterBlockId`) for the GM's merged view.
-- Players' notes simply never contain hidden text, so there are no gaps or length hints.
-- **Declassifying is a real write into the shared note.** There is no visibility flag to flip. The GM writes the block into the shared note first, then removes it from secrets, so a failure never loses text.
-- All reads go through `NotesStore` (5.7), which merges sources for the GM and returns shared-only for players.
+Foundry v14 sends every world document to every client (5.9), so the only secret is one the server never sees in plaintext.
+
+- All GM-only content lives in one **vault**: JSON encrypted with AES-GCM-256 under a random **data key**, stored as a flag on the GM Secrets entry. Players receive the ciphertext and cannot read it.
+- The plaintext is length-framed and padded to a power-of-two bucket (minimum 16 KiB), so the ciphertext size reveals only a coarse order of magnitude.
+- The **keyring** (a second flag) says how to recover the data key:
+  - **Passphrase** (recommended): the data key is wrapped with a PBKDF2-SHA-256 key (600,000 iterations). Real secrecy, provided the passphrase resists offline guessing, since players hold the keyring too. GMs can tick "remember on this browser".
+  - **No passphrase**: the data key is stored raw beside the vault. Stops casual peeking only; anyone with the browser console can decrypt. Offered for tables that trust each other and don't want a passphrase.
+- **Every keyring change generates a fresh data key** and re-encrypts, so an old passphrase, or an "open" key a player already copied, never opens later versions.
+- Ciphertext, IVs and keyring are bound to the world id and key id as AES-GCM additional data.
+- Assistant GMs can use the vault when the world setting allows it (default on). With a passphrase vault they still need the passphrase.
+
+**Known metadata leaks (accepted):** players can see *when* the vault changes (each GM secret edit rewrites it) and its size bucket. Count of secret notes, titles, and text do not leak.
+
+### 14.2 The write path
+
+- **Secret writes never use the module socket**, because plain module socket messages reach every client. The GM edits the vault directly from their own client (a local queue serializes their writes; a vault write is a full re-encryption). Two GMs writing in the same instant can still clobber each other at the vault level; each client reloads as soon as another GM's write lands.
+- Hidden blocks take **no locks**: lock traffic is broadcast and would reveal that a hidden block exists.
+- **The shared write path never reads secrets.** The active GM handles player requests against shared documents only, even when its own vault is unlocked. Consequences: a player can create a note with the same title as a secret note (a rejection would leak the title), a player's `[[typed link]]` never resolves to a secret note, and free-spot placement ignores hidden cards.
+- Secret note titles carry a **`GM-XXXX ` prefix** (four random characters) so the GM can tell them apart from player notes at a glance and an accidental clash with a player title can't happen. Typed links in secret text resolve secret notes with or without the prefix. GM-saved *shared* text that links a secret note by its `GM-XXXX` title is refused (it would create a public note carrying that title).
+- Typed links inside secret text resolve against secret notes first, then live shared notes. Unknown titles create **secret** notes.
+- Secret edits never touch shared records: no stats activity, no History snapshots, no `editCount`/`updatedAt` on shared pages.
+
+### 14.3 Data model (vault plaintext)
+
+- `notes`: GM-only notes, each with its own card (position/size/tilt) and links.
+- `hiddenBlocks[sharedNoteId]`: `{ order, blocks }`. A hidden block is placed **before the next shared block that still exists in `order`**, or at the end. Anchoring to the successor keeps hidden blocks in place when players split or append to the block before them.
+- `hiddenLinks[sharedNoteId]`: GM-only links from a shared note. Links touching a secret note are always GM-only.
+- `labels`: GM-only canvas labels.
+
+### 14.4 Declassifying and hiding
+
+- **Declassifying is a real write into the shared note**, with no visibility flag to flip. The GM client sends the content to the active GM (addressed, not broadcast), waits until it lands, then removes it from the vault.
+  - A hidden block keeps its block id and lands before its anchor block.
+  - A whole note keeps its id, card and drawn links to shared notes. The GM picks the public title (prefix stripped by default); a title already taken by a shared note is refused.
+- Interrupted declassification is safe: the id ends up in both places and the vault copy is dropped on the next vault write (`reconcileVault`).
+- Before declassifying, the GM is warned if the text links secret notes by their bare name (players would get empty public notes with those names); links by `GM-XXXX` title block the declassification.
+- **Hiding a shared block** writes the vault copy first, then removes it from the shared note; if the removal is rejected, the vault copy is rolled back. Players have already seen it, and History keeps old versions, so the UI warns. Drawn shared links can be hidden the same way; typed links come from text and can't.
+
+### 14.5 GM UI
+
+- Top bar (GM-tier users only): **Secrets** button (set up / unlock / lock / change key), **GM view ↔ Player view** toggle, **+ Secret Note** (or Alt + double-click the canvas), **+ GM Label**.
+- Secret cards have a dashed GM-colored outline and a "GM" ribbon; shared cards with hidden blocks show a "+ hidden" marker in the GM view; hidden links are dotted; hints glow gold for everyone.
+- Editor: hidden blocks are dashed and tinted. Hovering a block shows **Hide** (shared), **Reveal** / **✕** (hidden), and **+** (add a hidden block after). Secret notes show a "GM only" banner with **Declassify…**. Shared notes get **Mark as hint** and **+ Hidden block**.
+- Link toolbar in the GM view: **Hide** / **Reveal** and a **✦ hint** toggle.
+- Secret notes have no trash; deleting one is permanent after a confirmation.
 
 ## 15. Technical notes for the coding tool
 
@@ -352,3 +394,14 @@ The look is settled by the **HTML demo**, which is published as an artifact and 
 - The editor is one continuous document: linked notes on top, no paragraph borders, a box only while editing or locked, an Authors toggle, and a width adjustable by dragging.
 - Typed `[[wikilinks]]` to missing notes create the note beside the current one and draw the link.
 - Visual direction settled: muted Obsidian-style, dark cards, dot-grid canvas.
+
+### v0.3 to v0.4 (GM tier)
+
+- Verified that Foundry v14 gives players every world document and does not permission-check compendium reads; the None-ownership "GM secrets entry" is not a secrecy boundary.
+- GM secrets are an AES-GCM vault with a passphrase keyring (recommended) or an open keyring (opt-in, trust-based). Every key change rotates the data key.
+- Secret writes stay in the GM's client; write requests and rejection notices are addressed to one user, never broadcast.
+- Separate title namespaces for shared and secret notes; secret titles get a `GM-XXXX` prefix.
+- Hidden blocks anchor to their next surviving shared block.
+- Hint notes and hint links are flags on shared content, settable only by GMs.
+- Assistant GMs can use secrets by default (world setting).
+

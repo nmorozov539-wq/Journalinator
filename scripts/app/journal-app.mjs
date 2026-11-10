@@ -4,6 +4,18 @@ import JournalCanvas from "./canvas.mjs";
 import NoteEditor from "./editor.mjs";
 import { computeJournalStats, deriveSessions } from "../stats.mjs";
 import { CARD_STYLES } from "../styles/registry.mjs";
+import { canUseGmTier } from "../secrets/access.mjs";
+import { vaultStore } from "../secrets/vault-store.mjs";
+import { openVaultDialog } from "../secrets/vault-ui.mjs";
+import * as secrets from "../secrets/secret-actions.mjs";
+
+/** Runs a GM vault action and surfaces failures (e.g. the vault was locked meanwhile). */
+function gm(job) {
+  return Promise.resolve().then(job).catch(err => {
+    console.error(err);
+    ui.notifications.error(err.message);
+  });
+}
 
 const { ApplicationV2 } = foundry.applications.api;
 
@@ -40,17 +52,32 @@ export default class JournalApp extends ApplicationV2 {
   #onGlobalKeydown = null;
   #searchBlurTimer = null;
   #editor = new NoteEditor({
-    onFocusNote: id => this.#canvas.focusNote(id)
+    onFocusNote: id => this.#canvas.focusNote(id),
+    onSelectNote: id => { this.#selectedNoteId = id; this.render(); }
   });
+  // Every canvas action is routed by what it touches: GM-only things go to the vault in this
+  // client, everything else is a normal shared write request (spec §14).
   #canvas = new JournalCanvas({
     onSelectNote: id => { this.#selectedNoteId = id; this.render(); },
-    onCreateNoteAt: (x, y) => requestWrite({ type: "createNote", title: "Untitled", x, y, autoTitle: true }),
-    onMoveCard: (noteId, x, y) => requestWrite({ type: "moveCard", noteId, x, y }),
-    onResizeCard: (noteId, width, height) => requestWrite({ type: "resizeCard", noteId, width, height }),
-    onResetCardSize: noteId => requestWrite({ type: "resizeCard", noteId, width: null, height: null }),
+    onCreateNoteAt: (x, y, { secret = false } = {}) => {
+      if (secret) return gm(async () => this.#select(await secrets.createSecretNote({ title: "Untitled", x, y })));
+      requestWrite({ type: "createNote", title: "Untitled", x, y, autoTitle: true });
+    },
+    onMoveCard: (noteId, x, y) => notesStore.isSecretNote(noteId)
+      ? gm(() => secrets.moveSecretCard(noteId, x, y))
+      : requestWrite({ type: "moveCard", noteId, x, y }),
+    onResizeCard: (noteId, width, height) => notesStore.isSecretNote(noteId)
+      ? gm(() => secrets.resizeSecretCard(noteId, width, height))
+      : requestWrite({ type: "resizeCard", noteId, width, height }),
+    onResetCardSize: noteId => notesStore.isSecretNote(noteId)
+      ? gm(() => secrets.resizeSecretCard(noteId, null, null))
+      : requestWrite({ type: "resizeCard", noteId, width: null, height: null }),
     onAddLabelAt: (x, y) => requestWrite({ type: "addLabel", text: "Label", x, y }),
-    onMoveLabel: (labelId, x, y) => requestWrite({ type: "updateLabel", labelId, x, y }),
+    onMoveLabel: (labelId, x, y) => notesStore.isHiddenLabel(labelId)
+      ? gm(() => secrets.updateHiddenLabel(labelId, { x, y }))
+      : requestWrite({ type: "updateLabel", labelId, x, y }),
     onEditLabel: async labelId => {
+      if (notesStore.isHiddenLabel(labelId)) return this.#editHiddenLabel(labelId);
       const layout = notesStore.getLayout();
       const current = layout?.labels?.[labelId]?.text ?? "";
       const text = await this.#promptText("Edit Label", current);
@@ -58,10 +85,25 @@ export default class JournalApp extends ApplicationV2 {
       if (text.trim() === "") requestWrite({ type: "removeLabel", labelId });
       else requestWrite({ type: "updateLabel", labelId, text });
     },
-    onCreateLink: (sourceId, targetId) => requestWrite({ type: "createLink", sourceId, targetId }),
-    onUpdateLink: (noteId, linkId, fields) => requestWrite({ type: "updateLink", noteId, linkId, fields }),
-    onDeleteLink: (noteId, linkId) => requestWrite({ type: "deleteLink", noteId, linkId })
+    onCreateLink: (sourceId, targetId) => (notesStore.isSecretNote(sourceId) || notesStore.isSecretNote(targetId))
+      ? gm(() => secrets.addHiddenLink(sourceId, targetId))
+      : requestWrite({ type: "createLink", sourceId, targetId }),
+    onUpdateLink: (noteId, linkId, fields) => notesStore.isHiddenLink(noteId, linkId)
+      ? gm(() => secrets.updateHiddenLink(noteId, linkId, fields))
+      : requestWrite({ type: "updateLink", noteId, linkId, fields }),
+    onDeleteLink: (noteId, linkId) => notesStore.isHiddenLink(noteId, linkId)
+      ? gm(() => secrets.deleteHiddenLink(noteId, linkId))
+      : requestWrite({ type: "deleteLink", noteId, linkId }),
+    onHideLink: (noteId, linkId) => gm(() => secrets.hideSharedLink(noteId, linkId)),
+    onRevealLink: (noteId, linkId) => gm(() => secrets.revealLink(noteId, linkId)),
+    onToggleLinkHint: (noteId, linkId, hint) => requestWrite({ type: "gmSetLinkHint", noteId, linkId, hint })
   });
+
+  #select(noteId) {
+    if (!noteId) return;
+    this.#selectedNoteId = noteId;
+    this.render();
+  }
 
   _onFirstRender() {
     this.#editor.activate();
@@ -73,6 +115,7 @@ export default class JournalApp extends ApplicationV2 {
       this.#hookIds.push([hook, Hooks.on(hook, rerender)]);
     }
     this.#hookIds.push(["journalinatorLocksChanged", Hooks.on("journalinatorLocksChanged", rerender)]);
+    this.#hookIds.push(["journalinatorVaultChanged", Hooks.on("journalinatorVaultChanged", rerender)]);
 
     this.#onGlobalKeydown = ev => {
       if ((ev.ctrlKey || ev.metaKey) && ev.key === "k") {
@@ -117,6 +160,9 @@ export default class JournalApp extends ApplicationV2 {
       allNotes: notes,
       layout: notesStore.getLayout(),
       gmOnline: !!game.users.activeGM,
+      gmTier: canUseGmTier(),
+      vaultStatus: vaultStore.status,
+      merged: notesStore.merged,
       trashCount: notesStore.getTrashedNotes().length,
       authors,
       query: q
@@ -125,7 +171,7 @@ export default class JournalApp extends ApplicationV2 {
 
   async _renderHTML(context) {
     const root = document.createElement("div");
-    root.className = "journalinator-root";
+    root.className = `journalinator-root${context.merged ? " jn-gm-view" : ""}`;
     root.innerHTML = `
       <header class="journalinator-topbar">
         <b>Journalinator</b>
@@ -138,6 +184,7 @@ export default class JournalApp extends ApplicationV2 {
         <button type="button" class="journalinator-add-label">+ Label</button>
         <button type="button" class="journalinator-trash">Trash${context.trashCount ? ` (${context.trashCount})` : ""}</button>
         <button type="button" class="journalinator-stats">Stats</button>
+        ${context.gmTier ? this.#gmControlsHTML(context) : ""}
       </header>
       <div class="journalinator-filterbar">
         ${context.authors.map(([id, u]) => `<button type="button" class="jn-filter-chip${this.#filterAuthors.has(id) ? " on" : ""}" data-kind="author" data-id="${id}"><span class="jn-dot" style="background:${u.color}"></span>${foundry.utils.escapeHTML(u.name)}</button>`).join("")}
@@ -154,6 +201,7 @@ export default class JournalApp extends ApplicationV2 {
     root.querySelector(".journalinator-canvas-slot").appendChild(this.#canvas.root);
     this.#canvas.selectedNoteId = this.#selectedNoteId;
     this.#canvas.previewMode = this.#previewMode;
+    this.#canvas.gmMode = context.merged;
     this.#canvas.update(context.allNotes, context.layout, {
       dimMatch: note => this.#matchesQuery(note, context.query) && this.#matchesFilters(note)
     });
@@ -216,6 +264,20 @@ export default class JournalApp extends ApplicationV2 {
     });
 
     root.querySelector(".journalinator-trash")?.addEventListener("click", () => this.#openTrash());
+
+    root.querySelector(".journalinator-vault")?.addEventListener("click", () => openVaultDialog());
+    root.querySelector(".journalinator-view-toggle")?.addEventListener("click", () => {
+      notesStore.setGmView(!notesStore.gmView);
+    });
+    root.querySelector(".journalinator-new-secret")?.addEventListener("click", async () => {
+      const title = await this.#promptText("New Secret Note", "");
+      if (!title) return;
+      gm(async () => this.#select(await secrets.createSecretNote({ title, ...this.#canvas.newCardPosition() })));
+    });
+    root.querySelector(".journalinator-add-gm-label")?.addEventListener("click", () => {
+      const { x, y } = this.#canvas.newCardPosition(0, 0);
+      gm(() => secrets.addHiddenLabel(x, y));
+    });
     root.querySelector(".journalinator-stats")?.addEventListener("click", () => this.#openStats());
 
     root.querySelectorAll(".jn-filter-chip").forEach(btn => {
@@ -245,7 +307,7 @@ export default class JournalApp extends ApplicationV2 {
         <div class="jn-switcher-item${i === this.#switcherHighlight ? " hi" : ""}" data-id="${n._id}">
           <span class="jn-dot" style="background:${game.users.get(n.system.authorId)?.color ?? "#8d8d97"}"></span>
           <b>${foundry.utils.escapeHTML(n.name)}</b>
-          <small>${CARD_STYLES[n.system.style]?.label ?? n.system.style}</small>
+          <small>${n.secret ? "GM only &middot; " : ""}${CARD_STYLES[n.system.style]?.label ?? n.system.style}</small>
         </div>`).join("") +
       (offerCreate ? `<div class="jn-switcher-item jn-switcher-create${list.length === this.#switcherHighlight ? " hi" : ""}" data-create="1">+ Create "${foundry.utils.escapeHTML(q)}"</div>` : "");
     el.style.display = "block";
@@ -396,6 +458,43 @@ export default class JournalApp extends ApplicationV2 {
         });
       }
     });
+  }
+
+  #gmControlsHTML(context) {
+    const vaultLabel = {
+      absent: "Set up secrets",
+      locked: "Secrets &#128274;",
+      unlocked: "Secrets &#128275;",
+      error: "Secrets &#9888;"
+    }[context.vaultStatus] ?? "Secrets";
+    const unlocked = context.vaultStatus === "unlocked";
+    return `
+      <span class="jn-gm-controls">
+        <button type="button" class="journalinator-vault">${vaultLabel}</button>
+        ${unlocked ? `<button type="button" class="journalinator-view-toggle" title="Switch between the GM view and what players see">${notesStore.gmView ? "GM view" : "Player view"}</button>` : ""}
+        ${context.merged ? `
+          <button type="button" class="journalinator-new-secret" title="A note only GMs can see (or Alt + double-click the canvas)">+ Secret Note</button>
+          <button type="button" class="journalinator-add-gm-label">+ GM Label</button>` : ""}
+      </span>`;
+  }
+
+  async #editHiddenLabel(labelId) {
+    const label = notesStore.getLayout()?.labels?.[labelId];
+    if (!label) return;
+    const result = await foundry.applications.api.DialogV2.wait({
+      window: { title: "GM Label" },
+      content: `<input type="text" name="value" autofocus value="${foundry.utils.escapeHTML(label.text ?? "")}">`,
+      buttons: [
+        { action: "save", label: "Save", default: true, callback: (event, button) => ({ action: "save", text: button.form.elements.value.value.trim() }) },
+        { action: "reveal", label: "Make public", callback: () => ({ action: "reveal" }) },
+        { action: "delete", label: "Delete", callback: () => ({ action: "delete" }) }
+      ],
+      rejectClose: false
+    });
+    if (!result) return;
+    if (result.action === "reveal") return gm(() => secrets.revealLabel(labelId));
+    if (result.action === "delete" || (result.action === "save" && !result.text)) return gm(() => secrets.removeHiddenLabel(labelId));
+    return gm(() => secrets.updateHiddenLabel(labelId, { text: result.text }));
   }
 
   async #promptText(title, initial) {

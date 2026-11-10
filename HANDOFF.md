@@ -1,8 +1,9 @@
 # Journalinator — Handoff Notes
 
-Status: pre-alpha, v0.1.0. Phases 1–7 of the spec are implemented; Phase 8 (GM tier) has not
-started. This file records the current architecture, the bugs found during review, and the
-GM-side design work that should happen before Phase 8 is attempted.
+Status: pre-alpha, v0.1.0. Phases 1–8 of the spec are implemented. Phase 8 (GM tier) is built
+and covered by Node tests against a fake Foundry, but has **not yet been exercised in a real
+Foundry session** (see section 6). This file records the current architecture, the bugs found
+during review, and the GM-side design.
 
 ---
 
@@ -23,12 +24,22 @@ GM-side design work that should happen before Phase 8 is attempted.
 | Daily activity buckets and stats aggregation | `scripts/stats.mjs` |
 | Snapshot ring buffers | `scripts/snapshots.mjs` |
 | Style registry | `scripts/styles/registry.mjs` |
+| GM tier: vault crypto (pure) | `scripts/secrets/crypto.mjs` |
+| GM tier: vault data model, block anchoring, titles (pure) | `scripts/secrets/model.mjs` |
+| GM tier: decrypted vault, keyring, queued writes | `scripts/secrets/vault-store.mjs` |
+| GM tier: hide / declassify / secret note actions | `scripts/secrets/secret-actions.mjs` |
+| GM tier: secrets dialog | `scripts/secrets/vault-ui.mjs` |
+| GM tier: who may use it | `scripts/secrets/access.mjs` |
 | Styles | `styles/journal.css` |
+| Tests (`npm test`) | `tests/` |
 | Design spec | `Foundry VTT Collaborative Notes Canvas Module Spec.md` |
 | Visual reference | `Notes Canvas_ Round 1.html` |
 
-There is no build step, no package manager, and no test suite. The module is loaded directly by
-Foundry.
+There is no build step. The module is loaded directly by Foundry. `package.json` exists only for
+tests: `node --test tests/*.test.mjs` runs the crypto, model and integration tests with no
+dependencies; `npm install` adds jsdom so the UI smoke test (`tests/ui/smoke.mjs`) runs too.
+`tests/fake-foundry.mjs` is a small in-memory stand-in for Foundry documents, hooks, settings and
+the module socket. It is not a substitute for a real session.
 
 ---
 
@@ -83,42 +94,25 @@ These are incremental fixes; the larger issues below remain.
 
 ---
 
-## 3. Critical: Phase 8 secrets cannot use `JournalEntry` storage
+## 3. Phase 8 secrecy: resolved by encryption
 
-Spec §5.1/§5.9/§14 assume that a `JournalEntry` with ownership `NONE` is a secrecy boundary.
-The implementation comments in `scripts/store/containers.mjs` record the opposite: on Foundry
-v14, every connected client receives the full data of every `JournalEntry`, regardless of
-ownership (`World.#p()` calls `db.JournalEntry.dump()` with no permission filter in
-`dist/packages/world.mjs`). Ownership only hides the UI.
+Verified against the v14 build 367 server code (`resources/app/dist`):
 
-Consequences:
+- `World` data sent to each client at load dumps every `JournalEntry`, `Setting`, `ChatMessage`,
+  etc. with no permission filter (`dist/packages/world.mjs`).
+- Compendium reads are not permission-checked: `ServerDatabaseBackend._getDocuments` has no
+  ownership check and the compendium mixin only guards create/update/delete
+  (`dist/database/backend/server-backend.mjs`, `server-compendium.mjs`). A world compendium with
+  player ownership None is no safer than a journal.
+- Every document modification is broadcast to every client (`modifyDocument` handler).
+- The custom (module) socket relay honours `{ recipients: [...] }` and appends the verified
+  sender id (`dist/server/sockets.mjs`, `handleCustomSocket`).
 
-- The `GM Secrets` container is not secret. It is empty today, but it is not a safe place for
-  hidden notes/blocks/links.
-- The `History` container is also readable by players; snapshots are not private.
-- Any Phase 8 design that stores hidden text in a synced `JournalEntry` violates the spec's
-  hard rule that hidden content is never sent to player clients.
-
-**Before Phase 8, verify this against the exact v14 build in use.** If confirmed, the storage
-design needs to change. Options worth evaluating:
-
-1. **Client-side encrypted blob plus a GM-held key (recommended starting point).**
-   Store ciphertext, IV, salt, and KDF parameters in a journal page or world setting. The data
-   key is wrapped with a GM passphrase (`crypto.subtle` + PBKDF2/Argon-like KDF) and only
-   decrypted in the GM client. Players receive ciphertext only. Declassification is a real
-   write: decrypt, write plaintext into the shared note, then remove it from the encrypted
-   blob. This also avoids leaking length if the plaintext is padded before encryption.
-2. **A document type that is actually ownership-filtered on the wire.** Do not assume; trace
-   the v14 sync path for the specific document class and verify with a player client inspecting
-   raw received data. JournalEntry is known not to satisfy this.
-3. **Server-side module storage.** Requires server-side code and was out of scope for the
-   original spec; mention only if the table is willing to run custom server code.
-
-Do not build the Phase 8 UI until a player client can be shown to never receive plaintext
-hidden content. Also account for metadata leaks: number of secret notes, timestamps, and
-ciphertext lengths can reveal information even when content is encrypted.
-
----
+So the GM tier stores secrets as an AES-GCM vault (spec §14.1): players receive only padded
+ciphertext. Passphrase mode is real secrecy; "no passphrase" mode is opt-in and trust-based.
+Secret writes never travel over the module socket; write requests and rejection notices are now
+addressed to one user (`requestWrite`, `notifyUser`). Accepted metadata leaks: vault change
+timing and its size bucket.
 
 ## 4. GM-side design (read this before touching the write path)
 
@@ -126,7 +120,8 @@ ciphertext lengths can reveal information even when content is encrypted.
 
 1. Players have `Observer` ownership on the shared journal. They cannot write documents
    directly.
-2. A player sends a message over the module socket (`module.fvtt-journalinator`).
+2. A player sends a message over the module socket (`module.fvtt-journalinator`), addressed to
+   the active GM only (`recipients`).
 3. Foundry's server appends the verified sender user id as the second callback argument; the
    sender id is never taken from the message payload.
 4. Only the active GM (`game.users.activeGM`) processes write messages.
@@ -154,7 +149,11 @@ ciphertext lengths can reveal information even when content is encrypted.
 - Queued GM writes re-check active-GM status before applying, so a former GM cannot finish a
   write after a failover.
 - Live note titles are unique (case-insensitive); duplicate creates and renames are rejected
-  and the requesting client gets a targeted notification.
+  and the requesting client gets a targeted notification (addressed to that user only).
+- The shared write path reads shared documents only, never the vault or `notesStore`, so player
+  requests cannot resolve against, collide with, or be placed around secret content.
+- GM-tier messages (`gmInsertBlock`, `gmRemoveBlock`, `gmCreateNote`, `gmAddLink`, `gmSetHint`,
+  `gmSetLinkHint`) require a GM sender and are validated like player payloads.
 
 ### 4.3 Remaining GM-side weaknesses
 
@@ -203,12 +202,22 @@ Validate every field in `handleMessage`:
 - `emptyTrash` / `addSessionMarker`: keep the sender `isGM` check; also handle the case where
   the sender user no longer exists.
 
-**Offline GM.** `requestWrite` emits into the void when there is no active GM. The UI shows a
+**Offline GM.** `requestWrite` now does nothing when there is no active GM (it used to emit
+into the void), and GM-tier actions that need the active GM warn instead of waiting. The UI shows a
 read-only banner but the buttons remain active. Either disable write controls while
 `game.users.activeGM` is null, or queue local intent and explain that it will not apply.
 
-**Secrets and history.** See section 3. Do not treat `ownership: NONE` as privacy anywhere in
-the GM tier.
+**Secrets and history.** See section 3. Do not treat `ownership: NONE` as privacy anywhere.
+History snapshots only ever contain shared content. Secret edits never touch stats, snapshots,
+or shared-page timestamps.
+
+**Local plaintext on GM machines.** Unsaved drafts of hidden blocks are kept in the GM's
+`localStorage` like any other draft, and "remember on this browser" stores the raw data key
+there. Both stay on the GM's own machine; "Lock on this browser" forgets the key but not drafts.
+
+**Vault concurrency.** Each GM client serializes its own vault writes, but two GMs writing in
+the same instant can clobber each other (each write re-encrypts the whole vault). A `rev`
+compare-and-retry would close this if co-GMing becomes common.
 
 **Snapshots and activity are read-modify-write.** `recordActivity` and `maybeSnapshot` are now
 inside the queue, so they are safe from concurrent handlers. If the queue is ever made
@@ -223,9 +232,9 @@ ordering is still well-defined.
 
 ### 4.4 Suggested GM-side order
 
-1. Term/epoch for failover ordering if it becomes important.
-2. Secrets storage spike (section 3).
-3. Only then Phase 8 UI.
+1. Run the Phase 8 checklist (section 6) in a real Foundry session.
+2. Term/epoch for failover ordering if it becomes important.
+3. Vault compare-and-retry if two GMs edit secrets at once.
 
 ---
 
@@ -261,15 +270,14 @@ ordering is still well-defined.
 
 ### Packaging / missing deliverables
 
-- No `README.md`, even though spec §5.8 says the sub-type deactivation trade-off must be
-  documented there.
+- ~~No `README.md`~~: added, with the sub-type trade-off and the GM tier.
 - `module.json` has `authors: []` and no `url`, `manifest`, `license`, or repository metadata.
 - No sheet registration for the module's `JournalEntryPage` sub-types (spec §5.1).
-- No tests, linting, or CI. The pure modules (`stats.mjs`, `wikilinks.mjs`, free-spot search,
-  store filtering) are easy to unit-test.
+- Tests cover the GM tier (crypto, model, integration via a fake Foundry, jsdom UI smoke).
+  `stats.mjs` and `wikilinks.mjs` still have no direct unit tests. No linting or CI.
 - No localization; all strings are hardcoded English.
-- The spec's "must verify" items (player never receives None-ownership data; socket sender id)
-  should be re-run against the exact v14 build and recorded in the README or this file.
+- The spec's "must verify" items were checked against the v14 build 367 server code and are
+  recorded in spec §5.9 and section 3 above.
 
 ---
 
@@ -311,11 +319,33 @@ ordering is still well-defined.
 - [ ] Lose a block lock involuntarily; the draft tag appears and survives a reload.
 - [ ] Save a draft successfully and confirm the tag disappears and the localStorage key is
   removed.
-- [ ] Run `node --check` over every `.mjs` file.
+- [ ] Run `node --check` over every `.mjs` file (`npm run check`).
+
+### Phase 8 (GM tier) — needs a real session
+
+- [ ] As GM, set up secrets with a passphrase. As a player, in the console, inspect
+  `game.journal` and the GM Secrets entry's flags: only `keyring` (no `raw`) and ciphertext.
+- [ ] Watch a player's network tab (WS frames) while the GM edits a hidden block, a secret note,
+  a hidden link, and a GM label: no plaintext, no secret ids, no `requestLock` for hidden blocks.
+- [ ] Player creates a note with a secret note's bare title and with its full `GM-XXXX` title:
+  both succeed, no notification.
+- [ ] Player types `[[<secret note's bare title>]]`: a new public note appears; the secret one is
+  not linked.
+- [ ] Declassify a hidden block between two shared blocks: it lands in the same place for
+  players. Declassify a secret note: same id, card stays, drawn links to shared notes survive.
+- [ ] Declassify a note to a title a player already uses: refused, the note stays secret, and
+  only the GM sees the notice.
+- [ ] Hide a shared block while a player holds its lock: refused with a notice.
+- [ ] Two GMs: the second needs the passphrase (unless remembered); edits by one appear for the
+  other. Changing the passphrase locks the other GM's view until they unlock again.
+- [ ] Turn off "Assistant GMs can use GM secrets": an Assistant sees no Secrets button.
+- [ ] Reload the GM's browser with "remember" off: the vault is locked and the GM view shows
+  shared content only.
+- [ ] Hint toggle on a note and a link shows the gold marker for players too.
 
 ## 7. Suggested next steps
 
-1. Add explicit term/epoch handling for failover ordering if failover becomes important.
-2. Spike the encrypted-secrets design before Phase 8.
-3. Add a README and unit tests for the pure modules.
-4. Only then Phase 8 UI.
+1. Run the Phase 8 checklist in a real Foundry session.
+2. Term/epoch handling for failover ordering if failover becomes important.
+3. Vault compare-and-retry for simultaneous GM edits.
+4. Unit tests for `stats.mjs` / `wikilinks.mjs`; fix the medium-impact bugs in section 5.

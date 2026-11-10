@@ -124,6 +124,12 @@ export function authoritativeHolds(noteId, blockId, userId) {
   return locks.get(key(noteId, blockId))?.userId === userId;
 }
 
+/** Who holds this block's lock right now, per the active GM's authoritative map (or null). */
+export function authoritativeLockHolder(noteId, blockId) {
+  const locks = ensureAuthoritative();
+  return locks.get(key(noteId, blockId))?.userId ?? null;
+}
+
 export function authoritativeSnapshot() {
   const locks = ensureAuthoritative();
   return [...locks.entries()].map(([k, v]) => {

@@ -6,6 +6,8 @@ import { registerContainerSettings, ensureContainers, registerSidebarHiding } fr
 import { registerSocket } from "./socket.mjs";
 import { startExpirySweep, startLockResync } from "./locks.mjs";
 import JournalApp from "./app/journal-app.mjs";
+import { registerGmTierSettings } from "./secrets/access.mjs";
+import { vaultStore } from "./secrets/vault-store.mjs";
 
 const MODULE_ID = "fvtt-journalinator";
 
@@ -17,6 +19,7 @@ Hooks.once("init", () => {
     [`${MODULE_ID}.history`]: HistoryModel
   });
   registerContainerSettings();
+  registerGmTierSettings();
   registerSidebarHiding();
 });
 
@@ -25,6 +28,7 @@ Hooks.once("ready", async () => {
   registerSocket();
   startExpirySweep();
   startLockResync();
+  await vaultStore.init();
 });
 
 Hooks.on("getSceneControlButtons", controls => {

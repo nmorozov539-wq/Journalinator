@@ -35,6 +35,7 @@ export default class JournalCanvas {
     this.selectedLinkId = null;
     this.previewMode = "full"; // "full" | "lines" — hover tooltip preview style (spec §9/§13)
     this.dimMatch = () => true; // (note) => does it match the active search/filters?
+    this.gmMode = false; // GM view with secrets merged in: shows hide/reveal/hint controls
 
     this.root = document.createElement("div");
     this.root.className = "jn-canvas";
@@ -105,6 +106,9 @@ export default class JournalCanvas {
     }
 
     el.className = `jn-card ${styleDef.cssClass}`;
+    el.classList.toggle("jn-secret", !!note.secret);
+    el.classList.toggle("jn-hint", !!note.system.hint);
+    el.classList.toggle("jn-has-hidden", !note.secret && (note.system.blocks ?? []).some(b => b.hidden));
     el.classList.toggle("selected", note._id === this.selectedNoteId);
     el.classList.toggle("jn-being-edited", hasAnyLock(note._id));
     el.classList.toggle("jn-dimmed", !this.dimMatch(note));
@@ -149,6 +153,7 @@ export default class JournalCanvas {
     el.style.top = `${data.y}px`;
     el.style.fontSize = `${data.size ?? 14}px`;
     el.style.color = data.color || "";
+    el.classList.toggle("jn-label-hidden", !!data.hidden);
     el.textContent = data.text ?? "";
   }
 
@@ -196,13 +201,14 @@ export default class JournalCanvas {
         const dimmed = dimmedIds.has(note._id) || dimmedIds.has(link.targetId);
         const linkId = foundry.utils.escapeHTML(String(link.id ?? ""));
 
-        body += `<g data-id="${linkId}" opacity="${dimmed ? 0.15 : 1}">
+        const linkClasses = [link.hidden ? "jn-link-hidden" : "", link.hint ? "jn-link-hint" : ""].join(" ").trim();
+        body += `<g data-id="${linkId}" class="${linkClasses}" opacity="${dimmed ? 0.15 : 1}">
           <path d="${d}" fill="none" stroke="${color}" stroke-width="${selected ? 3.5 : 2}"
-            ${link.lineStyle === "dashed" ? 'stroke-dasharray="7 6"' : ""}
+            ${link.hidden ? 'stroke-dasharray="2 6" stroke-linecap="round"' : link.lineStyle === "dashed" ? 'stroke-dasharray="7 6"' : ""}
             ${direction !== "none" ? `marker-end="url(#${markerId})"` : ""}
             ${direction === "two" ? `marker-start="url(#${markerId})"` : ""}/>
           <path class="jn-link-hit" data-id="${linkId}" d="${d}"/>
-          ${link.label ? `<text class="jn-link-label" x="${mx}" y="${my + 4}">${foundry.utils.escapeHTML(link.label)}</text>` : ""}
+          ${link.label || link.hint ? `<text class="jn-link-label" x="${mx}" y="${my + 4}">${link.hint ? "&#10022; " : ""}${foundry.utils.escapeHTML(link.label ?? "")}</text>` : ""}
         </g>`;
 
         this.linksById.set(link.id, { sourceId: note._id, targetId: link.targetId, mx, my, ...link });
@@ -232,6 +238,7 @@ export default class JournalCanvas {
       <button type="button" class="jn-link-dir" title="Direction">${{ none: "—", one: "→", two: "↔" }[direction]}</button>
       <span class="jn-link-colors">${LINK_COLORS.map(c => `<button type="button" class="jn-link-color${c === currentColor ? " on" : ""}" data-color="${c}" style="background:${c || LINK_DEFAULT_COLOR}"></button>`).join("")}</span>
       <button type="button" class="jn-link-dash" title="Line style">${link.lineStyle === "dashed" ? "┄┄" : "──"}</button>
+      ${this.#gmLinkButtons(link)}
       <button type="button" class="jn-link-delete" title="Delete link">✕</button>
     `;
 
@@ -246,11 +253,31 @@ export default class JournalCanvas {
     });
     this.linkToolbar.querySelector(".jn-link-dash").onclick = () =>
       update({ lineStyle: link.lineStyle === "dashed" ? "solid" : "dashed" });
+    const gmButton = (selector, fn) => {
+      const btn = this.linkToolbar.querySelector(selector);
+      if (btn) btn.onclick = () => { fn(); this.selectedLinkId = null; this.linkToolbar.style.display = "none"; };
+    };
+    gmButton(".jn-link-hide", () => this.callbacks.onHideLink?.(link.sourceId, link.id));
+    gmButton(".jn-link-reveal", () => this.callbacks.onRevealLink?.(link.sourceId, link.id));
+    const hintBtn = this.linkToolbar.querySelector(".jn-link-hint-toggle");
+    if (hintBtn) hintBtn.onclick = () => this.callbacks.onToggleLinkHint?.(link.sourceId, link.id, !link.hint);
     this.linkToolbar.querySelector(".jn-link-delete").onclick = () => {
       this.callbacks.onDeleteLink(link.sourceId, link.id);
       this.selectedLinkId = null;
       this.linkToolbar.style.display = "none";
     };
+  }
+
+  /** GM-only toolbar buttons: hide a shared link, reveal a hidden one, mark a shared link as a hint. */
+  #gmLinkButtons(link) {
+    if (!this.gmMode) return "";
+    if (link.hidden) {
+      const secretEnd = this.notes.some(n => n.secret && (n._id === link.sourceId || n._id === link.targetId));
+      return secretEnd ? `<span class="jn-link-gm-tag" title="Touches a secret note">GM</span>`
+        : `<button type="button" class="jn-link-reveal" title="Make this link visible to players">Reveal</button>`;
+    }
+    return `<button type="button" class="jn-link-hint-toggle${link.hint ? " on" : ""}" title="Mark as a GM hint">&#10022;</button>` +
+      (link.origin === "typed" ? "" : `<button type="button" class="jn-link-hide" title="Hide from players">Hide</button>`);
   }
 
   #centerOnContent() {
@@ -447,7 +474,7 @@ export default class JournalCanvas {
       }
       if (ev.target === this.root || ev.target === this.world) {
         const { x, y } = this.#toWorld(ev.clientX, ev.clientY);
-        this.callbacks.onCreateNoteAt(x - 95, y - 35);
+        this.callbacks.onCreateNoteAt(x - 95, y - 35, { secret: this.gmMode && ev.altKey });
       }
     });
   }

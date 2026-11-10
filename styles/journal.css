@@ -5,6 +5,8 @@
   --jn-muted: #8d8d97;
   --jn-line: #3a3a41;
   --jn-acc: #a393f2;
+  --jn-gm: #6fb3c4;   /* GM-only things: secret notes, hidden blocks/links/labels */
+  --jn-hint: #d6a45c; /* GM hints: visible to players, marked as coming from the GM */
 }
 
 #journalinator-app .window-content {
@@ -667,4 +669,179 @@
 }
 .jn-link-color.on {
   border: 2px solid var(--jn-text);
+}
+
+
+/* --- GM tier (spec §14) ------------------------------------------------------------------- */
+
+.jn-gm-controls {
+  display: flex;
+  gap: 6px;
+  margin-left: 4px;
+  padding-left: 8px;
+  border-left: 1px solid var(--jn-line);
+}
+.jn-gm-controls button {
+  background: var(--jn-bg);
+  color: var(--jn-gm);
+  border: 1px solid color-mix(in srgb, var(--jn-gm) 45%, var(--jn-line));
+  border-radius: 6px;
+  padding: 5px 9px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.jn-gm-controls button:hover {
+  border-color: var(--jn-gm);
+}
+
+/* Secret notes: dashed GM-colored outline and a "GM" ribbon. */
+.jn-card.jn-secret {
+  outline: 2px dashed var(--jn-gm);
+  outline-offset: 3px;
+}
+.jn-card.jn-secret::after {
+  content: "GM";
+  position: absolute;
+  bottom: -9px; left: 10px;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--jn-gm);
+  color: #17171a;
+  font: 700 9px/15px system-ui;
+  letter-spacing: 0.05em;
+}
+.jn-card.jn-secret.selected {
+  outline: 2px solid var(--jn-acc);
+}
+/* Torn cards are clip-pathed, so outlines and ribbons outside the box would be cut off. */
+.jn-card-torn.jn-secret {
+  box-shadow: inset 0 0 0 2px var(--jn-gm);
+}
+.jn-card-torn.jn-secret::after,
+.jn-gm-view .jn-card-torn.jn-has-hidden:not(.jn-secret)::after {
+  bottom: 8px;
+}
+/* Shared notes that carry hidden blocks: a small marker only the GM view renders. */
+.jn-gm-view .jn-card.jn-has-hidden:not(.jn-secret)::after {
+  content: "+ hidden";
+  position: absolute;
+  bottom: -9px; left: 10px;
+  padding: 0 6px;
+  border-radius: 8px;
+  border: 1px dashed var(--jn-gm);
+  background: var(--jn-panel);
+  color: var(--jn-gm);
+  font: 600 9px/13px system-ui;
+}
+/* Hints are visible to everyone. */
+.jn-card.jn-hint {
+  box-shadow: 0 0 0 1px var(--jn-hint), 0 0 14px color-mix(in srgb, var(--jn-hint) 35%, transparent);
+}
+.jn-card.jn-hint .jn-card-title::before {
+  content: "\2726  ";
+  color: var(--jn-hint);
+}
+
+.jn-label.jn-label-hidden {
+  color: var(--jn-gm) !important;
+  border-bottom: 1px dashed var(--jn-gm);
+}
+
+.jn-link-hidden path:first-child {
+  stroke-opacity: 0.75;
+}
+.jn-link-hidden .jn-link-label {
+  fill: var(--jn-gm);
+}
+.jn-link-hint path:first-child {
+  filter: drop-shadow(0 0 3px var(--jn-hint));
+}
+.jn-link-hint .jn-link-label {
+  fill: var(--jn-hint);
+}
+.jn-link-toolbar .jn-link-reveal,
+.jn-link-toolbar .jn-link-hide {
+  color: var(--jn-gm);
+}
+.jn-link-toolbar .jn-link-hint-toggle.on {
+  color: #17171a;
+  background: var(--jn-hint);
+  border-color: var(--jn-hint);
+}
+.jn-link-gm-tag {
+  font: 700 10px system-ui;
+  color: var(--jn-gm);
+  padding: 0 4px;
+}
+
+/* Editor */
+.jn-gm-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 6px 0;
+  padding: 6px 10px;
+  border: 1px dashed var(--jn-gm);
+  border-radius: 8px;
+  color: var(--jn-gm);
+  font-size: 12px;
+}
+.jn-gm-banner button,
+.jn-gm-row button {
+  color: var(--jn-gm);
+}
+.jn-gm-row .journalinator-hint-toggle.on {
+  color: #17171a;
+  background: var(--jn-hint);
+  border-color: var(--jn-hint);
+}
+.jn-block.jn-hidden-block {
+  margin-right: -10px;
+  padding: 4px 10px 4px 7px;
+  border-left: 3px dashed var(--jn-gm);
+  background: color-mix(in srgb, var(--jn-gm) 8%, transparent);
+}
+.jn-empty-block {
+  color: var(--jn-muted);
+  font-style: italic;
+}
+.jn-block-gm {
+  display: none;
+  position: absolute;
+  right: 4px; top: -10px;
+  gap: 3px;
+  z-index: 1;
+}
+.jn-block:hover > .jn-block-gm {
+  display: flex;
+}
+.jn-block-gm button {
+  font: 600 10px/1 system-ui;
+  padding: 3px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--jn-gm);
+  background: var(--jn-panel);
+  color: var(--jn-gm);
+  cursor: pointer;
+}
+.journalinator-chip.jn-chip-hidden {
+  border-style: dashed;
+  border-color: var(--jn-gm);
+  color: var(--jn-gm);
+}
+
+/* Secrets dialog */
+.jn-vault-form p {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.jn-vault-form label {
+  display: block;
+  margin: 4px 0;
+}
+.jn-vault-pass input[type="password"] {
+  width: 100%;
+  margin: 4px 0;
 }

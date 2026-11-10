@@ -1,0 +1,13 @@
+{
+  "name": "fvtt-journalinator",
+  "private": true,
+  "description": "Dev-only manifest for tests. Foundry loads the module from module.json; nothing here ships.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "check": "for f in $(find scripts -name '*.mjs'); do node --check \"$f\" || exit 1; done"
+  },
+  "devDependencies": {
+    "jsdom": "^24.1.3"
+  }
+}
