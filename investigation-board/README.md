@@ -3,7 +3,8 @@
 An Obsidian-inspired shared notes journal and investigation canvas for Foundry Virtual Tabletop
 v14. This is the `investigation-board` branch of
 [Journalinator](https://github.com/nmorozov539-wq/Journalinator): an earlier, independent
-realization of the design, kept for reference. It is a separate module and does not include the
+realization of the design, kept for reference, originally built by
+[Larkar](https://github.com/Larkar789). It is a separate module and does not include the
 encrypted GM tier.
 
 ## Included in this alpha
