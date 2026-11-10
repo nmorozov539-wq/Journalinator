@@ -126,7 +126,7 @@ language file there and register it in `module.json` to extend it.
 
 ## Compatibility
 
-- Foundry VTT **v14** (verified on 14.367-era APIs).
+- Foundry VTT **v14** (API target; see the status note above).
 - System-agnostic; built for a PF2e table.
 - No dependencies on other modules.
 
