@@ -6,6 +6,11 @@ Everyone writes together with per-paragraph locking, links notes by drawing or b
 
 Status: pre-alpha (0.1.0).
 
+## Languages
+
+The interface follows Foundry's client language. English and Russian ship in `lang/`; add a
+language file there and register it in `module.json` to extend it.
+
 ## Using it
 
 Open it from the sticky-note button in the scene controls.

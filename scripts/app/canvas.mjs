@@ -1,5 +1,6 @@
 import { CARD_STYLES, tintFor } from "../styles/registry.mjs";
 import { hasAnyLock } from "../locks.mjs";
+import { t } from "../i18n.mjs";
 
 const DRAG_THRESHOLD = 5;
 const LINK_COLORS = ["", "#a393f2", "#d6a45c", "#d77b91"];
@@ -98,7 +99,7 @@ export default class JournalCanvas {
         <h3 class="jn-card-title"></h3>
         <p class="jn-card-excerpt"></p>
         <span class="jn-card-lock-pill">&#9998;</span>
-        <b class="jn-card-link" title="Drag to another card to link"></b>
+        <b class="jn-card-link" title="${t("JN.Canvas.LinkHandle")}"></b>
         <b class="jn-card-resize"></b>
       `;
       this.world.appendChild(el);
@@ -234,12 +235,12 @@ export default class JournalCanvas {
     const currentColor = safeLinkColor(link.color);
     const direction = LINK_DIRECTIONS.has(link.direction) ? link.direction : "none";
     this.linkToolbar.innerHTML = `
-      <input type="text" class="jn-link-label-input" placeholder="Label" value="${foundry.utils.escapeHTML(link.label ?? "")}">
-      <button type="button" class="jn-link-dir" title="Direction">${{ none: "—", one: "→", two: "↔" }[direction]}</button>
+      <input type="text" class="jn-link-label-input" placeholder="${t("JN.Link.Label")}" value="${foundry.utils.escapeHTML(link.label ?? "")}">
+      <button type="button" class="jn-link-dir" title="${t("JN.Link.Direction")}">${{ none: "—", one: "→", two: "↔" }[direction]}</button>
       <span class="jn-link-colors">${LINK_COLORS.map(c => `<button type="button" class="jn-link-color${c === currentColor ? " on" : ""}" data-color="${c}" style="background:${c || LINK_DEFAULT_COLOR}"></button>`).join("")}</span>
-      <button type="button" class="jn-link-dash" title="Line style">${link.lineStyle === "dashed" ? "┄┄" : "──"}</button>
+      <button type="button" class="jn-link-dash" title="${t("JN.Link.LineStyle")}">${link.lineStyle === "dashed" ? "┄┄" : "──"}</button>
       ${this.#gmLinkButtons(link)}
-      <button type="button" class="jn-link-delete" title="Delete link">✕</button>
+      <button type="button" class="jn-link-delete" title="${t("JN.Link.Delete")}">✕</button>
     `;
 
     const update = fields => this.callbacks.onUpdateLink(link.sourceId, link.id, fields);
@@ -273,11 +274,11 @@ export default class JournalCanvas {
     if (!this.gmMode) return "";
     if (link.hidden) {
       const secretEnd = this.notes.some(n => n.secret && (n._id === link.sourceId || n._id === link.targetId));
-      return secretEnd ? `<span class="jn-link-gm-tag" title="Touches a secret note">GM</span>`
-        : `<button type="button" class="jn-link-reveal" title="Make this link visible to players">Reveal</button>`;
+      return secretEnd ? `<span class="jn-link-gm-tag" title="${t("JN.Link.GMTitle")}">${t("JN.Link.GM")}</span>`
+        : `<button type="button" class="jn-link-reveal" title="${t("JN.Link.RevealTitle")}">${t("JN.Link.Reveal")}</button>`;
     }
-    return `<button type="button" class="jn-link-hint-toggle${link.hint ? " on" : ""}" title="Mark as a GM hint">&#10022;</button>` +
-      (link.origin === "typed" ? "" : `<button type="button" class="jn-link-hide" title="Hide from players">Hide</button>`);
+    return `<button type="button" class="jn-link-hint-toggle${link.hint ? " on" : ""}" title="${t("JN.Link.HintTitle")}">&#10022;</button>` +
+      (link.origin === "typed" ? "" : `<button type="button" class="jn-link-hide" title="${t("JN.Link.HideTitle")}">${t("JN.Link.Hide")}</button>`);
   }
 
   #centerOnContent() {
@@ -486,7 +487,7 @@ export default class JournalCanvas {
     const author = game.users.get(note.system.authorId);
     const text = note.system.blocks.map(b => b.text).join(" ");
     const lines = this.previewMode === "lines" ? " jn-tooltip-lines" : "";
-    this.tooltip.innerHTML = `<b>${foundry.utils.escapeHTML(note.name)}</b><div class="jn-tooltip-text${lines}">${foundry.utils.escapeHTML(text)}</div><div class="jn-tooltip-by">by ${foundry.utils.escapeHTML(author?.name ?? "unknown")}</div>`;
+    this.tooltip.innerHTML = `<b>${foundry.utils.escapeHTML(note.name)}</b><div class="jn-tooltip-text${lines}">${foundry.utils.escapeHTML(text)}</div><div class="jn-tooltip-by">${t("JN.Canvas.By", { author: foundry.utils.escapeHTML(author?.name ?? t("JN.Common.Unknown")) })}</div>`;
     const rect = this.root.getBoundingClientRect();
     this.tooltip.style.display = "block";
     let left = clientX - rect.left + 16;

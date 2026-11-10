@@ -4,7 +4,10 @@
  * loaded here. Documents apply dotted-path updates and fire the same hooks Foundry does.
  */
 
+import { readFileSync } from "node:fs";
+
 const ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+const EN = JSON.parse(readFileSync(new URL("../lang/en.json", import.meta.url), "utf8"));
 export function randomID(n = 16) {
   let id = "";
   const bytes = globalThis.crypto.getRandomValues(new Uint8Array(n));
@@ -162,6 +165,12 @@ export function installFoundry({ user, users, worldId = "test-world" }) {
   globalThis.game = {
     user,
     world: { id: worldId },
+    i18n: {
+      lang: "en",
+      localize: key => EN[key] ?? key,
+      format: (text, data) => text.replace(/\{(\w+)\}/g, (whole, key) => (data[key] ?? whole)),
+      has: key => Object.hasOwn(EN, key)
+    },
     journal,
     users: {
       get: id => userMap.get(id),

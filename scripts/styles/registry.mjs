@@ -4,19 +4,19 @@
  */
 export const CARD_STYLES = {
   sticky: {
-    label: "Sticky Note",
+    labelKey: "JN.Style.Sticky",
     cssClass: "jn-card-sticky",
     tilt: true,
     defaultWidth: 190
   },
   document: {
-    label: "Document",
+    labelKey: "JN.Style.Document",
     cssClass: "jn-card-document",
     tilt: false,
     defaultWidth: 245
   },
   torn: {
-    label: "Torn Paper",
+    labelKey: "JN.Style.Torn",
     cssClass: "jn-card-torn",
     tilt: true,
     defaultWidth: 225

@@ -1,9 +1,11 @@
+import { t } from "../i18n.mjs";
+
 const MODULE_ID = "fvtt-journalinator";
 
 export function registerGmTierSettings() {
   game.settings.register(MODULE_ID, "assistantSecrets", {
-    name: "Assistant GMs can use GM secrets",
-    hint: "Lets Assistant GMs open the secrets vault and see hidden notes. With a passphrase vault they still need the passphrase.",
+    name: t("JN.Settings.AssistantSecretsName"),
+    hint: t("JN.Settings.AssistantSecretsHint"),
     scope: "world",
     config: true,
     type: Boolean,

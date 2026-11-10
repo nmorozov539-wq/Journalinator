@@ -8,6 +8,7 @@ import { startExpirySweep, startLockResync } from "./locks.mjs";
 import JournalApp from "./app/journal-app.mjs";
 import { registerGmTierSettings } from "./secrets/access.mjs";
 import { vaultStore } from "./secrets/vault-store.mjs";
+import { t } from "./i18n.mjs";
 
 const MODULE_ID = "fvtt-journalinator";
 
@@ -34,7 +35,7 @@ Hooks.once("ready", async () => {
 Hooks.on("getSceneControlButtons", controls => {
   controls.journalinator = {
     name: "journalinator",
-    title: "Journalinator",
+    title: t("JN.Title"),
     icon: "fa-solid fa-note-sticky",
     order: Object.keys(controls).length,
     visible: true,
@@ -43,7 +44,7 @@ Hooks.on("getSceneControlButtons", controls => {
       open: {
         name: "open",
         order: 0,
-        title: "Open Journalinator",
+        title: t("JN.Scene.Open"),
         icon: "fa-solid fa-note-sticky",
         button: true,
         onChange: () => {

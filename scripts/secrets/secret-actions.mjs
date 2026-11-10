@@ -7,6 +7,7 @@ import {
   makeSecretTitle, stripSecretPrefix, hasSecretPrefix, mergeBlocks, orderOf, declassifyAnchor,
   resolveSecretTitle, findFreeSpot
 } from "./model.mjs";
+import { t } from "../i18n.mjs";
 
 /**
  * GM-tier write operations (spec §14). These run in the acting GM's own client and write the
@@ -51,7 +52,7 @@ export function waitForShared(predicate, timeoutMs = CONFIRM_TIMEOUT_MS) {
 
 async function sendAndConfirm(message, predicate) {
   if (!game.users.activeGM) {
-    warn("no GM is connected to apply shared changes right now.");
+    warn(t("JN.Secret.NoGM"));
     return false;
   }
   await requestWrite(message);
@@ -173,14 +174,14 @@ export function createSecretNote({ title, x, y, style }) {
 
 export function renameSecretNote(noteId, base) {
   const clean = (base ?? "").trim();
-  if (!clean) return warn("a note title cannot be empty.");
+  if (!clean) return warn(t("JN.Secret.TitleEmpty"));
   return vaultStore.mutate(vault => {
     const note = vault.notes[noteId];
     if (!note) return;
     const title = makeSecretTitle(clean, note.name);
-    if (title.length > MAX_TITLE_LENGTH) return warn(`titles must be ${MAX_TITLE_LENGTH} characters or fewer.`);
+    if (title.length > MAX_TITLE_LENGTH) return warn(t("JN.Secret.TitleTooLong", { max: MAX_TITLE_LENGTH }));
     if (Object.values(vault.notes).some(n => n.id !== noteId && n.name.toLowerCase() === title.toLowerCase())) {
-      return warn(`a secret note titled "${title}" already exists.`);
+      return warn(t("JN.Secret.TitleExists", { title }));
     }
     note.formerNames = [...new Set([...(note.formerNames ?? []), note.name])].filter(n => n !== title).slice(-20);
     note.name = title;
@@ -329,7 +330,7 @@ export function deleteSecretBlock(noteId, blockId) {
   return vaultStore.mutate(async vault => {
     const secret = vault.notes[noteId];
     if (secret) {
-      if (secret.blocks.length <= 1) return warn("a note needs at least one block.");
+      if (secret.blocks.length <= 1) return warn(t("JN.Secret.NeedsBlock"));
       secret.blocks = secret.blocks.filter(b => b.blockId !== blockId);
     } else {
       const entry = vault.hiddenBlocks[noteId];
@@ -351,7 +352,7 @@ export async function hideSharedBlock(noteId, blockId) {
   const block = page?.system.blocks.find(b => b.blockId === blockId);
   if (!block) return false;
   if (page.system.blocks.length <= 1) {
-    warn("a note needs at least one visible block, so its only block can't be hidden.");
+    warn(t("JN.Secret.NeedsVisibleBlock"));
     return false;
   }
 
@@ -372,7 +373,7 @@ export async function hideSharedBlock(noteId, blockId) {
   );
   if (!removed) {
     await deleteSecretBlock(noteId, hiddenId);
-    warn("the block could not be removed from the shared note, so it was left visible.");
+    warn(t("JN.Secret.RemoveFailed"));
     return false;
   }
   return true;
@@ -385,7 +386,7 @@ export async function declassifyBlock(noteId, blockId) {
   const block = entry?.blocks?.[blockId];
   if (!block || !notesStore.getSharedPage(noteId)) return false;
   if (prefixedSecretMentions(block.text).length) {
-    warn("this block links to a secret note by its GM title. Remove that [[link]] before declassifying.");
+    warn(t("JN.Secret.PrefixedLink"));
     return false;
   }
   const beforeBlockId = declassifyAnchor(mergeBlocks(sharedBlocksOf(noteId), entry), blockId);
@@ -394,7 +395,7 @@ export async function declassifyBlock(noteId, blockId) {
     () => sharedBlocksOf(noteId).some(b => b.blockId === blockId)
   );
   if (!ok) {
-    warn("declassifying did not confirm in time; the block is still hidden.");
+    warn(t("JN.Secret.DeclassifyTimeout"));
     return false;
   }
   await vaultStore.tidy();
@@ -406,14 +407,14 @@ export async function declassifyNote(noteId, title) {
   const note = vaultStore.data?.notes[noteId];
   if (!note) return false;
   title = (title ?? "").trim();
-  if (!title || title.length > MAX_TITLE_LENGTH) { warn("pick a title for the public note."); return false; }
+  if (!title || title.length > MAX_TITLE_LENGTH) { warn(t("JN.Secret.PickPublicTitle")); return false; }
   if (liveSharedNotes().some(p => p.name.trim().toLowerCase() === title.toLowerCase())) {
-    warn(`a shared note titled "${title}" already exists; pick another title.`);
+    warn(t("JN.Secret.SharedTitleExists", { title }));
     return false;
   }
   const allText = note.blocks.map(b => b.text).join("\n");
   if (prefixedSecretMentions(allText).length) {
-    warn("this note links to another secret note by its GM title. Remove those [[links]] before declassifying.");
+    warn(t("JN.Secret.NotePrefixedLink"));
     return false;
   }
 
@@ -433,7 +434,7 @@ export async function declassifyNote(noteId, title) {
     card: note.card
   }, () => !!notesStore.getSharedPage(noteId));
   if (!ok) {
-    warn("declassifying did not confirm in time; the note is still secret.");
+    warn(t("JN.Secret.NoteTimeout"));
     return false;
   }
 
@@ -497,7 +498,7 @@ export async function revealLink(sourceId, linkId) {
   const link = vaultStore.data?.hiddenLinks[sourceId]?.find(l => l.id === linkId);
   const target = link && notesStore.getSharedPage(link.targetId);
   if (!link || !target || target.system.deleted) {
-    warn("only links between two shared notes can be made public.");
+    warn(t("JN.Secret.OnlySharedLink"));
     return false;
   }
   const ok = await sendAndConfirm(
@@ -513,7 +514,7 @@ export async function hideSharedLink(sourceId, linkId) {
   const link = notesStore.getSharedPage(sourceId)?.system.links.find(l => l.id === linkId);
   if (!link) return false;
   if (link.origin === "typed") {
-    warn("typed [[links]] come from the note text; edit the text instead of hiding the link.");
+    warn(t("JN.Secret.TypedLink"));
     return false;
   }
   await vaultStore.mutate(vault => {

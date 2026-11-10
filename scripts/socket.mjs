@@ -7,6 +7,7 @@ import {
   authoritativeRequestLock, authoritativeReleaseLock, authoritativeHeartbeat,
   authoritativeHolds, authoritativeSnapshot, receiveLockBroadcast, authoritativeLockHolder
 } from "./locks.mjs";
+import { t } from "./i18n.mjs";
 
 const MODULE_ID = "fvtt-journalinator";
 const CHANNEL = `module.${MODULE_ID}`;
@@ -70,7 +71,7 @@ function findNoteByTitle(shared, title, excludeId = null) {
 
 /** `Untitled`, then `Untitled 2`, `Untitled 3`, ... — used when the title is generated, not typed. */
 function uniqueTitle(shared, base) {
-  const stem = (base ?? "").trim() || "Untitled";
+  const stem = (base ?? "").trim() || t("JN.Note.Untitled");
   if (!findNoteByTitle(shared, stem)) return stem;
   let suffix = 2;
   while (findNoteByTitle(shared, `${stem} ${suffix}`)) suffix++;
@@ -179,15 +180,15 @@ function findFreeSpot(cards, w, h, nearX, nearY) {
 
 async function createNotePage(shared, { title, style, x, y, authorId, autoTitle = false }) {
   style = typeof style === "string" && Object.hasOwn(CARD_STYLES, style) ? style : "sticky";
-  const requestedTitle = (title ?? "").trim() || "Untitled";
+  const requestedTitle = (title ?? "").trim() || t("JN.Note.Untitled");
   const finalTitle = autoTitle ? uniqueTitle(shared, requestedTitle) : requestedTitle;
 
   if (finalTitle.length > MAX_TITLE_LENGTH) {
-    notifyUser(authorId, `Titles must be ${MAX_TITLE_LENGTH} characters or fewer.`);
+    notifyUser(authorId, t("JN.Socket.TitleTooLong", { max: MAX_TITLE_LENGTH }));
     return null;
   }
   if (!autoTitle && findNoteByTitle(shared, finalTitle)) {
-    notifyUser(authorId, `A note titled "${finalTitle}" already exists.`);
+    notifyUser(authorId, t("JN.Socket.TitleTaken", { title: finalTitle }));
     return null;
   }
 
@@ -203,7 +204,7 @@ async function createNotePage(shared, { title, style, x, y, authorId, autoTitle 
     type: `${MODULE_ID}.note`,
     system: {
       style,
-      blocks: [{ blockId: foundry.utils.randomID(), text: "New note. Click here and start writing.", authorId }],
+      blocks: [{ blockId: foundry.utils.randomID(), text: t("JN.Note.NewText"), authorId }],
       authorId,
       createdAt: Date.now(),
       updatedAt: Date.now()
@@ -332,15 +333,15 @@ async function handleMessage(message, senderUserId) {
       if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
       const title = (message.title ?? "").trim();
       if (!title) {
-        notifyUser(senderUserId, "A note title cannot be empty.");
+        notifyUser(senderUserId, t("JN.Socket.TitleEmpty"));
         return;
       }
       if (title.length > MAX_TITLE_LENGTH) {
-        notifyUser(senderUserId, `Titles must be ${MAX_TITLE_LENGTH} characters or fewer.`);
+        notifyUser(senderUserId, t("JN.Socket.TitleTooLong", { max: MAX_TITLE_LENGTH }));
         return;
       }
       if (findNoteByTitle(shared, title, page.id)) {
-        notifyUser(senderUserId, `A note titled "${title}" already exists.`);
+        notifyUser(senderUserId, t("JN.Socket.TitleTaken", { title }));
         return;
       }
 
@@ -475,7 +476,7 @@ async function handleMessage(message, senderUserId) {
       const layout = layoutPage(shared);
       if (!layout) return;
       if (message.text !== undefined && typeof message.text !== "string") return;
-      const text = (message.text ?? "Label").slice(0, MAX_LABEL_TEXT_LENGTH);
+      const text = (message.text ?? t("JN.Label.Default")).slice(0, MAX_LABEL_TEXT_LENGTH);
       const x = message.x === undefined ? 0 : message.x;
       const y = message.y === undefined ? 0 : message.y;
       const size = message.size === undefined ? 14 : message.size;
@@ -589,7 +590,7 @@ async function handleMessage(message, senderUserId) {
       const layout = layoutPage(shared);
       const sourceCard = layout?.system.cards[message.sourceId] ?? { x: 0, y: 0 };
       const newPage = await createNotePage(shared, {
-        title: message.title ?? "Untitled", style: "sticky",
+        title: message.title ?? t("JN.Note.Untitled"), style: "sticky",
         x: sourceCard.x + 220, y: sourceCard.y, authorId: senderUserId
       });
       if (!newPage) return;
@@ -645,7 +646,7 @@ async function handleMessage(message, senderUserId) {
       if (restoredTitle !== page.name) restoreUpdate.name = restoredTitle;
       await page.update(restoreUpdate);
       if (restoredTitle !== page.name) {
-        notifyUser(senderUserId, `Restored as "${restoredTitle}" because another note already uses "${oldTitle}".`);
+        notifyUser(senderUserId, t("JN.Socket.RestoredAs", { restored: restoredTitle, old: oldTitle }));
       }
       if (layout) {
         await layout.update({
@@ -700,12 +701,12 @@ async function handleMessage(message, senderUserId) {
       const blocks = page.system.blocks ?? [];
       if (!blocks.some(b => b.blockId === message.blockId)) return;
       if (blocks.length <= 1) {
-        notifyUser(senderUserId, "A note needs at least one visible block, so its only block can't be hidden.");
+        notifyUser(senderUserId, t("JN.Socket.LastBlockHidden"));
         return;
       }
       const holder = authoritativeLockHolder(message.noteId, message.blockId);
       if (holder && holder !== senderUserId) {
-        notifyUser(senderUserId, "Someone is editing that block right now; try again when they're done.");
+        notifyUser(senderUserId, t("JN.Socket.LockedByOther"));
         return;
       }
       await reconcileAndSave(shared, page, blocks.filter(b => b.blockId !== message.blockId), senderUserId);
@@ -717,7 +718,7 @@ async function handleMessage(message, senderUserId) {
       const note = cleanDeclassifiedNote(shared, message);
       if (!note) return;
       if (findNoteByTitle(shared, note.title)) {
-        notifyUser(senderUserId, `A note titled "${note.title}" already exists; pick another title to declassify.`);
+        notifyUser(senderUserId, t("JN.Socket.DeclassifyTitleTaken", { title: note.title }));
         return;
       }
       const page = await JournalEntryPage.create({

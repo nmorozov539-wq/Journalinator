@@ -1,3 +1,5 @@
+import { t } from "../i18n.mjs";
+
 const MODULE_ID = "fvtt-journalinator";
 const SETTING_KEY = "containerIds";
 
@@ -29,19 +31,19 @@ export async function ensureContainers() {
   }
 
   const shared = await JournalEntry.create({
-    name: "Journalinator: Shared Journal",
+    name: t("JN.Container.Shared"),
     flags: { [MODULE_ID]: { container: "shared" } },
     ownership: { default: CONST.DOCUMENT_OWNERSHIP_LEVELS.OBSERVER }
   });
 
   const history = await JournalEntry.create({
-    name: "Journalinator: History",
+    name: t("JN.Container.History"),
     flags: { [MODULE_ID]: { container: "history" } },
     ownership: { default: CONST.DOCUMENT_OWNERSHIP_LEVELS.NONE }
   });
 
   const secrets = await JournalEntry.create({
-    name: "Journalinator: GM Secrets",
+    name: t("JN.Container.Secrets"),
     flags: { [MODULE_ID]: { container: "secrets" } },
     ownership: { default: CONST.DOCUMENT_OWNERSHIP_LEVELS.NONE }
   });

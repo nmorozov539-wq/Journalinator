@@ -275,7 +275,8 @@ ordering is still well-defined.
 - No sheet registration for the module's `JournalEntryPage` sub-types (spec §5.1).
 - Tests cover the GM tier (crypto, model, integration via a fake Foundry, jsdom UI smoke).
   `stats.mjs` and `wikilinks.mjs` still have no direct unit tests. No linting or CI.
-- No localization; all strings are hardcoded English.
+- Localization: English and Russian ship in `lang/`, wired through `scripts/i18n.mjs`.
+  `tests/i18n.test.mjs` checks key parity and that every `t()` call has a key.
 - The spec's "must verify" items were checked against the v14 build 367 server code and are
   recorded in spec §5.9 and section 3 above.
 

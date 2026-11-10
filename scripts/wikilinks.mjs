@@ -1,3 +1,5 @@
+import { t } from "./i18n.mjs";
+
 const WIKILINK_RE = /\[\[([^\]|]+?)(?:\|([^\]]+))?\]\]/g;
 
 /** Parses `[[Target]]` / `[[Target|label]]` occurrences out of a block of text (spec §6.8). */
@@ -64,7 +66,7 @@ export async function reconcileTypedLinks(sourceNote, blocks, { findNoteByTitle,
     let targetNote = findNoteByTitle.byTitle(title);
     if (!targetNote) {
       targetNote = await createNoteNear(title);
-      ui.notifications?.info(`Journalinator: "${title}" didn't exist yet, so it was created on the canvas.`);
+      ui.notifications?.info(t("JN.Wikilinks.Created", { title }));
     }
     nextLinks.push({
       id: foundry.utils.randomID(),

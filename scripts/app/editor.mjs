@@ -4,6 +4,7 @@ import { requestLock, releaseLock, sendHeartbeat, requestLockState, getLock, isH
 import { CARD_STYLES } from "../styles/registry.mjs";
 import * as secrets from "../secrets/secret-actions.mjs";
 import { stripSecretPrefix } from "../secrets/model.mjs";
+import { t } from "../i18n.mjs";
 
 const { DialogV2 } = foundry.applications.api;
 const esc = text => foundry.utils.escapeHTML(String(text ?? ""));
@@ -100,15 +101,15 @@ export default class NoteEditor {
     this.#captureDraftBeforeRebuild();
     const note = this.noteId ? notesStore.getNote(this.noteId) : null;
     if (!note) {
-      this.root.innerHTML = `<p class="journalinator-empty">Select a note to open it.</p>`;
+      this.root.innerHTML = `<p class="journalinator-empty">${t("JN.Editor.Empty")}</p>`;
       return;
     }
 
     if (note.system.deleted) {
       this.root.innerHTML = `
         <div class="journalinator-eh"><b>${foundry.utils.escapeHTML(note.name)}</b></div>
-        <p class="journalinator-meta">This note is in the trash.</p>
-        <button type="button" class="journalinator-restore">Restore</button>
+        <p class="journalinator-meta">${t("JN.Editor.InTrash")}</p>
+        <button type="button" class="journalinator-restore">${t("JN.Common.Restore")}</button>
       `;
       this.root.querySelector(".journalinator-restore").addEventListener("click", () => {
         requestWrite({ type: "restoreNote", noteId: this.noteId });
@@ -120,51 +121,51 @@ export default class NoteEditor {
 
     const allNotes = notesStore.getAllNotes();
     const authorColor = game.users.get(note.system.authorId)?.color ?? "#8d8d97";
-    const authorName = game.users.get(note.system.authorId)?.name ?? "unknown";
+    const authorName = game.users.get(note.system.authorId)?.name ?? t("JN.Common.Unknown");
     const styleOptions = Object.entries(CARD_STYLES)
-      .map(([key, def]) => `<option value="${key}" ${note.system.style === key ? "selected" : ""}>${def.label}</option>`)
+      .map(([key, def]) => `<option value="${key}" ${note.system.style === key ? "selected" : ""}>${t(def.labelKey)}</option>`)
       .join("");
     const backlinks = allNotes
       .map(n => [n, (n.system.links ?? []).find(l => l.targetId === note._id)])
       .filter(([, link]) => link)
-      .map(([n, link]) => `<button type="button" class="journalinator-chip${link.hidden ? " jn-chip-hidden" : ""}" data-id="${n._id}"${link.hidden ? ' title="GM-only link"' : ""}>${foundry.utils.escapeHTML(n.name)}</button>`)
-      .join("") || `<small class="journalinator-meta">None yet</small>`;
+      .map(([n, link]) => `<button type="button" class="journalinator-chip${link.hidden ? " jn-chip-hidden" : ""}" data-id="${n._id}"${link.hidden ? ` title="${t("JN.Editor.GMOnlyLink")}"` : ""}>${foundry.utils.escapeHTML(n.name)}</button>`)
+      .join("") || `<small class="journalinator-meta">${t("JN.Common.NoneYet")}</small>`;
     const gmView = notesStore.merged;
     const contributors = Object.entries(note.system.contributions ?? {})
       .sort((a, b) => b[1] - a[1])
-      .map(([userId, chars]) => `${foundry.utils.escapeHTML(game.users.get(userId)?.name ?? "someone")} (${chars})`)
+      .map(([userId, chars]) => `${foundry.utils.escapeHTML(game.users.get(userId)?.name ?? t("JN.Common.Someone"))} (${chars})`)
       .join(", ");
 
     this.root.innerHTML = `
       <div class="journalinator-eh">
         <span class="jn-dot" style="background:${authorColor}"></span>
         <b>${foundry.utils.escapeHTML(note.name)}</b>
-        <button type="button" class="journalinator-rename" title="Rename note">&#9998;</button>
-        <button type="button" class="journalinator-authors-toggle">${this.showAuthors ? "Hide authors" : "Authors"}</button>
-        <button type="button" class="journalinator-delete" title="${note.secret ? "Delete permanently" : "Move to trash"}">&#128465;</button>
+        <button type="button" class="journalinator-rename" title="${t("JN.Editor.RenameTitle")}">&#9998;</button>
+        <button type="button" class="journalinator-authors-toggle">${this.showAuthors ? t("JN.Editor.HideAuthors") : t("JN.Editor.Authors")}</button>
+        <button type="button" class="journalinator-delete" title="${note.secret ? t("JN.Editor.DeletePermanentTitle") : t("JN.Editor.MoveToTrashTitle")}">&#128465;</button>
       </div>
       ${note.secret ? `
         <div class="jn-gm-banner">
-          <span>GM only &middot; players can't see this note</span>
-          <button type="button" class="journalinator-declassify">Declassify&hellip;</button>
+          <span>${t("JN.Editor.GMOnly")}</span>
+          <button type="button" class="journalinator-declassify">${t("JN.Editor.Declassify")}</button>
         </div>` : ""}
       ${gmView && !note.secret ? `
         <div class="journalinator-row jn-gm-row">
-          <button type="button" class="journalinator-hint-toggle${note.system.hint ? " on" : ""}" title="Hint notes are visible to players and marked as coming from the GM">&#10022; ${note.system.hint ? "GM hint" : "Mark as hint"}</button>
-          <button type="button" class="journalinator-add-hidden">+ Hidden block</button>
+          <button type="button" class="journalinator-hint-toggle${note.system.hint ? " on" : ""}" title="${t("JN.Editor.HintTitle")}">&#10022; ${note.system.hint ? t("JN.Editor.GMHint") : t("JN.Editor.MarkHint")}</button>
+          <button type="button" class="journalinator-add-hidden">${t("JN.Editor.AddHiddenBlock")}</button>
         </div>` : ""}
-      <div class="journalinator-meta">Linked from</div>
+      <div class="journalinator-meta">${t("JN.Editor.LinkedFrom")}</div>
       <div class="journalinator-chips">${backlinks}</div>
       <div class="journalinator-row">
-        <label>Style <select class="journalinator-style">${styleOptions}</select></label>
+        <label>${t("JN.Editor.Style")} <select class="journalinator-style">${styleOptions}</select></label>
       </div>
       <div class="journalinator-row">
-        <button type="button" class="journalinator-set-image">${note.system.image ? "Change Image" : "Set Image"}</button>
-        ${note.system.image ? `<button type="button" class="journalinator-clear-image">Remove Image</button>` : ""}
-        <button type="button" class="journalinator-new-linked">+ New Linked Note</button>
+        <button type="button" class="journalinator-set-image">${note.system.image ? t("JN.Editor.ChangeImage") : t("JN.Editor.SetImage")}</button>
+        ${note.system.image ? `<button type="button" class="journalinator-clear-image">${t("JN.Editor.RemoveImage")}</button>` : ""}
+        <button type="button" class="journalinator-new-linked">${t("JN.Editor.NewLinkedNote")}</button>
       </div>
-      <p class="journalinator-meta">by ${foundry.utils.escapeHTML(authorName)}${note.secret ? "" : ` &middot; ${note.system.editCount ?? 0} edits`}</p>
-      ${contributors ? `<p class="journalinator-meta">Characters added: ${contributors}</p>` : ""}
+      <p class="journalinator-meta">${t("JN.Editor.By", { author: foundry.utils.escapeHTML(authorName) })}${note.secret ? "" : ` &middot; ${t("JN.Editor.Edits", { count: note.system.editCount ?? 0 })}`}</p>
+      ${contributors ? `<p class="journalinator-meta">${t("JN.Editor.CharactersAdded", { contributors })}</p>` : ""}
       <div class="jn-doc ${this.showAuthors ? "jn-show-authors" : ""}">
         ${note.system.blocks.map(b => this.#renderBlockHTML(note, b)).join("")}
       </div>
@@ -190,17 +191,17 @@ export default class NoteEditor {
     if (block.hidden && !note.secret) classes.push("jn-hidden-block");
 
     let tag = "";
-    if (lockedByOther) tag = `<span class="jn-tag">${foundry.utils.escapeHTML(lock.userName)} is editing&hellip;</span>`;
-    else if (mine) tag = `<span class="jn-tag">You're editing</span>`;
-    else if (pending) tag = `<span class="jn-tag">Requesting&hellip;</span>`;
-    else if (!editing && this.drafts.has(block.blockId)) tag = `<span class="jn-tag jn-draft-tag">unsaved draft</span>`;
+    if (lockedByOther) tag = `<span class="jn-tag">${t("JN.Editor.EditingBy", { name: foundry.utils.escapeHTML(lock.userName) })}</span>`;
+    else if (mine) tag = `<span class="jn-tag">${t("JN.Editor.YouEditing")}</span>`;
+    else if (pending) tag = `<span class="jn-tag">${t("JN.Editor.Requesting")}</span>`;
+    else if (!editing && this.drafts.has(block.blockId)) tag = `<span class="jn-tag jn-draft-tag">${t("JN.Editor.UnsavedDraft")}</span>`;
 
     if (editing) {
       const text = this.drafts.get(block.blockId) ?? block.text;
       return `<div class="${classes.join(" ")}" data-block-id="${block.blockId}" style="${vars}">${tag}<textarea class="jn-block-input">${foundry.utils.escapeHTML(text)}</textarea></div>`;
     }
     const cursor = lockedByOther ? "not-allowed" : "text";
-    const empty = block.hidden && !block.text ? `<span class="jn-empty-block">Empty hidden block</span>` : "";
+    const empty = block.hidden && !block.text ? `<span class="jn-empty-block">${t("JN.Editor.EmptyHiddenBlock")}</span>` : "";
     return `<p class="${classes.join(" ")}" data-block-id="${block.blockId}" style="${vars};cursor:${cursor}" title="${foundry.utils.escapeHTML(author?.name ?? "")}">${tag}${this.#gmBlockActions(note, block, lockedByOther)}${foundry.utils.escapeHTML(block.text)}${empty}</p>`;
   }
 
@@ -209,14 +210,14 @@ export default class NoteEditor {
     if (!notesStore.merged) return "";
     const buttons = [];
     if (note.secret) {
-      if (note.system.blocks.length > 1) buttons.push(`<button type="button" data-act="delete" title="Delete block">&#10005;</button>`);
+      if (note.system.blocks.length > 1) buttons.push(`<button type="button" data-act="delete" title="${t("JN.Editor.DeleteBlockTitle")}">&#10005;</button>`);
     } else if (block.hidden) {
-      buttons.push(`<button type="button" data-act="reveal" title="Show this block to players">Reveal</button>`);
-      buttons.push(`<button type="button" data-act="delete" title="Delete hidden block">&#10005;</button>`);
+      buttons.push(`<button type="button" data-act="reveal" title="${t("JN.Editor.ShowBlockTitle")}">${t("JN.Common.Reveal")}</button>`);
+      buttons.push(`<button type="button" data-act="delete" title="${t("JN.Editor.DeleteHiddenBlockTitle")}">&#10005;</button>`);
     } else if (!lockedByOther) {
-      buttons.push(`<button type="button" data-act="hide" title="Take this block off the shared note">Hide</button>`);
+      buttons.push(`<button type="button" data-act="hide" title="${t("JN.Editor.HideBlockTitle")}">${t("JN.Common.Hide")}</button>`);
     }
-    buttons.push(`<button type="button" data-act="add" title="Add a GM-only block after this one">+</button>`);
+    buttons.push(`<button type="button" data-act="add" title="${t("JN.Editor.AddHiddenAfterTitle")}">+</button>`);
     return `<span class="jn-block-gm">${buttons.join("")}</span>`;
   }
 
@@ -224,11 +225,11 @@ export default class NoteEditor {
     const noteId = this.noteId;
     this.root.querySelector(".journalinator-rename")?.addEventListener("click", async () => {
       if (note.secret) {
-        const base = await this.#promptText("Rename Secret Note", stripSecretPrefix(note.name));
+        const base = await this.#promptText(t("JN.Editor.RenameSecretNote"), stripSecretPrefix(note.name));
         if (base) gm(() => secrets.renameSecretNote(noteId, base));
         return;
       }
-      const title = await this.#promptText("Rename Note", note.name);
+      const title = await this.#promptText(t("JN.Editor.RenameNote"), note.name);
       if (!title || title === note.name) return;
       requestWrite({ type: "renameNote", noteId, title });
     });
@@ -254,8 +255,8 @@ export default class NoteEditor {
     this.root.querySelector(".journalinator-delete")?.addEventListener("click", async () => {
       if (note.secret) {
         const ok = await DialogV2.confirm({
-          window: { title: "Delete Secret Note" },
-          content: `<p>Permanently delete <b>${esc(note.name)}</b>? Secret notes have no trash.</p>`
+          window: { title: t("JN.Editor.DeleteSecretNote") },
+          content: `<p>${t("JN.Editor.DeleteSecretConfirm", { name: esc(note.name) })}</p>`
         });
         if (!ok) return;
         this.#stopEditing();
@@ -291,7 +292,7 @@ export default class NoteEditor {
     this.root.querySelector(".journalinator-clear-image")?.addEventListener("click", () => setImage(null));
 
     this.root.querySelector(".journalinator-new-linked")?.addEventListener("click", async () => {
-      const title = await this.#promptText(note.secret ? "New Linked Secret Note" : "New Linked Note", "");
+      const title = await this.#promptText(note.secret ? t("JN.Editor.NewLinkedSecretNote") : t("JN.Editor.NewLinkedNote"), "");
       if (!title) return;
       if (!note.secret) {
         requestWrite({ type: "newLinkedNote", sourceId: noteId, title });
@@ -623,7 +624,7 @@ export default class NoteEditor {
     if (!notesStore.merged) return false;
     const mentions = secrets.prefixedSecretMentions(text);
     if (!mentions.length) return false;
-    ui.notifications.error(`Journalinator: this shared block links a secret note (${mentions.join(", ")}). Remove that [[link]] or the GM- prefix; the text is kept as a draft.`);
+    ui.notifications.error(t("JN.Editor.PrefixedMentionError", { mentions: mentions.join(", ") }));
     return true;
   }
 
@@ -631,8 +632,8 @@ export default class NoteEditor {
     const mentions = secrets.bareSecretMentions(text);
     if (!mentions.length) return true;
     return DialogV2.confirm({
-      window: { title: "Secret Notes Mentioned" },
-      content: `<p>This ${what} links <b>${mentions.map(esc).join(", ")}</b>, which only exist as secret notes. Players will get empty public notes with those names.</p><p>Continue?</p>`
+      window: { title: t("JN.Editor.SecretMentionsTitle") },
+      content: `<p>${t("JN.Editor.SecretMentionsBody", { what, names: mentions.map(esc).join(", ") })}</p><p>${t("JN.Editor.SecretMentionsContinue")}</p>`
     });
   }
 
@@ -656,33 +657,33 @@ export default class NoteEditor {
 
     if (act === "delete") {
       const ok = !block.text || await DialogV2.confirm({
-        window: { title: "Delete Hidden Block" },
-        content: "<p>Delete this GM-only block? This can't be undone.</p>"
+        window: { title: t("JN.Editor.DeleteHiddenBlockTitle") },
+        content: `<p>${t("JN.Editor.DeleteHiddenConfirm")}</p>`
       });
       if (ok) gm(() => secrets.deleteSecretBlock(noteId, blockId));
       return;
     }
 
     if (act === "reveal") {
-      if (!(await this.#confirmBareMentions(block.text, "block"))) return;
+      if (!(await this.#confirmBareMentions(block.text, t("JN.Editor.WhatBlock")))) return;
       gm(() => secrets.declassifyBlock(noteId, blockId));
       return;
     }
 
     if (act === "hide") {
       const ok = await DialogV2.confirm({
-        window: { title: "Hide Block" },
-        content: "<p>Players have already seen this block, and older versions stay in the note's history. Hiding takes it off the shared note from now on.</p><p>Hide it?</p>"
+        window: { title: t("JN.Editor.HideBlockDialogTitle") },
+        content: `<p>${t("JN.Editor.HideBlockConfirm")}</p><p>${t("JN.Editor.HideBlockQuestion")}</p>`
       });
       if (ok) gm(() => secrets.hideSharedBlock(noteId, blockId));
     }
   }
 
   async #declassifyNote(note) {
-    const title = await this.#promptText("Declassify Note: public title", stripSecretPrefix(note.name));
+    const title = await this.#promptText(t("JN.Editor.DeclassifyPublicTitle"), stripSecretPrefix(note.name));
     if (!title) return;
     const text = note.system.blocks.map(b => b.text).join("\n");
-    if (!(await this.#confirmBareMentions(text, "note"))) return;
+    if (!(await this.#confirmBareMentions(text, t("JN.Editor.WhatNote")))) return;
     this.#stopEditing({ save: true });
     gm(() => secrets.declassifyNote(note._id, title));
   }
@@ -691,7 +692,7 @@ export default class NoteEditor {
     return foundry.applications.api.DialogV2.prompt({
       window: { title },
       content: `<input type="text" name="value" autofocus value="${foundry.utils.escapeHTML(initial)}">`,
-      ok: { label: "OK", callback: (event, button) => button.form.elements.value.value.trim() },
+      ok: { label: t("JN.Common.OK"), callback: (event, button) => button.form.elements.value.value.trim() },
       rejectClose: false
     });
   }

@@ -8,6 +8,7 @@ import { canUseGmTier } from "../secrets/access.mjs";
 import { vaultStore } from "../secrets/vault-store.mjs";
 import { openVaultDialog } from "../secrets/vault-ui.mjs";
 import * as secrets from "../secrets/secret-actions.mjs";
+import { t } from "../i18n.mjs";
 
 /** Runs a GM vault action and surfaces failures (e.g. the vault was locked meanwhile). */
 function gm(job) {
@@ -60,8 +61,8 @@ export default class JournalApp extends ApplicationV2 {
   #canvas = new JournalCanvas({
     onSelectNote: id => { this.#selectedNoteId = id; this.render(); },
     onCreateNoteAt: (x, y, { secret = false } = {}) => {
-      if (secret) return gm(async () => this.#select(await secrets.createSecretNote({ title: "Untitled", x, y })));
-      requestWrite({ type: "createNote", title: "Untitled", x, y, autoTitle: true });
+      if (secret) return gm(async () => this.#select(await secrets.createSecretNote({ title: t("JN.Note.Untitled"), x, y })));
+      requestWrite({ type: "createNote", title: t("JN.Note.Untitled"), x, y, autoTitle: true });
     },
     onMoveCard: (noteId, x, y) => notesStore.isSecretNote(noteId)
       ? gm(() => secrets.moveSecretCard(noteId, x, y))
@@ -72,7 +73,7 @@ export default class JournalApp extends ApplicationV2 {
     onResetCardSize: noteId => notesStore.isSecretNote(noteId)
       ? gm(() => secrets.resizeSecretCard(noteId, null, null))
       : requestWrite({ type: "resizeCard", noteId, width: null, height: null }),
-    onAddLabelAt: (x, y) => requestWrite({ type: "addLabel", text: "Label", x, y }),
+    onAddLabelAt: (x, y) => requestWrite({ type: "addLabel", text: t("JN.Label.Default"), x, y }),
     onMoveLabel: (labelId, x, y) => notesStore.isHiddenLabel(labelId)
       ? gm(() => secrets.updateHiddenLabel(labelId, { x, y }))
       : requestWrite({ type: "updateLabel", labelId, x, y }),
@@ -80,7 +81,7 @@ export default class JournalApp extends ApplicationV2 {
       if (notesStore.isHiddenLabel(labelId)) return this.#editHiddenLabel(labelId);
       const layout = notesStore.getLayout();
       const current = layout?.labels?.[labelId]?.text ?? "";
-      const text = await this.#promptText("Edit Label", current);
+      const text = await this.#promptText(t("JN.Prompt.EditLabel"), current);
       if (text === null) return;
       if (text.trim() === "") requestWrite({ type: "removeLabel", labelId });
       else requestWrite({ type: "updateLabel", labelId, text });
@@ -174,24 +175,24 @@ export default class JournalApp extends ApplicationV2 {
     root.className = `journalinator-root${context.merged ? " jn-gm-view" : ""}`;
     root.innerHTML = `
       <header class="journalinator-topbar">
-        <b>Journalinator</b>
+        <b>${t("JN.Title")}</b>
         <div class="journalinator-search-wrap">
-          <input type="search" class="journalinator-search" placeholder="Search or jump to a note... (Ctrl/Cmd K)" value="${foundry.utils.escapeHTML(this.#query)}">
+          <input type="search" class="journalinator-search" placeholder="${t("JN.TopBar.Search")}" value="${foundry.utils.escapeHTML(this.#query)}">
           <div class="jn-switcher"></div>
         </div>
-        <button type="button" class="journalinator-preview">Preview: ${this.#previewMode === "full" ? "full" : "first lines"}</button>
-        <button type="button" class="journalinator-new">+ New Note</button>
-        <button type="button" class="journalinator-add-label">+ Label</button>
-        <button type="button" class="journalinator-trash">Trash${context.trashCount ? ` (${context.trashCount})` : ""}</button>
-        <button type="button" class="journalinator-stats">Stats</button>
+        <button type="button" class="journalinator-preview">${this.#previewMode === "full" ? t("JN.TopBar.PreviewFull") : t("JN.TopBar.PreviewLines")}</button>
+        <button type="button" class="journalinator-new">${t("JN.TopBar.NewNote")}</button>
+        <button type="button" class="journalinator-add-label">${t("JN.TopBar.AddLabel")}</button>
+        <button type="button" class="journalinator-trash">${context.trashCount ? t("JN.TopBar.TrashCount", { count: context.trashCount }) : t("JN.TopBar.Trash")}</button>
+        <button type="button" class="journalinator-stats">${t("JN.TopBar.Stats")}</button>
         ${context.gmTier ? this.#gmControlsHTML(context) : ""}
       </header>
       <div class="journalinator-filterbar">
         ${context.authors.map(([id, u]) => `<button type="button" class="jn-filter-chip${this.#filterAuthors.has(id) ? " on" : ""}" data-kind="author" data-id="${id}"><span class="jn-dot" style="background:${u.color}"></span>${foundry.utils.escapeHTML(u.name)}</button>`).join("")}
         <span class="jn-filter-sep"></span>
-        ${Object.entries(CARD_STYLES).map(([key, def]) => `<button type="button" class="jn-filter-chip${this.#filterStyles.has(key) ? " on" : ""}" data-kind="style" data-id="${key}">${def.label}</button>`).join("")}
+        ${Object.entries(CARD_STYLES).map(([key, def]) => `<button type="button" class="jn-filter-chip${this.#filterStyles.has(key) ? " on" : ""}" data-kind="style" data-id="${key}">${t(def.labelKey)}</button>`).join("")}
       </div>
-      ${!context.gmOnline ? `<div class="journalinator-offline-banner">Read-only — the GM is offline</div>` : ""}
+      ${!context.gmOnline ? `<div class="journalinator-offline-banner">${t("JN.TopBar.Offline")}</div>` : ""}
       <div class="journalinator-body">
         <div class="journalinator-canvas-slot"></div>
         <aside class="journalinator-editor"></aside>
@@ -254,7 +255,7 @@ export default class JournalApp extends ApplicationV2 {
     });
 
     root.querySelector(".journalinator-new")?.addEventListener("click", async () => {
-      const title = await this.#promptText("New Note", "");
+      const title = await this.#promptText(t("JN.Prompt.NewNote"), "");
       if (!title) return;
       requestWrite({ type: "createNote", title, ...this.#canvas.newCardPosition() });
     });
@@ -270,7 +271,7 @@ export default class JournalApp extends ApplicationV2 {
       notesStore.setGmView(!notesStore.gmView);
     });
     root.querySelector(".journalinator-new-secret")?.addEventListener("click", async () => {
-      const title = await this.#promptText("New Secret Note", "");
+      const title = await this.#promptText(t("JN.Prompt.NewSecretNote"), "");
       if (!title) return;
       gm(async () => this.#select(await secrets.createSecretNote({ title, ...this.#canvas.newCardPosition() })));
     });
@@ -302,14 +303,14 @@ export default class JournalApp extends ApplicationV2 {
     this.#switcherHighlight = Math.min(this.#switcherHighlight, list.length - (offerCreate ? 0 : 1));
 
     const el = root.querySelector(".jn-switcher");
-    el.innerHTML = (q ? "" : `<div class="jn-switcher-heading">Recent</div>`) +
+    el.innerHTML = (q ? "" : `<div class="jn-switcher-heading">${t("JN.Switcher.Recent")}</div>`) +
       list.map((n, i) => `
         <div class="jn-switcher-item${i === this.#switcherHighlight ? " hi" : ""}" data-id="${n._id}">
           <span class="jn-dot" style="background:${game.users.get(n.system.authorId)?.color ?? "#8d8d97"}"></span>
           <b>${foundry.utils.escapeHTML(n.name)}</b>
-          <small>${n.secret ? "GM only &middot; " : ""}${CARD_STYLES[n.system.style]?.label ?? n.system.style}</small>
+          <small>${n.secret ? t("JN.Switcher.GMOnly") : ""}${CARD_STYLES[n.system.style] ? t(CARD_STYLES[n.system.style].labelKey) : n.system.style}</small>
         </div>`).join("") +
-      (offerCreate ? `<div class="jn-switcher-item jn-switcher-create${list.length === this.#switcherHighlight ? " hi" : ""}" data-create="1">+ Create "${foundry.utils.escapeHTML(q)}"</div>` : "");
+      (offerCreate ? `<div class="jn-switcher-item jn-switcher-create${list.length === this.#switcherHighlight ? " hi" : ""}" data-create="1">${t("JN.Switcher.Create", { title: foundry.utils.escapeHTML(q) })}</div>` : "");
     el.style.display = "block";
 
     el.querySelectorAll(".jn-switcher-item").forEach(item => {
@@ -376,51 +377,51 @@ export default class JournalApp extends ApplicationV2 {
     const stats = computeJournalStats(notes);
     const rawStats = notesStore.getStats();
     const sessions = deriveSessions(rawStats?.activity ?? {}, rawStats?.sessions ?? []);
-    const name = id => game.users.get(id)?.name ?? "someone";
+    const name = id => game.users.get(id)?.name ?? t("JN.Common.Someone");
 
     const mvpEntries = Object.entries(stats.chars).sort((a, b) => b[1] - a[1]);
     const maxChars = Math.max(1, ...mvpEntries.map(([, v]) => v));
     const mvpHtml = mvpEntries.length
       ? mvpEntries.map(([id, v], i) => this.#bar(`${i === 0 ? "★ " : ""}${name(id)}`, v, maxChars)).join("")
-      : `<p class="journalinator-empty">Nobody's written anything yet.</p>`;
+      : `<p class="journalinator-empty">${t("JN.Stats.EmptyMVP")}</p>`;
 
     const maxNotes = Math.max(1, ...Object.values(stats.notesCreated));
     const notesHtml = Object.entries(stats.notesCreated).map(([id, v]) => this.#bar(name(id), v, maxNotes)).join("");
 
     const maxLinks = Math.max(1, ...Object.values(stats.linksDrawn), 1);
     const linksHtml = Object.entries(stats.linksDrawn).map(([id, v]) => this.#bar(name(id), v, maxLinks)).join("")
-      || `<p class="journalinator-empty">No links drawn yet.</p>`;
+      || `<p class="journalinator-empty">${t("JN.Stats.EmptyLinks")}</p>`;
 
     const maxSession = Math.max(1, ...sessions.flatMap(s => Object.values(s.totals)));
     const sessionsHtml = sessions.length
       ? sessions.map(s => `<div class="jn-session-group"><div class="journalinator-meta">${foundry.utils.escapeHTML(s.label)}</div>${
           Object.entries(s.totals).map(([id, v]) => this.#bar(name(id), v, maxSession)).join("")
         }</div>`).join("")
-      : `<p class="journalinator-empty">No activity yet.</p>`;
+      : `<p class="journalinator-empty">${t("JN.Stats.EmptyActivity")}</p>`;
 
     await foundry.applications.api.DialogV2.wait({
-      window: { title: "Journal Stats" },
+      window: { title: t("JN.Stats.Title") },
       position: { width: 420 },
       content: `
-        <div class="journalinator-meta">MVP &middot; characters written</div>
+        <div class="journalinator-meta">${t("JN.Stats.MVP")}</div>
         ${mvpHtml}
-        <div class="journalinator-meta">Notes created</div>
+        <div class="journalinator-meta">${t("JN.Stats.NotesCreated")}</div>
         ${notesHtml}
-        <div class="journalinator-meta">Links drawn</div>
+        <div class="journalinator-meta">${t("JN.Stats.LinksDrawn")}</div>
         ${linksHtml}
-        <div class="journalinator-meta">Most linked note</div>
+        <div class="journalinator-meta">${t("JN.Stats.MostLinked")}</div>
         <p>${stats.mostLinked ? `${foundry.utils.escapeHTML(stats.mostLinked.name)} (${stats.mostLinked.count})` : "—"}</p>
-        <div class="journalinator-meta">Most edited note</div>
-        <p>${stats.mostEdited ? `${foundry.utils.escapeHTML(stats.mostEdited.name)} (${stats.mostEdited.count} edits)` : "—"}</p>
-        <div class="journalinator-meta">Activity per session</div>
+        <div class="journalinator-meta">${t("JN.Stats.MostEdited")}</div>
+        <p>${stats.mostEdited ? `${foundry.utils.escapeHTML(stats.mostEdited.name)} (${t("JN.Stats.Edits", { count: stats.mostEdited.count })})` : "—"}</p>
+        <div class="journalinator-meta">${t("JN.Stats.Activity")}</div>
         ${sessionsHtml}
-        ${game.user.isGM ? `<button type="button" class="jn-add-session">+ Session Marker</button>` : ""}
+        ${game.user.isGM ? `<button type="button" class="jn-add-session">${t("JN.Stats.AddSession")}</button>` : ""}
       `,
-      buttons: [{ action: "close", label: "Close", default: true }],
+      buttons: [{ action: "close", label: t("JN.Stats.Close"), default: true }],
       rejectClose: false,
       render: (event, dialog) => {
         dialog.element.querySelector(".jn-add-session")?.addEventListener("click", async () => {
-          const label = await this.#promptText("Session Marker", "");
+          const label = await this.#promptText(t("JN.Prompt.SessionMarker"), "");
           if (!label) return;
           requestWrite({ type: "addSessionMarker", label });
           dialog.close();
@@ -432,14 +433,14 @@ export default class JournalApp extends ApplicationV2 {
   async #openTrash() {
     const trashed = notesStore.getTrashedNotes();
     const rows = trashed
-      .map(n => `<div class="jn-trash-row"><span>${foundry.utils.escapeHTML(n.name)}</span><button type="button" class="jn-trash-restore" data-id="${n._id}">Restore</button></div>`)
-      .join("") || `<p class="journalinator-empty">Trash is empty.</p>`;
+      .map(n => `<div class="jn-trash-row"><span>${foundry.utils.escapeHTML(n.name)}</span><button type="button" class="jn-trash-restore" data-id="${n._id}">${t("JN.Common.Restore")}</button></div>`)
+      .join("") || `<p class="journalinator-empty">${t("JN.Trash.Empty")}</p>`;
 
     await foundry.applications.api.DialogV2.wait({
-      window: { title: "Trash" },
+      window: { title: t("JN.Trash.Title") },
       content: `<div class="jn-trash-list">${rows}</div>` +
-        (game.user.isGM && trashed.length ? `<button type="button" class="jn-trash-empty">Empty Trash</button>` : ""),
-      buttons: [{ action: "close", label: "Close", default: true }],
+        (game.user.isGM && trashed.length ? `<button type="button" class="jn-trash-empty">${t("JN.Trash.EmptyButton")}</button>` : ""),
+      buttons: [{ action: "close", label: t("JN.Common.Close"), default: true }],
       rejectClose: false,
       render: (event, dialog) => {
         dialog.element.querySelectorAll(".jn-trash-restore").forEach(btn => {
@@ -450,8 +451,8 @@ export default class JournalApp extends ApplicationV2 {
         });
         dialog.element.querySelector(".jn-trash-empty")?.addEventListener("click", async () => {
           const confirmed = await foundry.applications.api.DialogV2.confirm({
-            window: { title: "Empty Trash" },
-            content: "<p>Permanently delete every note in the trash? This cannot be undone.</p>"
+            window: { title: t("JN.Trash.EmptyConfirmTitle") },
+            content: `<p>${t("JN.Trash.EmptyConfirm")}</p>`
           });
           if (confirmed) requestWrite({ type: "emptyTrash" });
           dialog.close();
@@ -462,19 +463,19 @@ export default class JournalApp extends ApplicationV2 {
 
   #gmControlsHTML(context) {
     const vaultLabel = {
-      absent: "Set up secrets",
-      locked: "Secrets &#128274;",
-      unlocked: "Secrets &#128275;",
-      error: "Secrets &#9888;"
-    }[context.vaultStatus] ?? "Secrets";
+      absent: t("JN.TopBar.SecretsSetup"),
+      locked: t("JN.TopBar.SecretsLocked"),
+      unlocked: t("JN.TopBar.SecretsUnlocked"),
+      error: t("JN.TopBar.SecretsError")
+    }[context.vaultStatus] ?? t("JN.TopBar.Secrets");
     const unlocked = context.vaultStatus === "unlocked";
     return `
       <span class="jn-gm-controls">
         <button type="button" class="journalinator-vault">${vaultLabel}</button>
-        ${unlocked ? `<button type="button" class="journalinator-view-toggle" title="Switch between the GM view and what players see">${notesStore.gmView ? "GM view" : "Player view"}</button>` : ""}
+        ${unlocked ? `<button type="button" class="journalinator-view-toggle" title="${t("JN.TopBar.GMViewTitle")}">${notesStore.gmView ? t("JN.TopBar.GMView") : t("JN.TopBar.PlayerView")}</button>` : ""}
         ${context.merged ? `
-          <button type="button" class="journalinator-new-secret" title="A note only GMs can see (or Alt + double-click the canvas)">+ Secret Note</button>
-          <button type="button" class="journalinator-add-gm-label">+ GM Label</button>` : ""}
+          <button type="button" class="journalinator-new-secret" title="${t("JN.TopBar.NewSecretTitle")}">${t("JN.TopBar.NewSecret")}</button>
+          <button type="button" class="journalinator-add-gm-label">${t("JN.TopBar.AddGMLabel")}</button>` : ""}
       </span>`;
   }
 
@@ -482,12 +483,12 @@ export default class JournalApp extends ApplicationV2 {
     const label = notesStore.getLayout()?.labels?.[labelId];
     if (!label) return;
     const result = await foundry.applications.api.DialogV2.wait({
-      window: { title: "GM Label" },
+      window: { title: t("JN.Prompt.GMLabel") },
       content: `<input type="text" name="value" autofocus value="${foundry.utils.escapeHTML(label.text ?? "")}">`,
       buttons: [
-        { action: "save", label: "Save", default: true, callback: (event, button) => ({ action: "save", text: button.form.elements.value.value.trim() }) },
-        { action: "reveal", label: "Make public", callback: () => ({ action: "reveal" }) },
-        { action: "delete", label: "Delete", callback: () => ({ action: "delete" }) }
+        { action: "save", label: t("JN.Common.Save"), default: true, callback: (event, button) => ({ action: "save", text: button.form.elements.value.value.trim() }) },
+        { action: "reveal", label: t("JN.Editor.LabelMakePublic"), callback: () => ({ action: "reveal" }) },
+        { action: "delete", label: t("JN.Common.Delete"), callback: () => ({ action: "delete" }) }
       ],
       rejectClose: false
     });
@@ -502,7 +503,7 @@ export default class JournalApp extends ApplicationV2 {
       window: { title },
       content: `<input type="text" name="value" autofocus value="${foundry.utils.escapeHTML(initial)}">`,
       ok: {
-        label: "OK",
+        label: t("JN.Common.OK"),
         callback: (event, button) => button.form.elements.value.value.trim()
       },
       rejectClose: false
