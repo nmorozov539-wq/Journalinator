@@ -1,12 +1,6 @@
 name: Deploy GitHub Pages
 
 on:
-  push:
-    branches:
-      - fork/collaborative-notes-canvas
-    paths:
-      - "docs/**"
-      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 permissions:
