@@ -42,7 +42,7 @@ The module id is `fvtt-journalinator` and it targets Foundry VTT v14. There is n
 2. Paste this URL into **Manifest URL**:
 
    ```text
-   https://raw.githubusercontent.com/nmorozov539-wq/Journalinator/main/module.json
+   https://github.com/nmorozov539-wq/Journalinator/releases/latest/download/module.json
    ```
 
 3. Install, enable the module in your world, then open it from the sticky-note button in the
@@ -50,12 +50,12 @@ The module id is `fvtt-journalinator` and it targets Foundry VTT v14. There is n
 
 ### Manual install
 
-1. Download the repository ZIP (or clone it).
+1. Download `fvtt-journalinator-v0.1.0.zip` from the latest GitHub release.
 2. Copy the project into `<Foundry user data>/Data/modules/fvtt-journalinator` so that
    `module.json` is directly inside that folder.
 3. Restart Foundry and enable **Journalinator** in the world.
 
-No release ZIP is published yet; the manifest URL is the simplest install path.
+The release contains both the Foundry manifest and a ready-to-install ZIP.
 
 ## Using it
 
@@ -138,7 +138,7 @@ language file there and register it in `module.json` to extend it.
 - The editor panel is fixed-width; a fullscreen reading mode is not implemented yet.
 - The module stores notes as its own `JournalEntryPage` sub-types. Deactivating the module hides
   those pages until it is enabled again; the data is not lost.
-- There is no release ZIP or Foundry package listing yet.
+- The module is not listed in Foundry's public package directory yet; install it with the manifest URL above.
 
 ## Development
 

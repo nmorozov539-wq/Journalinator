@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { CARD_STYLES } from "../scripts/styles/registry.mjs";
 
-const root = new URL("..", import.meta.url).pathname;
+const root = fileURLToPath(new URL("..", import.meta.url));
 const en = JSON.parse(readFileSync(join(root, "lang/en.json"), "utf8"));
 const ru = JSON.parse(readFileSync(join(root, "lang/ru.json"), "utf8"));
 
