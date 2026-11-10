@@ -134,10 +134,13 @@ async function reconcileSecretLinks(vault, noteId) {
   const card = notesStore.getSharedLayout()?.cards?.[noteId];
   const finder = secretFinder(vault, card);
   const hiddenBlocks = Object.values(entry?.blocks ?? {});
+  const beforeIds = new Set((vault.hiddenLinks[noteId] ?? []).map(l => l.id));
   const links = await reconcileTypedLinks({ system: { links: vault.hiddenLinks[noteId] ?? [] } }, hiddenBlocks, { ...finder, senderUserId: game.user.id });
   // Shared notes already carry their own drawn/typed links; don't duplicate a target there.
+  // That rule only applies to links typed in this pass: any pre-existing hidden link (drawn or
+  // typed) is GM-owned and must survive.
   const sharedTargets = new Set((notesStore.getSharedPage(noteId)?.system.links ?? []).map(l => l.targetId));
-  const cleaned = links.filter(l => l.targetId !== noteId && !sharedTargets.has(l.targetId));
+  const cleaned = links.filter(l => beforeIds.has(l.id) || (l.targetId !== noteId && !sharedTargets.has(l.targetId)));
   if (cleaned.length) vault.hiddenLinks[noteId] = cleaned;
   else delete vault.hiddenLinks[noteId];
 }

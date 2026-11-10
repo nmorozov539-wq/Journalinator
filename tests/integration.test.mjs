@@ -96,6 +96,45 @@ test("GM-only label and link", async () => {
   assert.equal(notesStore.isHiddenLink(tavernId, link.id), true);
 });
 
+test("a temporarily missing shared journal never prunes hidden content", async () => {
+  const before = {
+    notes: Object.keys(vaultStore.data.notes).sort(),
+    hiddenBlocks: Object.keys(vaultStore.data.hiddenBlocks).sort(),
+    hiddenLinks: Object.keys(vaultStore.data.hiddenLinks).sort()
+  };
+  assert.ok(before.notes.length && before.hiddenBlocks.length && before.hiddenLinks.length);
+  const sharedEntry = shared();
+  try {
+    env.journal.delete(containers.ids.shared);
+    assert.equal(game.journal.get(containers.ids.shared), undefined, "shared entry is really unavailable");
+    await vaultStore.mutate(vault => {
+      vault.labels.probe = { text: "probe", x: 0, y: 0, size: 14, color: "" };
+    });
+    assert.deepEqual(Object.keys(vaultStore.data.notes).sort(), before.notes);
+    assert.deepEqual(Object.keys(vaultStore.data.hiddenBlocks).sort(), before.hiddenBlocks);
+    assert.deepEqual(Object.keys(vaultStore.data.hiddenLinks).sort(), before.hiddenLinks);
+  } finally {
+    env.journal.set(containers.ids.shared, sharedEntry);
+  }
+});
+
+test("a pre-existing hidden drawn link survives a hidden-block edit after the shared note links the same target", async () => {
+  await fromPlayer({ type: "createNote", title: "Link Target", x: 420, y: 0 });
+  const targetId = sharedByName("Link Target").id;
+  await secrets.addHiddenLink(tavernId, targetId);
+  const hiddenLink = vaultStore.data.hiddenLinks[tavernId].find(l => l.targetId === targetId);
+  assert.ok(hiddenLink, "GM-only drawn link exists before the edit");
+
+  await requestWrite({ type: "createLink", sourceId: tavernId, targetId });
+  assert.ok(sharedByName("Tavern").system.links.some(l => l.targetId === targetId));
+
+  await secrets.saveSecretBlock(tavernId, hiddenBlockId, "The keeper is a cultist.");
+  assert.ok(
+    vaultStore.data.hiddenLinks[tavernId]?.some(l => l.id === hiddenLink.id),
+    "the pre-existing GM-only link was not dropped"
+  );
+});
+
 test("player actions never resolve against or collide with secret notes", async () => {
   // Same bare title as a secret note: succeeds for the player, no rejection to learn from.
   await fromPlayer({ type: "createNote", title: "Lord Vex", x: 0, y: 0 });

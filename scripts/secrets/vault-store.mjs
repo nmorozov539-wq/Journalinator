@@ -255,10 +255,16 @@ class VaultStore {
   }
 }
 
-/** Describes every shared note page that still exists (trash included), for reconcileVault. */
+/**
+ * Describes every shared note page that still exists (trash included), for reconcileVault.
+ * Returns null when the shared container is unavailable (unset or not loaded): an empty map
+ * would look like "the shared journal has no notes" and make reconcile treat every hidden
+ * block and link as an orphan.
+ */
 function sharedInfo() {
   const ids = getContainerIds();
   const shared = ids ? game.journal.get(ids.shared) : null;
+  if (!shared) return null;
   const notes = new Map();
   for (const page of shared?.pages ?? []) {
     if (page.type !== NOTE_TYPE) continue;

@@ -81,3 +81,16 @@ test("reconcile finishes interrupted declassification and drops orphans", () => 
   assert.deepEqual(Object.keys(vault.hiddenLinks), ["p1"]);
   assert.equal(reconcileVault(vault, shared), false);
 });
+
+test("reconcile touches nothing when the shared journal is unavailable", () => {
+  const vault = emptyVault();
+  vault.notes.n1 = { id: "n1" };
+  vault.hiddenBlocks.p1 = { order: [], blocks: { h1: {} } };
+  vault.hiddenLinks.p1 = [{ id: "l1", targetId: "p2" }];
+  assert.equal(reconcileVault(vault, null), false);
+  assert.deepEqual(Object.keys(vault.notes), ["n1"]);
+  assert.deepEqual(Object.keys(vault.hiddenBlocks), ["p1"]);
+  assert.deepEqual(Object.keys(vault.hiddenBlocks.p1.blocks), ["h1"]);
+  assert.deepEqual(Object.keys(vault.hiddenLinks), ["p1"]);
+  assert.deepEqual(vault.hiddenLinks.p1.map(l => l.id), ["l1"]);
+});

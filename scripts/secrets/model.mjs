@@ -145,9 +145,11 @@ export function resolveSecretTitle(title, { secretNotes, sharedNotes }) {
  * both places; the shared copy wins.
  *
  * `shared` is { notes: Map<id, { blockIds: Set<string>, deleted: boolean }> } describing every
- * shared note page that still exists (trash included).
+ * shared note page that still exists (trash included). `null` means the shared container is
+ * unavailable right now, so we cannot tell orphans from live content: prune nothing.
  */
 export function reconcileVault(vault, shared) {
+  if (!shared) return false;
   let changed = false;
   for (const id of Object.keys(vault.notes)) {
     if (shared.notes.has(id)) { delete vault.notes[id]; changed = true; }
