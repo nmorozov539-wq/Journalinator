@@ -4,9 +4,8 @@ An Obsidian-inspired shared notes journal and infinite investigation canvas for 
 
 > **This branch is frozen.** It contains an earlier, independent realization of the design that
 > became [Journalinator](https://github.com/nmorozov539-wq/Journalinator), originally built by
-> [Larkar](https://github.com/Larkar789). Active development continues on `main`. This branch is
-> a separate Foundry module (`investigation-board`, `0.3.0-alpha.1`), so it can be installed
-> alongside Journalinator.
+> Larkar. Active development continues on `main`. This branch is a separate Foundry module
+> (`investigation-board`, `0.3.0-alpha.1`), so it can be installed alongside Journalinator.
 
 ## Features
 
