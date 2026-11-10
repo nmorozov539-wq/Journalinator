@@ -3,11 +3,21 @@
   "title": "Journalinator",
   "description": "A shared, Obsidian-style corkboard journal for narrative campaigns.",
   "version": "0.1.0",
+  "url": "https://github.com/nmorozov539-wq/Journalinator",
+  "manifest": "https://raw.githubusercontent.com/nmorozov539-wq/Journalinator/main/module.json",
+  "bugs": "https://github.com/nmorozov539-wq/Journalinator/issues",
+  "license": "MIT",
+  "readme": "README.md",
   "compatibility": {
     "minimum": "14",
     "verified": "14"
   },
-  "authors": [],
+  "authors": [
+    {
+      "name": "nmorozov539-wq",
+      "url": "https://github.com/nmorozov539-wq"
+    }
+  ],
   "esmodules": ["scripts/init.mjs"],
   "styles": ["styles/journal.css"],
   "languages": [
