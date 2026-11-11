@@ -11,7 +11,7 @@ connected with curvy links, edited paragraph by paragraph with live locks, and s
 quick switcher. The GM also gets an encrypted tier for secrets that players never receive in
 readable form.
 
-> **Status: pre-alpha (0.1.0).** The data paths and UI are covered by tests, but the GM tier has
+> **Status: pre-alpha (0.2.0).** The data paths and UI are covered by tests, but the GM tier has
 > not yet been exercised in a live Foundry session. Back up your world before trying it.
 
 ## Features
@@ -50,7 +50,7 @@ The module id is `fvtt-journalinator` and it targets Foundry VTT v14. There is n
 
 ### Manual install
 
-1. Download `fvtt-journalinator-v0.1.0.zip` from the latest GitHub release.
+1. Download `fvtt-journalinator-v0.2.0.zip` from the latest GitHub release.
 2. Copy the project into `<Foundry user data>/Data/modules/fvtt-journalinator` so that
    `module.json` is directly inside that folder.
 3. Restart Foundry and enable **Journalinator** in the world.
@@ -61,10 +61,15 @@ The release contains both the Foundry manifest and a ready-to-install ZIP.
 
 Open the journal from the sticky-note button in the scene controls.
 
-- **New note:** double-click empty canvas, or use **+ New Note**.
-- **Edit:** click a paragraph. A blank line + Enter splits it; Backspace at the start merges it
+- **Add things:** right-click the canvas and choose a note, location or label.
+- **Select:** left-click a card, or drag a selection rectangle across several cards.
+- **Move around:** hold the middle mouse button and drag; use the wheel to zoom.
+- **Edit:** double-click a card to start writing immediately, or click a paragraph in the editor.
+  A blank line + Enter splits it; Backspace at the start merges it
   into the paragraph above.
-- **Link:** drag from a card's round link handle to another card, or type `[[Another Note]]`.
+- **Link:** drag from any of the four always-visible connection handles to another card, or type
+  `[[Another Note]]`. Connections follow the nearest card sides while a card is dragged. Double-click
+  a connection to remove it.
   Unknown titles become new notes on the canvas.
 - **Find:** Ctrl/Cmd+K opens the quick switcher; typing a title that does not exist offers to
   create it.
@@ -169,7 +174,7 @@ Layout:
 
 ## Branches
 
-- **`main`** — Journalinator, the active module (`fvtt-journalinator`, v0.1.0).
+- **`main`** — Journalinator, the active module (`fvtt-journalinator`, v0.2.0).
 - **`investigation-board`** — an earlier, independent realization of the same design, originally
   built by Larkar. It is a separate Foundry module
   (`investigation-board`, 0.3.0-alpha.1), kept for reference. It does

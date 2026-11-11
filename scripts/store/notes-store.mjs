@@ -155,6 +155,7 @@ class NotesStore {
       name: note.name,
       secret: true,
       system: {
+        kind: note.kind === "location" ? "location" : "note",
         style: note.style ?? "sticky",
         image: note.image ?? null,
         blocks: (note.blocks ?? []).map(b => ({ ...b, hidden: true })),

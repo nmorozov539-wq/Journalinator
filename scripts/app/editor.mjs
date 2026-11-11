@@ -97,6 +97,15 @@ export default class NoteEditor {
     if (noteId) requestLockState();
   }
 
+  /** Opens a card and immediately starts editing its first text block. */
+  editFirstBlock(noteId) {
+    this.open(noteId);
+    this.render();
+    const note = notesStore.getNote(noteId);
+    const block = note?.system.blocks?.[0];
+    if (block) this.#clickBlock(block.blockId);
+  }
+
   render() {
     this.#captureDraftBeforeRebuild();
     const note = this.noteId ? notesStore.getNote(this.noteId) : null;
@@ -124,6 +133,9 @@ export default class NoteEditor {
     const authorName = game.users.get(note.system.authorId)?.name ?? t("JN.Common.Unknown");
     const styleOptions = Object.entries(CARD_STYLES)
       .map(([key, def]) => `<option value="${key}" ${note.system.style === key ? "selected" : ""}>${t(def.labelKey)}</option>`)
+      .join("");
+    const kindOptions = ["note", "location"]
+      .map(kind => `<option value="${kind}" ${note.system.kind === kind ? "selected" : ""}>${t(`JN.Kind.${kind === "note" ? "Note" : "Location"}`)}</option>`)
       .join("");
     const backlinks = allNotes
       .map(n => [n, (n.system.links ?? []).find(l => l.targetId === note._id)])
@@ -157,6 +169,7 @@ export default class NoteEditor {
       <div class="journalinator-meta">${t("JN.Editor.LinkedFrom")}</div>
       <div class="journalinator-chips">${backlinks}</div>
       <div class="journalinator-row">
+        <label>${t("JN.Editor.Type")} <select class="journalinator-kind">${kindOptions}</select></label>
         <label>${t("JN.Editor.Style")} <select class="journalinator-style">${styleOptions}</select></label>
       </div>
       <div class="journalinator-row">
@@ -201,7 +214,9 @@ export default class NoteEditor {
       return `<div class="${classes.join(" ")}" data-block-id="${block.blockId}" style="${vars}">${tag}<textarea class="jn-block-input">${foundry.utils.escapeHTML(text)}</textarea></div>`;
     }
     const cursor = lockedByOther ? "not-allowed" : "text";
-    const empty = block.hidden && !block.text ? `<span class="jn-empty-block">${t("JN.Editor.EmptyHiddenBlock")}</span>` : "";
+    const empty = !block.text
+      ? `<span class="jn-empty-block">${block.hidden ? t("JN.Editor.EmptyHiddenBlock") : t("JN.Editor.EmptyBlock")}</span>`
+      : "";
     return `<p class="${classes.join(" ")}" data-block-id="${block.blockId}" style="${vars};cursor:${cursor}" title="${foundry.utils.escapeHTML(author?.name ?? "")}">${tag}${this.#gmBlockActions(note, block, lockedByOther)}${foundry.utils.escapeHTML(block.text)}${empty}</p>`;
   }
 
@@ -275,6 +290,11 @@ export default class NoteEditor {
     this.root.querySelector(".journalinator-style")?.addEventListener("change", ev => {
       if (note.secret) gm(() => secrets.setSecretNoteStyle(noteId, ev.target.value));
       else requestWrite({ type: "setNoteStyle", noteId, style: ev.target.value });
+    });
+
+    this.root.querySelector(".journalinator-kind")?.addEventListener("change", ev => {
+      if (note.secret) gm(() => secrets.setSecretNoteKind(noteId, ev.target.value));
+      else requestWrite({ type: "setNoteKind", noteId, kind: ev.target.value });
     });
 
     const setImage = image => note.secret

@@ -46,7 +46,6 @@ export default class JournalApp extends ApplicationV2 {
   #query = "";
   #filterAuthors = new Set();
   #filterStyles = new Set();
-  #previewMode = "full";
   #switcherOpen = false;
   #switcherHighlight = 0;
   #hookIds = [];
@@ -60,9 +59,15 @@ export default class JournalApp extends ApplicationV2 {
   // client, everything else is a normal shared write request (spec §14).
   #canvas = new JournalCanvas({
     onSelectNote: id => { this.#selectedNoteId = id; this.render(); },
-    onCreateNoteAt: (x, y, { secret = false } = {}) => {
-      if (secret) return gm(async () => this.#select(await secrets.createSecretNote({ title: t("JN.Note.Untitled"), x, y })));
-      requestWrite({ type: "createNote", title: t("JN.Note.Untitled"), x, y, autoTitle: true });
+    onEditNote: id => {
+      this.#selectedNoteId = id;
+      this.render();
+      this.#editor.editFirstBlock(id);
+    },
+    onCreateNoteAt: (x, y, { secret = false, kind = "note" } = {}) => {
+      const title = kind === "location" ? t("JN.Note.NewLocationTitle") : t("JN.Note.NewNoteTitle");
+      if (secret) return gm(async () => this.#select(await secrets.createSecretNote({ title, kind, x, y })));
+      requestWrite({ type: "createNote", title, kind, x, y, autoTitle: true });
     },
     onMoveCard: (noteId, x, y) => notesStore.isSecretNote(noteId)
       ? gm(() => secrets.moveSecretCard(noteId, x, y))
@@ -74,6 +79,7 @@ export default class JournalApp extends ApplicationV2 {
       ? gm(() => secrets.resizeSecretCard(noteId, null, null))
       : requestWrite({ type: "resizeCard", noteId, width: null, height: null }),
     onAddLabelAt: (x, y) => requestWrite({ type: "addLabel", text: t("JN.Label.Default"), x, y }),
+    onAddGmLabelAt: (x, y) => gm(() => secrets.addHiddenLabel(x, y)),
     onMoveLabel: (labelId, x, y) => notesStore.isHiddenLabel(labelId)
       ? gm(() => secrets.updateHiddenLabel(labelId, { x, y }))
       : requestWrite({ type: "updateLabel", labelId, x, y }),
@@ -180,7 +186,6 @@ export default class JournalApp extends ApplicationV2 {
           <input type="search" class="journalinator-search" placeholder="${t("JN.TopBar.Search")}" value="${foundry.utils.escapeHTML(this.#query)}">
           <div class="jn-switcher"></div>
         </div>
-        <button type="button" class="journalinator-preview">${this.#previewMode === "full" ? t("JN.TopBar.PreviewFull") : t("JN.TopBar.PreviewLines")}</button>
         <button type="button" class="journalinator-new">${t("JN.TopBar.NewNote")}</button>
         <button type="button" class="journalinator-add-label">${t("JN.TopBar.AddLabel")}</button>
         <button type="button" class="journalinator-trash">${context.trashCount ? t("JN.TopBar.TrashCount", { count: context.trashCount }) : t("JN.TopBar.Trash")}</button>
@@ -201,7 +206,6 @@ export default class JournalApp extends ApplicationV2 {
 
     root.querySelector(".journalinator-canvas-slot").appendChild(this.#canvas.root);
     this.#canvas.selectedNoteId = this.#selectedNoteId;
-    this.#canvas.previewMode = this.#previewMode;
     this.#canvas.gmMode = context.merged;
     this.#canvas.update(context.allNotes, context.layout, {
       dimMatch: note => this.#matchesQuery(note, context.query) && this.#matchesFilters(note)
@@ -249,15 +253,11 @@ export default class JournalApp extends ApplicationV2 {
       search.setSelectionRange(search.value.length, search.value.length);
     }
 
-    root.querySelector(".journalinator-preview")?.addEventListener("click", () => {
-      this.#previewMode = this.#previewMode === "full" ? "lines" : "full";
-      this.render();
-    });
-
-    root.querySelector(".journalinator-new")?.addEventListener("click", async () => {
-      const title = await this.#promptText(t("JN.Prompt.NewNote"), "");
-      if (!title) return;
-      requestWrite({ type: "createNote", title, ...this.#canvas.newCardPosition() });
+    root.querySelector(".journalinator-new")?.addEventListener("click", () => {
+      requestWrite({
+        type: "createNote", title: t("JN.Note.NewNoteTitle"), kind: "note",
+        ...this.#canvas.newCardPosition(), autoTitle: true
+      });
     });
 
     root.querySelector(".journalinator-add-label")?.addEventListener("click", () => {

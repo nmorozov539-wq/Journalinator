@@ -178,9 +178,12 @@ function findFreeSpot(cards, w, h, nearX, nearY) {
   return { x: nearX, y: nearY };
 }
 
-async function createNotePage(shared, { title, style, x, y, authorId, autoTitle = false }) {
-  style = typeof style === "string" && Object.hasOwn(CARD_STYLES, style) ? style : "sticky";
-  const requestedTitle = (title ?? "").trim() || t("JN.Note.Untitled");
+async function createNotePage(shared, { title, kind, style, x, y, authorId, autoTitle = false }) {
+  kind = kind === "location" ? "location" : "note";
+  const defaultStyle = kind === "location" ? "document" : "sticky";
+  style = typeof style === "string" && Object.hasOwn(CARD_STYLES, style) ? style : defaultStyle;
+  const defaultTitle = kind === "location" ? t("JN.Note.NewLocationTitle") : t("JN.Note.NewNoteTitle");
+  const requestedTitle = (title ?? "").trim() || defaultTitle;
   const finalTitle = autoTitle ? uniqueTitle(shared, requestedTitle) : requestedTitle;
 
   if (finalTitle.length > MAX_TITLE_LENGTH) {
@@ -203,8 +206,9 @@ async function createNotePage(shared, { title, style, x, y, authorId, autoTitle 
     name: finalTitle,
     type: `${MODULE_ID}.note`,
     system: {
+      kind,
       style,
-      blocks: [{ blockId: foundry.utils.randomID(), text: t("JN.Note.NewText"), authorId }],
+      blocks: [{ blockId: foundry.utils.randomID(), text: "", authorId }],
       authorId,
       createdAt: Date.now(),
       updatedAt: Date.now()
@@ -269,6 +273,7 @@ function cleanDeclassifiedNote(shared, message) {
   if (shared.pages.get(message.noteId)) return null; // already declassified (idempotent)
   const title = (message.title ?? "").trim();
   if (!title || title.length > MAX_TITLE_LENGTH) return null;
+  const kind = message.kind === "location" ? "location" : "note";
   const style = typeof message.style === "string" && Object.hasOwn(CARD_STYLES, message.style) ? message.style : "sticky";
   const image = typeof message.image === "string" && message.image.trim().length <= 1000 ? message.image.trim() || null : null;
 
@@ -304,7 +309,7 @@ function cleanDeclassifiedNote(shared, message) {
   const num = (value, fallback) => Number.isFinite(value) ? value : fallback;
   const size = value => Number.isFinite(value) && value > 0 ? value : null;
   return {
-    noteId: message.noteId, title, style, image, blocks, links,
+    noteId: message.noteId, title, kind, style, image, blocks, links,
     card: {
       x: clampCoordinate(num(card.x, 0)), y: clampCoordinate(num(card.y, 0)),
       width: size(card.width), height: size(card.height),
@@ -322,7 +327,7 @@ async function handleMessage(message, senderUserId) {
   switch (message.type) {
     case "createNote": {
       await createNotePage(shared, {
-        title: message.title, style: message.style, x: message.x, y: message.y,
+        title: message.title, kind: message.kind, style: message.style, x: message.x, y: message.y,
         authorId: senderUserId, autoTitle: message.autoTitle === true
       });
       return;
@@ -355,6 +360,14 @@ async function handleMessage(message, senderUserId) {
         .filter(name => name.trim().toLowerCase() !== title.toLowerCase())
         .slice(-20);
       await page.update({ name: title, "system.formerNames": nextFormerNames, "system.updatedAt": Date.now() });
+      return;
+    }
+
+    case "setNoteKind": {
+      const page = shared.pages.get(message.noteId);
+      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
+      if (!new Set(["note", "location"]).has(message.kind)) return;
+      await page.update({ "system.kind": message.kind, "system.updatedAt": Date.now() });
       return;
     }
 
@@ -726,6 +739,7 @@ async function handleMessage(message, senderUserId) {
         name: note.title,
         type: `${MODULE_ID}.note`,
         system: {
+          kind: note.kind === "location" ? "location" : "note",
           style: note.style,
           image: note.image,
           blocks: note.blocks.map(b => ({ ...b, authorId: senderUserId })),

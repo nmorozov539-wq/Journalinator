@@ -1,6 +1,6 @@
 # Journalinator — Handoff Notes
 
-Status: pre-alpha, v0.1.0. Phases 1–8 of the spec are implemented. Phase 8 (GM tier) is built
+Status: pre-alpha, v0.2.0. Phases 1–8 of the spec are implemented. Phase 8 (GM tier) is built
 and covered by Node tests against a fake Foundry, but has **not yet been exercised in a real
 Foundry session** (see section 6). This file records the current architecture, the bugs found
 during review, and the GM-side design.

@@ -10,7 +10,7 @@
  *   hiddenLinks:  { [sourceNoteId]: Link[] }           GM-only links whose source is a shared note
  *   labels:       { [labelId]: Label }                  GM-only canvas labels
  * }
- * SecretNote = { id, name, style, image, blocks: Block[], links: Link[], authorId,
+ * SecretNote = { id, name, kind, style, image, blocks: Block[], links: Link[], authorId,
  *                createdAt, updatedAt, card: { x, y, width, height, rotation } }
  */
 

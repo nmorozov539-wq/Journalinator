@@ -254,6 +254,10 @@
   touch-action: none;
   background-image: radial-gradient(#2d2d33 1.2px, transparent 1.2px);
   background-size: 24px 24px;
+  cursor: default;
+}
+.jn-canvas.jn-far-zoom {
+  background-image: none;
 }
 
 .jn-world {
@@ -273,30 +277,41 @@
   pointer-events: none;
 }
 
-.jn-tooltip {
-  position: absolute;
+.jn-selection-box {
   display: none;
-  max-width: 260px;
-  z-index: 5;
+  position: absolute;
+  z-index: 8;
   pointer-events: none;
+  border: 1px solid var(--jn-acc);
+  background: color-mix(in srgb, var(--jn-acc) 14%, transparent);
+  border-radius: 2px;
+}
+
+.jn-context-menu {
+  display: none;
+  position: absolute;
+  z-index: 30;
+  min-width: 190px;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px;
   background: var(--jn-panel);
-  color: var(--jn-text);
   border: 1px solid var(--jn-line);
-  border-radius: 8px;
-  padding: 9px 11px;
-  font-size: 12.5px;
-  box-shadow: 0 8px 20px #0006;
+  border-radius: 9px;
+  box-shadow: 0 12px 30px #000a;
 }
-.jn-tooltip-lines {
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+.jn-context-menu button {
+  border: 0;
+  border-radius: 6px;
+  padding: 7px 10px;
+  text-align: left;
+  color: var(--jn-text);
+  background: transparent;
+  cursor: pointer;
 }
-.jn-tooltip-by {
-  margin-top: 6px;
-  color: var(--jn-muted);
-  font-size: 11px;
+.jn-context-menu button:hover {
+  color: var(--jn-acc);
+  background: var(--jn-bg);
 }
 
 .jn-card {
@@ -589,17 +604,25 @@
 /* --- Links --- */
 
 .jn-card-link {
-  display: none;
+  display: block;
   position: absolute;
-  left: 7px; bottom: 9px;
-  width: 12px; height: 12px;
+  width: 10px; height: 10px;
   border-radius: 50%;
   background: var(--jn-acc);
+  border: 2px solid var(--jn-panel);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--jn-acc) 55%, transparent);
   cursor: crosshair;
+  opacity: 0.78;
+  z-index: 3;
 }
-.jn-card.selected .jn-card-link {
-  display: block;
+.jn-card-link:hover {
+  opacity: 1;
+  transform: scale(1.2);
 }
+.jn-card-link-top { left: 50%; top: 3px; margin-left: -7px; }
+.jn-card-link-right { right: 3px; top: 50%; margin-top: -7px; }
+.jn-card-link-bottom { left: 50%; bottom: 3px; margin-left: -7px; }
+.jn-card-link-left { left: 3px; top: 50%; margin-top: -7px; }
 
 .jn-link-hit {
   stroke: transparent;
@@ -607,6 +630,11 @@
   fill: none;
   pointer-events: stroke;
   cursor: pointer;
+}
+.jn-links path:not(.jn-link-hit) {
+  vector-effect: non-scaling-stroke;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .jn-link-label {
   font-size: 11px;

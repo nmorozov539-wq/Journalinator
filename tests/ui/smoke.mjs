@@ -176,8 +176,35 @@ test("canvas renders secret cards, hidden links and GM toolbar buttons", async (
   canvas.update(notesStore.getAllNotes(), notesStore.getLayout());
   const card = canvas.root.querySelector(`.jn-card[data-id="${cultId}"]`);
   assert.ok(card.classList.contains("jn-secret"));
+  assert.equal(card.querySelectorAll(".jn-card-link").length, 4, "all four connection handles stay visible");
+  assert.equal(canvas.root.querySelector(".jn-tooltip"), null, "hover tooltip was removed");
   const hiddenLink = canvas.root.querySelector("g.jn-link-hidden");
   assert.ok(hiddenLink, "hidden link drawn");
+
+  const pathBefore = hiddenLink.querySelector("path:not(.jn-link-hit)").getAttribute("d");
+  card.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+  canvas.root.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, button: 0, clientX: 90, clientY: 45 }));
+  await new Promise(resolve => setTimeout(resolve, 25));
+  const pathAfter = canvas.root.querySelector("g.jn-link-hidden path:not(.jn-link-hit)").getAttribute("d");
+  assert.notEqual(pathAfter, pathBefore, "connection follows a locally dragged card before the write is sent");
+  canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 90, clientY: 45 }));
+  assert.ok(calls.some(([name]) => name === "onMoveCard"), "card position is committed on release");
+
+  card.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, button: 0 }));
+  assert.ok(calls.some(([name, id]) => name === "onEditNote" && id === cultId), "double-click starts editing");
+
+  const linkHit = canvas.root.querySelector(".jn-link-hit");
+  for (let i = 0; i < 2; i++) {
+    linkHit.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 20, clientY: 20 }));
+    linkHit.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 20, clientY: 20 }));
+  }
+  assert.ok(calls.some(([name]) => name === "onDeleteLink"), "double-clicking a connection removes it");
+
+  canvas.root.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, button: 2, clientX: 100, clientY: 100 }));
+  const locationButton = canvas.root.querySelector('.jn-context-menu [data-action="location"]');
+  assert.ok(locationButton, "right-click opens the add menu");
+  locationButton.click();
+  assert.ok(calls.some(([name, , , options]) => name === "onCreateNoteAt" && options.kind === "location"));
 
   // Player view: no secret card.
   notesStore.setGmView(false);

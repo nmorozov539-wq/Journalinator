@@ -3,6 +3,7 @@ const fields = foundry.data.fields;
 export default class NoteModel extends foundry.abstract.TypeDataModel {
   static defineSchema() {
     return {
+      kind: new fields.StringField({ required: true, choices: ["note", "location"], initial: "note" }),
       style: new fields.StringField({ required: true, initial: "sticky" }),
       image: new fields.FilePathField({ categories: ["IMAGE"], required: false, nullable: true, initial: null }),
       blocks: new fields.ArrayField(new fields.SchemaField({

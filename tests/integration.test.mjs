@@ -66,6 +66,14 @@ test("player creates a shared note through the socket", async () => {
   assert.ok(tavernId);
 });
 
+test("location creation keeps title separate from an empty body", async () => {
+  await fromPlayer({ type: "createNote", title: "New Location", kind: "location", x: 300, y: 0 });
+  const location = sharedByName("New Location");
+  assert.equal(location.system.kind, "location");
+  assert.equal(location.system.style, "document");
+  assert.equal(location.system.blocks[0].text, "");
+});
+
 test("GM writes a secret note with typed links into both namespaces", async () => {
   vexId = await secrets.createSecretNote({ title: "Lord Vex", x: 0, y: 0 });
   const note = vaultStore.data.notes[vexId];

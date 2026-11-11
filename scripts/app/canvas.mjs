@@ -33,8 +33,10 @@ export default class JournalCanvas {
     this.labelEls = new Map();
     this.linksById = new Map();
     this.selectedNoteId = null;
+    this.selectedNoteIds = new Set();
     this.selectedLinkId = null;
-    this.previewMode = "full"; // "full" | "lines" — hover tooltip preview style (spec §9/§13)
+    this.lastLinkClick = null;
+    this.linkDrawTimer = null;
     this.dimMatch = () => true; // (note) => does it match the active search/filters?
     this.gmMode = false; // GM view with secrets merged in: shows hide/reveal/hint controls
 
@@ -44,12 +46,14 @@ export default class JournalCanvas {
       <div class="jn-world">
         <svg class="jn-links"></svg>
       </div>
-      <div class="jn-tooltip"></div>
+      <div class="jn-selection-box"></div>
+      <div class="jn-context-menu"></div>
       <div class="jn-link-toolbar"></div>
     `;
     this.world = this.root.querySelector(".jn-world");
     this.svg = this.root.querySelector(".jn-links");
-    this.tooltip = this.root.querySelector(".jn-tooltip");
+    this.selectionBox = this.root.querySelector(".jn-selection-box");
+    this.contextMenu = this.root.querySelector(".jn-context-menu");
     this.linkToolbar = this.root.querySelector(".jn-link-toolbar");
 
     this.#bindPointerEvents();
@@ -99,7 +103,10 @@ export default class JournalCanvas {
         <h3 class="jn-card-title"></h3>
         <p class="jn-card-excerpt"></p>
         <span class="jn-card-lock-pill">&#9998;</span>
-        <b class="jn-card-link" title="${t("JN.Canvas.LinkHandle")}"></b>
+        <b class="jn-card-link jn-card-link-top" data-side="top" title="${t("JN.Canvas.LinkHandle")}"></b>
+        <b class="jn-card-link jn-card-link-right" data-side="right" title="${t("JN.Canvas.LinkHandle")}"></b>
+        <b class="jn-card-link jn-card-link-bottom" data-side="bottom" title="${t("JN.Canvas.LinkHandle")}"></b>
+        <b class="jn-card-link jn-card-link-left" data-side="left" title="${t("JN.Canvas.LinkHandle")}"></b>
         <b class="jn-card-resize"></b>
       `;
       this.world.appendChild(el);
@@ -108,9 +115,10 @@ export default class JournalCanvas {
 
     el.className = `jn-card ${styleDef.cssClass}`;
     el.classList.toggle("jn-secret", !!note.secret);
+    el.classList.toggle("jn-kind-location", note.system.kind === "location");
     el.classList.toggle("jn-hint", !!note.system.hint);
     el.classList.toggle("jn-has-hidden", !note.secret && (note.system.blocks ?? []).some(b => b.hidden));
-    el.classList.toggle("selected", note._id === this.selectedNoteId);
+    el.classList.toggle("selected", this.selectedNoteIds.has(note._id) || note._id === this.selectedNoteId);
     el.classList.toggle("jn-being-edited", hasAnyLock(note._id));
     el.classList.toggle("jn-dimmed", !this.dimMatch(note));
     el.style.left = `${cardData.x}px`;
@@ -175,7 +183,14 @@ export default class JournalCanvas {
   #cardBox(id) {
     const data = this.layout.cards?.[id] ?? { x: 0, y: 0 };
     const el = this.cardEls.get(id);
-    return { x: data.x, y: data.y, w: el?.offsetWidth ?? 190, h: el?.offsetHeight ?? 70 };
+    const liveX = Number.parseFloat(el?.style.left);
+    const liveY = Number.parseFloat(el?.style.top);
+    return {
+      x: Number.isFinite(liveX) ? liveX : data.x,
+      y: Number.isFinite(liveY) ? liveY : data.y,
+      w: el?.offsetWidth || Number.parseFloat(el?.style.width) || 190,
+      h: el?.offsetHeight || Number.parseFloat(el?.style.height) || 70
+    };
   }
 
   #drawLinks() {
@@ -223,6 +238,23 @@ export default class JournalCanvas {
       </marker>`).join("");
 
     this.svg.innerHTML = `<defs>${defs}</defs>${body}`;
+  }
+
+  /** Limits expensive SVG rebuilds to one per animation-sized interval while dragging. */
+  #queueLinkDraw() {
+    if (this.linkDrawTimer !== null) return;
+    this.linkDrawTimer = setTimeout(() => {
+      this.linkDrawTimer = null;
+      this.#drawLinks();
+      this.#syncLinkToolbar();
+    }, 16);
+  }
+
+  #flushLinkDraw() {
+    if (this.linkDrawTimer !== null) clearTimeout(this.linkDrawTimer);
+    this.linkDrawTimer = null;
+    this.#drawLinks();
+    this.#syncLinkToolbar();
   }
 
   #syncLinkToolbar() {
@@ -298,6 +330,7 @@ export default class JournalCanvas {
     this.world.style.transform = `translate(${this.view.x}px, ${this.view.y}px) scale(${this.view.k})`;
     this.root.style.backgroundPosition = `${this.view.x}px ${this.view.y}px`;
     this.root.style.backgroundSize = `${24 * this.view.k}px ${24 * this.view.k}px`;
+    this.root.classList.toggle("jn-far-zoom", this.view.k < 0.48);
   }
 
   #zoomAt(clientX, clientY, k) {
@@ -319,8 +352,9 @@ export default class JournalCanvas {
     };
   }
 
-  #startLinkPreview(sourceId) {
+  #startLinkPreview(sourceId, side) {
     this.previewSourceId = sourceId;
+    this.previewSourceSide = side;
     this.previewPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
     this.previewPath.setAttribute("class", "jn-link-preview");
     this.svg.appendChild(this.previewPath);
@@ -329,15 +363,104 @@ export default class JournalCanvas {
   #updateLinkPreview(clientX, clientY) {
     if (!this.previewPath) return;
     const box = this.#cardBox(this.previewSourceId);
-    const sx = box.x + box.w / 2, sy = box.y + box.h / 2;
+    const anchors = {
+      top: { x: box.x + box.w / 2, y: box.y, nx: 0, ny: -1 },
+      right: { x: box.x + box.w, y: box.y + box.h / 2, nx: 1, ny: 0 },
+      bottom: { x: box.x + box.w / 2, y: box.y + box.h, nx: 0, ny: 1 },
+      left: { x: box.x, y: box.y + box.h / 2, nx: -1, ny: 0 }
+    };
+    const start = anchors[this.previewSourceSide] ?? anchors.right;
     const { x, y } = this.#toWorld(clientX, clientY);
-    this.previewPath.setAttribute("d", `M${sx},${sy} L${x},${y}`);
+    const distance = Math.max(35, Math.hypot(x - start.x, y - start.y) * 0.3);
+    const c1x = start.x + start.nx * distance;
+    const c1y = start.y + start.ny * distance;
+    this.previewPath.setAttribute("d", `M${start.x},${start.y} C${c1x},${c1y} ${x},${y} ${x},${y}`);
   }
 
   #endLinkPreview() {
     this.previewPath?.remove();
     this.previewPath = null;
     this.previewSourceId = null;
+    this.previewSourceSide = null;
+  }
+
+  #setSelection(ids, primary = null) {
+    this.selectedNoteIds = new Set(ids);
+    this.selectedNoteId = primary;
+    this.selectedLinkId = null;
+    for (const [id, el] of this.cardEls) el.classList.toggle("selected", this.selectedNoteIds.has(id));
+    this.#syncLinkToolbar();
+    this.callbacks.onSelectNote(primary);
+  }
+
+  #showSelectionBox(sx, sy, x, y) {
+    const rect = this.root.getBoundingClientRect();
+    const left = Math.min(sx, x) - rect.left;
+    const top = Math.min(sy, y) - rect.top;
+    this.selectionBox.style.left = `${left}px`;
+    this.selectionBox.style.top = `${top}px`;
+    this.selectionBox.style.width = `${Math.abs(x - sx)}px`;
+    this.selectionBox.style.height = `${Math.abs(y - sy)}px`;
+    this.selectionBox.style.display = "block";
+  }
+
+  #finishSelection(drag, clientX, clientY) {
+    this.selectionBox.style.display = "none";
+    if (drag.moved <= DRAG_THRESHOLD) {
+      this.#setSelection([], null);
+      return;
+    }
+    const left = Math.min(drag.sx, clientX);
+    const right = Math.max(drag.sx, clientX);
+    const top = Math.min(drag.sy, clientY);
+    const bottom = Math.max(drag.sy, clientY);
+    const selected = drag.additive ? new Set(drag.initialIds) : new Set();
+    for (const [id, el] of this.cardEls) {
+      const box = el.getBoundingClientRect();
+      if (box.right >= left && box.left <= right && box.bottom >= top && box.top <= bottom) selected.add(id);
+    }
+    const ids = [...selected];
+    this.#setSelection(ids, ids.length === 1 ? ids[0] : null);
+  }
+
+  #closeContextMenu() {
+    this.contextMenu.style.display = "none";
+    this.contextMenu.innerHTML = "";
+  }
+
+  #openContextMenu(clientX, clientY) {
+    const point = this.#toWorld(clientX, clientY);
+    const gmItems = this.gmMode ? `
+      <button type="button" data-action="secret-note">${t("JN.Context.NewSecretNote")}</button>
+      <button type="button" data-action="gm-label">${t("JN.Context.NewGMLabel")}</button>` : "";
+    this.contextMenu.innerHTML = `
+      <button type="button" data-action="note">${t("JN.Context.NewNote")}</button>
+      <button type="button" data-action="location">${t("JN.Context.NewLocation")}</button>
+      <button type="button" data-action="label">${t("JN.Context.NewLabel")}</button>
+      ${gmItems}
+    `;
+    const rootRect = this.root.getBoundingClientRect();
+    this.contextMenu.style.left = `${clientX - rootRect.left}px`;
+    this.contextMenu.style.top = `${clientY - rootRect.top}px`;
+    this.contextMenu.style.display = "flex";
+    const menuRect = this.contextMenu.getBoundingClientRect();
+    const left = Math.min(clientX - rootRect.left, rootRect.width - menuRect.width - 6);
+    const top = Math.min(clientY - rootRect.top, rootRect.height - menuRect.height - 6);
+    this.contextMenu.style.left = `${Math.max(6, left)}px`;
+    this.contextMenu.style.top = `${Math.max(6, top)}px`;
+
+    this.contextMenu.querySelectorAll("button").forEach(button => {
+      button.addEventListener("click", ev => {
+        ev.stopPropagation();
+        const action = button.dataset.action;
+        if (action === "note") this.callbacks.onCreateNoteAt(point.x - 95, point.y - 35, { kind: "note" });
+        else if (action === "location") this.callbacks.onCreateNoteAt(point.x - 122, point.y - 45, { kind: "location" });
+        else if (action === "label") this.callbacks.onAddLabelAt(point.x, point.y);
+        else if (action === "secret-note") this.callbacks.onCreateNoteAt(point.x - 95, point.y - 35, { kind: "note", secret: true });
+        else if (action === "gm-label") this.callbacks.onAddGmLabelAt?.(point.x, point.y);
+        this.#closeContextMenu();
+      });
+    });
   }
 
   #bindPointerEvents() {
@@ -345,11 +468,15 @@ export default class JournalCanvas {
 
     this.root.addEventListener("wheel", ev => {
       ev.preventDefault();
+      this.#closeContextMenu();
       this.#zoomAt(ev.clientX, ev.clientY, this.view.k * Math.exp(-ev.deltaY * 0.0015));
     }, { passive: false });
 
     this.root.addEventListener("pointerdown", ev => {
       if (ev.target.closest(".jn-link-toolbar")) return;
+      if (ev.target.closest(".jn-context-menu")) return;
+      this.#closeContextMenu();
+      if (ev.button === 2) return;
       try { this.root.setPointerCapture(ev.pointerId); } catch { /* no active pointer (e.g. synthetic event) */ }
       const cardEl = ev.target.closest(".jn-card");
       const resizeHandle = ev.target.closest(".jn-card-resize");
@@ -357,19 +484,38 @@ export default class JournalCanvas {
       const labelEl = ev.target.closest(".jn-label");
       const linkHit = ev.target.closest(".jn-link-hit");
 
-      if (resizeHandle) {
+      // Middle mouse always pans, even when the pointer starts over a card, handle, or link.
+      if (ev.button === 1) {
+        ev.preventDefault();
+        drag = { type: "pan", sx: ev.clientX, sy: ev.clientY, vx: this.view.x, vy: this.view.y, moved: 0 };
+      } else if (ev.button !== 0) {
+        return;
+      } else if (resizeHandle) {
         const id = resizeHandle.closest(".jn-card").dataset.id;
         const el = this.cardEls.get(id);
         drag = { type: "resize", id, sx: ev.clientX, sy: ev.clientY, ow: el.offsetWidth, oh: el.offsetHeight, moved: 0 };
       } else if (linkHandle) {
         const id = linkHandle.closest(".jn-card").dataset.id;
-        drag = { type: "link-create", sourceId: id, moved: 0 };
-        this.#startLinkPreview(id);
+        drag = { type: "link-create", sourceId: id, side: linkHandle.dataset.side, moved: 0 };
+        this.#startLinkPreview(id, linkHandle.dataset.side);
         this.#updateLinkPreview(ev.clientX, ev.clientY);
       } else if (cardEl) {
         const id = cardEl.dataset.id;
-        const card = this.layout.cards?.[id] ?? { x: 0, y: 0 };
-        drag = { type: "card", id, sx: ev.clientX, sy: ev.clientY, ox: card.x, oy: card.y, moved: 0 };
+        const initialIds = [...this.selectedNoteIds];
+        const selected = this.selectedNoteIds.has(id) ? [...this.selectedNoteIds] : [id];
+        const origins = new Map(selected.map(noteId => {
+          const box = this.#cardBox(noteId);
+          return [noteId, { x: box.x, y: box.y }];
+        }));
+        if (!this.selectedNoteIds.has(id)) {
+          this.selectedNoteIds = new Set([id]);
+          for (const [noteId, el] of this.cardEls) el.classList.toggle("selected", noteId === id);
+        }
+        drag = {
+          type: "card", id, ids: selected, origins,
+          toggle: ev.ctrlKey || ev.metaKey, initialIds,
+          sx: ev.clientX, sy: ev.clientY, moved: 0
+        };
       } else if (labelEl) {
         const id = labelEl.dataset.id;
         const data = this.layout.labels?.[id] ?? { x: 0, y: 0 };
@@ -377,16 +523,15 @@ export default class JournalCanvas {
       } else if (linkHit) {
         drag = { type: "link", id: linkHit.dataset.id, sx: ev.clientX, sy: ev.clientY, moved: 0 };
       } else {
-        drag = { type: "pan", sx: ev.clientX, sy: ev.clientY, vx: this.view.x, vy: this.view.y, moved: 0 };
+        drag = {
+          type: "selection", sx: ev.clientX, sy: ev.clientY, moved: 0,
+          additive: ev.ctrlKey || ev.metaKey, initialIds: [...this.selectedNoteIds]
+        };
       }
     });
 
     this.root.addEventListener("pointermove", ev => {
-      if (!drag) {
-        const cardEl = ev.target.closest(".jn-card");
-        this.#showTooltip(cardEl ? cardEl.dataset.id : null, ev.clientX, ev.clientY);
-        return;
-      }
+      if (!drag) return;
       const dx = ev.clientX - (drag.sx ?? ev.clientX), dy = ev.clientY - (drag.sy ?? ev.clientY);
       drag.moved = Math.max(drag.moved, Math.abs(dx) + Math.abs(dy));
 
@@ -397,12 +542,17 @@ export default class JournalCanvas {
         el.style.width = `${w}px`;
         el.style.height = `${h}px`;
         el.classList.add("jn-sized");
+        this.#queueLinkDraw();
       } else if (drag.type === "card") {
-        const el = this.cardEls.get(drag.id);
-        const x = drag.ox + dx / this.view.k, y = drag.oy + dy / this.view.k;
-        el.style.left = `${x}px`;
-        el.style.top = `${y}px`;
-        this.#drawLinks();
+        for (const id of drag.ids) {
+          const el = this.cardEls.get(id);
+          const origin = drag.origins.get(id);
+          el.style.left = `${origin.x + dx / this.view.k}px`;
+          el.style.top = `${origin.y + dy / this.view.k}px`;
+        }
+        // This redraw is deliberately local-only. The GM write is sent after pointerup, so
+        // other clients see one final movement while the dragging client gets a fluid preview.
+        this.#queueLinkDraw();
       } else if (drag.type === "label") {
         const el = this.labelEls.get(drag.id);
         const x = drag.ox + dx / this.view.k, y = drag.oy + dy / this.view.k;
@@ -415,21 +565,31 @@ export default class JournalCanvas {
         this.view.y = drag.vy + dy;
         this.#applyTransform();
         this.#syncLinkToolbar();
+      } else if (drag.type === "selection") {
+        this.#showSelectionBox(drag.sx, drag.sy, ev.clientX, ev.clientY);
       }
     });
 
     const finishDrag = ev => {
       if (!drag) return;
       const wasClick = drag.moved <= DRAG_THRESHOLD;
+      if ((drag.type === "card" || drag.type === "resize") && !wasClick) this.#flushLinkDraw();
 
       if (drag.type === "card") {
         if (wasClick) {
-          this.selectedNoteId = drag.id;
-          this.selectedLinkId = null;
-          this.callbacks.onSelectNote(drag.id);
+          if (drag.toggle) {
+            const ids = new Set(drag.initialIds ?? this.selectedNoteIds);
+            if (ids.has(drag.id)) ids.delete(drag.id); else ids.add(drag.id);
+            const next = [...ids];
+            this.#setSelection(next, next.length === 1 ? next[0] : null);
+          } else {
+            this.#setSelection([drag.id], drag.id);
+          }
         } else {
-          const el = this.cardEls.get(drag.id);
-          this.callbacks.onMoveCard(drag.id, parseFloat(el.style.left), parseFloat(el.style.top));
+          for (const id of drag.ids) {
+            const el = this.cardEls.get(id);
+            this.callbacks.onMoveCard(id, parseFloat(el.style.left), parseFloat(el.style.top));
+          }
         }
       } else if (drag.type === "resize" && !wasClick) {
         const el = this.cardEls.get(drag.id);
@@ -448,20 +608,37 @@ export default class JournalCanvas {
           this.callbacks.onMoveLabel(drag.id, parseFloat(el.style.left), parseFloat(el.style.top));
         }
       } else if (drag.type === "link" && wasClick) {
-        this.selectedLinkId = drag.id;
-        this.selectedNoteId = null;
-        this.callbacks.onSelectNote(null);
-        this.#syncLinkToolbar();
-      } else if (drag.type === "pan" && wasClick) {
-        this.selectedNoteId = null;
-        this.selectedLinkId = null;
-        this.callbacks.onSelectNote(null);
-        this.#syncLinkToolbar();
+        const now = Date.now();
+        if (this.lastLinkClick?.id === drag.id && now - this.lastLinkClick.at < 420) {
+          const link = this.linksById.get(drag.id);
+          if (link) this.callbacks.onDeleteLink(link.sourceId, link.id);
+          this.lastLinkClick = null;
+          this.selectedLinkId = null;
+          this.#syncLinkToolbar();
+        } else {
+          this.lastLinkClick = { id: drag.id, at: now };
+          this.selectedLinkId = drag.id;
+          this.selectedNoteId = null;
+          this.selectedNoteIds.clear();
+          for (const el of this.cardEls.values()) el.classList.remove("selected");
+          this.callbacks.onSelectNote(null);
+          this.#syncLinkToolbar();
+        }
+      } else if (drag.type === "selection") {
+        this.#finishSelection(drag, ev.clientX, ev.clientY);
       }
       drag = null;
     };
     this.root.addEventListener("pointerup", finishDrag);
     this.root.addEventListener("pointercancel", finishDrag);
+
+    this.root.addEventListener("contextmenu", ev => {
+      ev.preventDefault();
+      this.#openContextMenu(ev.clientX, ev.clientY);
+    });
+    this.root.addEventListener("auxclick", ev => {
+      if (ev.button === 1) ev.preventDefault();
+    });
 
     this.root.addEventListener("dblclick", ev => {
       if (ev.target.closest(".jn-card-resize")) {
@@ -473,27 +650,13 @@ export default class JournalCanvas {
         this.callbacks.onResetCardSize(id);
         return;
       }
-      if (ev.target === this.root || ev.target === this.world) {
-        const { x, y } = this.#toWorld(ev.clientX, ev.clientY);
-        this.callbacks.onCreateNoteAt(x - 95, y - 35, { secret: this.gmMode && ev.altKey });
+      const cardEl = ev.target.closest(".jn-card");
+      if (cardEl && !ev.target.closest(".jn-card-link")) {
+        ev.preventDefault();
+        this.#setSelection([cardEl.dataset.id], cardEl.dataset.id);
+        this.callbacks.onEditNote?.(cardEl.dataset.id);
       }
     });
-  }
-
-  #showTooltip(noteId, clientX, clientY) {
-    if (!noteId) { this.tooltip.style.display = "none"; return; }
-    const note = this.notes?.find(n => n._id === noteId);
-    if (!note) { this.tooltip.style.display = "none"; return; }
-    const author = game.users.get(note.system.authorId);
-    const text = note.system.blocks.map(b => b.text).join(" ");
-    const lines = this.previewMode === "lines" ? " jn-tooltip-lines" : "";
-    this.tooltip.innerHTML = `<b>${foundry.utils.escapeHTML(note.name)}</b><div class="jn-tooltip-text${lines}">${foundry.utils.escapeHTML(text)}</div><div class="jn-tooltip-by">${t("JN.Canvas.By", { author: foundry.utils.escapeHTML(author?.name ?? t("JN.Common.Unknown")) })}</div>`;
-    const rect = this.root.getBoundingClientRect();
-    this.tooltip.style.display = "block";
-    let left = clientX - rect.left + 16;
-    if (left + this.tooltip.offsetWidth > rect.width) left = clientX - rect.left - this.tooltip.offsetWidth - 16;
-    this.tooltip.style.left = `${Math.max(6, left)}px`;
-    this.tooltip.style.top = `${Math.max(6, clientY - rect.top)}px`;
   }
 
   addLabelButton() {
@@ -522,8 +685,6 @@ export default class JournalCanvas {
     this.view.x = rect.width / 2 - (card.x + w / 2) * this.view.k;
     this.view.y = rect.height / 2 - (card.y + h / 2) * this.view.k;
     this.#applyTransform();
-    this.selectedNoteId = noteId;
-    this.selectedLinkId = null;
-    this.callbacks.onSelectNote(noteId);
+    this.#setSelection([noteId], noteId);
   }
 }

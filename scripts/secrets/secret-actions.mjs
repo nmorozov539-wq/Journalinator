@@ -103,7 +103,8 @@ function secretFinder(vault, sourceCard) {
   };
 }
 
-function createSecretNoteIn(vault, { title, x = 0, y = 0, style = "sticky" }) {
+function createSecretNoteIn(vault, { title, kind = "note", x = 0, y = 0, style = "sticky" }) {
+  kind = kind === "location" ? "location" : "note";
   style = Object.hasOwn(CARD_STYLES, style) ? style : "sticky";
   const id = randomID();
   const width = CARD_STYLES[style]?.defaultWidth ?? 190;
@@ -111,6 +112,7 @@ function createSecretNoteIn(vault, { title, x = 0, y = 0, style = "sticky" }) {
   vault.notes[id] = {
     id,
     name: makeSecretTitle(title).slice(0, MAX_TITLE_LENGTH),
+    kind,
     style,
     image: null,
     blocks: [{ blockId: randomID(), text: "", authorId: game.user.id }],
@@ -168,8 +170,8 @@ export function bareSecretMentions(text) {
 
 // --- Notes ----------------------------------------------------------------------------------
 
-export function createSecretNote({ title, x, y, style }) {
-  return vaultStore.mutate(vault => createSecretNoteIn(vault, { title, x, y, style }));
+export function createSecretNote({ title, kind, x, y, style }) {
+  return vaultStore.mutate(vault => createSecretNoteIn(vault, { title, kind, x, y, style }));
 }
 
 export function renameSecretNote(noteId, base) {
@@ -192,6 +194,16 @@ export function renameSecretNote(noteId, base) {
 export function setSecretNoteStyle(noteId, style) {
   if (!Object.hasOwn(CARD_STYLES, style)) return;
   return vaultStore.mutate(vault => { if (vault.notes[noteId]) vault.notes[noteId].style = style; });
+}
+
+export function setSecretNoteKind(noteId, kind) {
+  if (!new Set(["note", "location"]).has(kind)) return;
+  return vaultStore.mutate(vault => {
+    const note = vault.notes[noteId];
+    if (!note) return;
+    note.kind = kind;
+    note.updatedAt = now();
+  });
 }
 
 export function setSecretNoteImage(noteId, image) {
@@ -427,6 +439,7 @@ export async function declassifyNote(noteId, title) {
     type: "gmCreateNote",
     noteId,
     title,
+    kind: note.kind,
     style: note.style,
     image: note.image,
     blocks: note.blocks.map(({ blockId, text }) => ({ blockId, text })),
