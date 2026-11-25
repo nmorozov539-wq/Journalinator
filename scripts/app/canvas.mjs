@@ -819,7 +819,6 @@ export default class JournalCanvas {
       <button type="button" data-action="gm-label">${t("JN.Context.NewGMLabel")}</button>` : "";
     if (this.simpleMode) {
       this.contextMenu.innerHTML = noteId ? `
-        <button type="button" data-action="publish-private">${t("JN.Private.Publish")}</button>
         <button type="button" data-action="delete-private">${t("JN.Common.Delete")}</button>` : `
         <button type="button" data-action="note">${t("JN.Context.NewNote")}</button>
         <button type="button" data-action="memo">${t("JN.Style.Memo")}</button>
@@ -873,11 +872,6 @@ export default class JournalCanvas {
         if (action === "card-background") {
           this.#closeContextMenu();
           this.callbacks.onEditCardBackground?.(noteId);
-          return;
-        }
-        if (action === "publish-private") {
-          this.#closeContextMenu();
-          this.callbacks.onPublishNote?.(noteId);
           return;
         }
         if (action === "delete-private") {

@@ -289,11 +289,7 @@
   "JN.Private.PendingBody": "The GM wants to give you the private journal \"{name}\". Accept or decline.",
   "JN.Private.Accept": "Accept",
   "JN.Private.Decline": "Decline",
-  "JN.Private.NoGM": "A GM must be online to publish a note or create a private journal.",
-  "JN.Private.Publish": "Publish to shared board",
-  "JN.Private.PublishTitle": "Publish note",
-  "JN.Private.PublishBody": "This copies only the title and text to a new shared note. Links, images, styles, and layout stay private.",
-  "JN.Private.Published": "Published \"{title}\" to the shared board.",
+  "JN.Private.NoGM": "A GM must be online to paste notes onto the shared canvas or create a private journal.",
   "JN.Private.DeleteNoteConfirm": "Move \"{title}\" to the private trash?",
   "JN.Private.AdminTitle": "Private Journals",
   "JN.Private.AdminHint": "Only workspace names are shown here. Open a journal through its owner's private canvas.",
@@ -313,5 +309,8 @@
   "JN.Private.DetachFirst": "detach this journal from its current player before assigning it.",
   "JN.Private.AlreadyHas": "that player already has a private journal or a pending offer.",
   "JN.Private.NotYours": "this private journal is not assigned to you.",
-  "JN.Private.SaveConflict": "this private journal changed in another session. Reloading the latest copy."
+  "JN.Private.SaveConflict": "this private journal changed in another session. Reloading the latest copy.",
+
+  "JN.Clipboard.Copied": "Copied {count} note(s).",
+  "JN.Clipboard.Pasted": "Pasted {count} note(s)."
 }

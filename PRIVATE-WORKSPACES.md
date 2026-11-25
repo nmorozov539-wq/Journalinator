@@ -5,8 +5,8 @@ Status: implemented in 0.8.x.
 ## Summary
 
 Every Foundry user gets one private workspace: a separate Journalinator canvas that only that
-profile can open through the UI. It is isolated from the shared board. There is no sharing, no
-reader list, no import from the shared board, and no private content on the main canvas.
+profile can open through the UI. It is isolated from the shared board. There is no sharing and no
+reader list. Notes move between canvases only through an explicit Ctrl/Cmd+C and Ctrl/Cmd+V copy.
 
 This is a **UI-private** feature, not encryption. See the security boundary below.
 
@@ -17,13 +17,12 @@ This is a **UI-private** feature, not encryption. See the security boundary belo
 - Add a simple **Main canvas | Private canvas** switch.
 - Let the owner rename their private workspace.
 - Let the GM repair workspaces when a user is deleted, recreated, or needs reassignment.
-- Let a private note be copied to the shared board as a one-time publication.
+- Let notes be copied between the shared and private canvases with Ctrl/Cmd+C and Ctrl/Cmd+V.
 
 ## Non-goals
 
 - Encryption at rest.
 - Sharing a private note with selected readers.
-- Importing shared notes into a private workspace.
 - Merging two private workspaces.
 - Private links between notes in the first version.
 - Hiding the existence of a workspace from the GM or the host.
@@ -66,24 +65,22 @@ notes, but:
 - private links are out of scope for the first version; `[[...]]` text stays plain text;
 - the private workspace has its own undo, trash, and restore behaviour.
 
-### Publishing
+### Copying between canvases
 
-A private note has one bridge to the shared board: **Publish to shared board**.
+Select one or more notes and use Ctrl/Cmd+C. Switch to the other canvas and use Ctrl/Cmd+V.
 
-Publishing:
+Copying:
 
-- asks for confirmation;
+- works in both directions: shared → private and private → shared;
+- also duplicates notes within the same canvas;
 - copies only the title and text;
 - preserves Markdown and paragraph text, but strips links, images, styles, stamps, card layout,
   and every other private detail;
-- creates a new shared note on the main canvas;
-- leaves the private note unchanged and independent;
+- creates a new note and leaves the source unchanged and independent;
 - does not keep the two notes in sync.
 
-If the title is already used on the shared board, the publish dialog asks the player to choose
-another title. The private note is not changed.
-
-Publishing requires an active GM, like every other shared write.
+When pasting onto the shared canvas, the active GM creates the notes. If a title is already used
+there, the new copy gets a numeric suffix.
 
 ## Data model
 
@@ -199,14 +196,16 @@ a stranger’s workspace.
 
 The GM admin panel can also create a workspace for a player.
 
-## Publishing flow
+## Copy/paste flow
 
-1. The player saves any in-progress edit.
-2. The player chooses **Publish to shared board** on a private note.
-3. The confirmation explains that the title and text will become visible to everyone.
-4. The player confirms or changes the title if it is already taken.
-5. The active GM creates a new shared note with the title and text only.
-6. The private note remains exactly as it was.
+1. Select one or more notes on either canvas.
+2. Press Ctrl/Cmd+C.
+3. Switch to the other canvas.
+4. Press Ctrl/Cmd+V.
+5. The destination creates new notes with the copied title and text.
+6. If the destination is shared, the active GM writes them; duplicate titles get a suffix.
+
+The source notes remain exactly as they were.
 
 ## Testing checklist
 
@@ -219,8 +218,8 @@ The GM admin panel can also create a workspace for a player.
 - The admin panel lists only workspace names.
 - Owners and the GM can rename a workspace; duplicate names are rejected.
 - Private notes never appear in shared search, stats, history, backlinks, or the main canvas.
-- Publishing copies title and text only; no links, images, styles, or layout.
-- Publishing leaves the private note unchanged.
+- Ctrl/Cmd+C and Ctrl/Cmd+V copy notes in both directions; no links, images, styles, or layout.
+- Copying leaves the source note unchanged.
 - Two sessions signed in as the same user do not overwrite each other silently.
 
 ## Explicitly deferred

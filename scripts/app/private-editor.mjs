@@ -194,9 +194,6 @@ export default class PrivateNoteEditor {
         ${cardStyleKey(note.system.style) === "wanted" ? tool("fa-bullseye", t("JN.Style.Wanted"), `
           <input type="text" class="journalinator-target-heading" aria-label="${t("JN.Style.Wanted")}"
             value="${esc(note.system.targetHeading)}" placeholder="${t("JN.Style.Wanted")}" maxlength="80">`) : ""}
-        <button type="button" class="jn-note-action jn-private-publish"
-          title="${t("JN.Private.Publish")}" aria-label="${t("JN.Private.Publish")}">
-          <i class="fa-solid fa-share-from-square" aria-hidden="true"></i></button>
         <button type="button" class="jn-note-action jn-private-delete"
           title="${t("JN.Common.Delete")}" aria-label="${t("JN.Common.Delete")}">
           <i class="fa-solid fa-trash" aria-hidden="true"></i></button>
@@ -246,11 +243,6 @@ export default class PrivateNoteEditor {
       if (event.isComposing || event.key !== "Enter") return;
       event.preventDefault();
       heading.blur();
-    });
-
-    this.root.querySelector(".jn-private-publish")?.addEventListener("click", async () => {
-      await this.#stopEditing({ save: true });
-      await this.callbacks.publishNote(noteId);
     });
 
     this.root.querySelector(".jn-private-delete")?.addEventListener("click", async () => {

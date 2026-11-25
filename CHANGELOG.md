@@ -2,6 +2,13 @@
 
 These notes start with the small board and toolbar polish patches and cover the follow-up fixes and features.
 
+## 0.8.2 — Copy and paste notes
+
+- Select notes and use Ctrl/Cmd+C and Ctrl/Cmd+V to copy them between the main canvas and the
+  private canvas, in either direction. The same shortcut duplicates notes inside one canvas.
+- Copies contain only the title and text. Links, images, styles, and card layout are not copied.
+- Pasting onto the shared canvas needs a GM; duplicate titles get a numeric suffix.
+
 ## 0.8.1 — Private canvas fix
 
 - Private workspaces now use a standard Foundry journal page type. This fixes the

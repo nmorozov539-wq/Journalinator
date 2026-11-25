@@ -386,7 +386,7 @@ async function handleMessage(message, senderUserId) {
       return;
     }
 
-    case "privatePublish": {
+    case "pasteNote": {
       const title = typeof message.title === "string" ? message.title.trim() : "";
       if (!title || title.length > MAX_TITLE_LENGTH) {
         notifyUser(senderUserId, title ? t("JN.Socket.TitleTooLong", { max: MAX_TITLE_LENGTH }) : t("JN.Socket.TitleEmpty"));
@@ -395,7 +395,8 @@ async function handleMessage(message, senderUserId) {
       const texts = Array.isArray(message.blocks) ? message.blocks.slice(0, MAX_DECLASSIFIED_BLOCKS) : [];
       if (texts.some(text => typeof text !== "string" || text.length > MAX_BLOCK_LENGTH)) return;
       const page = await createNotePage(shared, {
-        title, kind: "note", style: "sticky", x: message.x, y: message.y, authorId: senderUserId
+        title, kind: "note", style: "sticky", x: message.x, y: message.y,
+        authorId: senderUserId, autoTitle: message.autoTitle !== false
       });
       if (!page) return;
       const blocks = texts.length

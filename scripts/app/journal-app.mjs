@@ -76,6 +76,7 @@ export default class JournalApp extends ApplicationV2 {
   #toolbarPointerTarget = null;
   #focusedCanvasRenders = new WeakSet();
   #deletionHistory = [];
+  #clipboard = [];
   #replacingHTML = false;
   #editor = new NoteEditor({
     boardOnly: true,
@@ -185,6 +186,48 @@ export default class JournalApp extends ApplicationV2 {
     return requestWrite({ type: "createNote", ...note, kind, x, y });
   }
 
+  #copySelectedNotes() {
+    const ids = this.#view === "private"
+      ? this.#private.canvas.getSelectedNoteIds()
+      : this.#canvas.getSelectedNoteIds();
+    const notes = ids.map(id => this.#view === "private" ? this.#private.getNote(id) : notesStore.getNote(id))
+      .filter(note => note && !note.system.deleted)
+      // Never let a GM-only note or hidden paragraph leak into a shared paste.
+      .filter(note => this.#view !== "shared" || !note.secret);
+    if (!notes.length) return false;
+    this.#clipboard = notes.map(note => ({
+      title: note.name?.trim() || t("JN.Private.NewNoteTitle"),
+      blocks: (note.system.blocks ?? []).filter(block => !block.hidden).map(block => block.text)
+    }));
+    ui.notifications?.info(t("JN.Clipboard.Copied", { count: this.#clipboard.length }));
+    return true;
+  }
+
+  async #pasteClipboard() {
+    if (!this.#clipboard.length) return false;
+    if (this.#view === "private") {
+      const page = privateStore.findActive(game.user.id);
+      if (!page) return false;
+      const position = this.#private.canvas.newCardPosition();
+      await this.#private.pasteNotes(this.#clipboard, position);
+      ui.notifications?.info(t("JN.Clipboard.Pasted", { count: this.#clipboard.length }));
+      return true;
+    }
+    if (!game.users.activeGM) {
+      ui.notifications?.warn(t("JN.Private.NoGM"));
+      return true;
+    }
+    const position = this.#canvas.newCardPosition();
+    for (const entry of this.#clipboard) {
+      await requestWrite({
+        type: "pasteNote", title: entry.title, blocks: entry.blocks,
+        x: position.x, y: position.y
+      });
+    }
+    ui.notifications?.info(t("JN.Clipboard.Pasted", { count: this.#clipboard.length }));
+    return true;
+  }
+
   _onFirstRender() {
     this.#editor.activate();
     const rerender = () => this.render();
@@ -211,6 +254,25 @@ export default class JournalApp extends ApplicationV2 {
         ev.preventDefault();
         ev.stopImmediatePropagation();
       };
+
+      const activeCanvas = this.#view === "private" ? this.#private.canvas : this.#canvas;
+      const inCanvas = activeCanvas.root.contains(ev.target);
+      const inEditor = this.element.querySelector(".journalinator-editor")?.contains(ev.target);
+      if (inCanvas || inEditor) {
+        const plainCommand = (ev.ctrlKey || ev.metaKey) && !ev.shiftKey && !ev.altKey;
+        if (plainCommand && ev.key.toLowerCase() === "c") {
+          const selection = globalThis.getSelection?.();
+          if (selection && !selection.isCollapsed) return;
+          if (this.#copySelectedNotes()) consume();
+          return;
+        }
+        if (plainCommand && ev.key.toLowerCase() === "v") {
+          if (!this.#clipboard.length) return;
+          consume();
+          this.#pasteClipboard();
+          return;
+        }
+      }
 
       if (this.#view === "private") {
         if (!this.#private.canvas.root.contains(ev.target)) return;

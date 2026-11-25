@@ -920,7 +920,7 @@ test("canvas cards render Markdown and forward task checkboxes", () => {
   }
 });
 
-test("private canvas is separate and publishes title and text only", async () => {
+test("private canvas is separate and copies notes through the clipboard", async () => {
   const privatePage = await privateStore.createFor(gmUser);
   assert.ok(privatePage);
   const app = new JournalApp();
@@ -932,6 +932,7 @@ test("private canvas is separate and publishes title and text only", async () =>
     app._onRender();
   };
   try {
+    app._onFirstRender();
     await redraw();
     const select = host.querySelector(".jn-view-switch");
     select.value = "private";
@@ -968,14 +969,57 @@ test("private canvas is separate and publishes title and text only", async () =>
     await redraw();
     assert.equal(privateStore.read(privateStore.findActive(gmUser.id)).notes[privateNote.id].blocks[0].text, "- [x] Private task");
 
-    answers.push("Published private note");
-    host.querySelector(".jn-private-publish").click();
+    const page = privateStore.findActive(gmUser.id);
+    const data = privateStore.read(page);
+    data.notes[privateNote.id].title = "Clipboard private";
+    await privateStore.save(page, data, privateStore.flags(page).rev);
+    await redraw();
+
+    const privateCanvas = host.querySelector(".jn-canvas");
+    privateCanvas.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "c", ctrlKey: true, bubbles: true, cancelable: true
+    }));
     await settle();
-    const published = sharedByName("Published private note");
-    assert.ok(published, "publish created a shared note");
-    assert.deepEqual(published.system.blocks.map(block => block.text), ["- [x] Private task"]);
-    assert.equal(published.system.links.length, 0, "publishing copies no links");
+
+    select.value = "shared";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await redraw();
+    const sharedCanvas = host.querySelector(".jn-canvas");
+    sharedCanvas.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "v", ctrlKey: true, bubbles: true, cancelable: true
+    }));
+    await settle();
+    await redraw();
+
+    const copied = sharedByName("Clipboard private");
+    assert.ok(copied, "clipboard paste created a shared note");
+    assert.deepEqual(copied.system.blocks.map(block => block.text), ["- [x] Private task"]);
+    assert.equal(copied.system.links.length, 0, "clipboard copies no links");
     assert.ok(privateStore.findActive(gmUser.id), "private copy remains");
+
+    // Shared -> private copy/paste.
+    const copiedCard = sharedCanvas.querySelector(`.jn-card[data-id="${copied.id}"]`);
+    const badge = copiedCard.querySelector(".jn-card-badge");
+    badge.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 0, clientY: 0 }));
+    badge.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 0, clientY: 0 }));
+    sharedCanvas.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "c", ctrlKey: true, bubbles: true, cancelable: true
+    }));
+    await settle();
+
+    select.value = "private";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await redraw();
+    const privateCanvasAgain = host.querySelector(".jn-canvas");
+    privateCanvasAgain.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "v", ctrlKey: true, bubbles: true, cancelable: true
+    }));
+    await settle();
+    await redraw();
+    const workspaceAfterCopy = privateStore.read(privateStore.findActive(gmUser.id));
+    const copiedPrivate = Object.values(workspaceAfterCopy.notes).filter(note => note.title === "Clipboard private");
+    assert.equal(copiedPrivate.length, 2, "shared note was pasted into the private workspace");
+    assert.ok(copiedPrivate.every(note => note.blocks[0].text === "- [x] Private task"));
   } finally {
     app._onClose();
     host.remove();

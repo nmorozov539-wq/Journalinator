@@ -1,8 +1,6 @@
 import JournalCanvas from "./canvas.mjs";
 import PrivateNoteEditor from "./private-editor.mjs";
 import { privateStore } from "../store/private-store.mjs";
-import { notesStore } from "../store/notes-store.mjs";
-import { requestWrite } from "../socket.mjs";
 import { CARD_STYLES } from "../styles/registry.mjs";
 import { toggleTaskListItem } from "../markdown.mjs";
 import { t } from "../i18n.mjs";
@@ -10,7 +8,7 @@ import { t } from "../i18n.mjs";
 const { DialogV2 } = foundry.applications.api;
 const esc = text => foundry.utils.escapeHTML(String(text ?? ""));
 
-/** The private tab's canvas, editor, selection, trash, and publish action. */
+/** The private tab's canvas, editor, selection, trash, and clipboard actions. */
 export default class PrivateWorkspace {
   constructor({ onChange } = {}) {
     this.onChange = onChange ?? (() => {});
@@ -47,7 +45,6 @@ export default class PrivateWorkspace {
       onResizeCard: (id, width, height) => this.resizeCard(id, width, height),
       onResetCardSize: id => this.resizeCard(id, null, null),
       onToggleTask: (id, blockId, index) => this.toggleTask(id, blockId, index),
-      onPublishNote: id => this.publish(id),
       onDeleteNote: id => this.deleteNotes([id])
     });
     this.canvas.simpleMode = true;
@@ -55,8 +52,7 @@ export default class PrivateWorkspace {
     this.editor = new PrivateNoteEditor({
       getNote: id => this.getNote(id),
       updateNote: (id, patch) => this.updateNote(id, patch),
-      deleteNote: id => this.deleteNotes([id]),
-      publishNote: id => this.publish(id)
+      deleteNote: id => this.deleteNotes([id])
     });
   }
 
@@ -290,32 +286,25 @@ export default class PrivateWorkspace {
     });
   }
 
-  async publish(noteId) {
-    await this.editor.close();
-    const note = this.workspace?.notes?.[noteId];
-    if (!note) return;
-    if (!game.users.activeGM) {
-      ui.notifications?.warn(t("JN.Private.NoGM"));
-      return;
-    }
-    const title = await DialogV2.prompt({
-      window: { title: t("JN.Private.PublishTitle") },
-      content: `<p>${t("JN.Private.PublishBody")}</p>
-        <input type="text" name="value" autofocus value="${esc(note.title)}" maxlength="200">`,
-      ok: { label: t("JN.Private.Publish"), callback: (event, button) => button.form.elements.value.value.trim() },
-      rejectClose: false
+  async pasteNotes(entries, { x = 0, y = 0 } = {}) {
+    if (!this.page || !Array.isArray(entries) || !entries.length) return [];
+    const ids = [];
+    const ok = await this.#save(data => {
+      for (const entry of entries) {
+        const { note, card } = privateStore.makeNote({
+          title: entry?.title, kind: "note", style: "sticky", x, y, cards: data.layout.cards
+        });
+        const texts = Array.isArray(entry?.blocks) && entry.blocks.length ? entry.blocks : [""];
+        note.blocks = texts.map(text => ({ blockId: foundry.utils.randomID(), text: String(text ?? "") }));
+        data.notes[note.id] = note;
+        data.layout.cards[note.id] = card;
+        ids.push(note.id);
+      }
     });
-    if (!title) return;
-    if (notesStore.getAllNotes().some(note => note.name.trim().toLowerCase() === title.toLowerCase())) {
-      ui.notifications?.warn(t("JN.Socket.TitleTaken", { title }));
-      return;
-    }
-    await requestWrite({
-      type: "privatePublish",
-      title,
-      blocks: note.blocks.map(block => block.text)
-    });
-    ui.notifications?.info(t("JN.Private.Published", { title }));
+    if (!ok || !ids.length) return [];
+    this.selectedNoteId = ids.at(-1);
+    this.onChange();
+    return ids;
   }
 
   destroy() {
