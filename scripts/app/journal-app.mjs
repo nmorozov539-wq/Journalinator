@@ -197,7 +197,10 @@ export default class JournalApp extends ApplicationV2 {
     if (!notes.length) return false;
     this.#clipboard = notes.map(note => ({
       title: note.name?.trim() || t("JN.Private.NewNoteTitle"),
-      blocks: (note.system.blocks ?? []).filter(block => !block.hidden).map(block => block.text)
+      blocks: (note.system.blocks ?? []).filter(block => !block.hidden).map(block => block.text),
+      style: cardStyleKey(note.system.style),
+      kind: note.system.kind === "location" ? "location" : "note",
+      targetHeading: typeof note.system.targetHeading === "string" ? note.system.targetHeading : ""
     }));
     ui.notifications?.info(t("JN.Clipboard.Copied", { count: this.#clipboard.length }));
     return true;
@@ -221,6 +224,7 @@ export default class JournalApp extends ApplicationV2 {
     for (const entry of this.#clipboard) {
       await requestWrite({
         type: "pasteNote", title: entry.title, blocks: entry.blocks,
+        style: entry.style, kind: entry.kind, targetHeading: entry.targetHeading,
         x: position.x, y: position.y
       });
     }

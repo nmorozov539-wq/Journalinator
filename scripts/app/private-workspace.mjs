@@ -489,10 +489,11 @@ export default class PrivateWorkspace {
     const ok = await this.#save(data => {
       for (const entry of entries) {
         const { note, card } = privateStore.makeNote({
-          title: entry?.title, kind: "note", style: "sticky", x, y, cards: data.layout.cards
+          title: entry?.title, kind: entry?.kind, style: entry?.style, x, y, cards: data.layout.cards
         });
         const texts = Array.isArray(entry?.blocks) && entry.blocks.length ? entry.blocks : [""];
         note.blocks = texts.map(text => ({ blockId: foundry.utils.randomID(), text: String(text ?? "") }));
+        if (typeof entry?.targetHeading === "string") note.targetHeading = entry.targetHeading.slice(0, 80);
         data.notes[note.id] = note;
         data.layout.cards[note.id] = card;
         ids.push(note.id);

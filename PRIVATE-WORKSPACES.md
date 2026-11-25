@@ -72,8 +72,8 @@ Copying:
 
 - works in both directions: shared → private and private → shared;
 - also duplicates notes within the same canvas;
-- copies only the title and text;
-- preserves Markdown and paragraph text, but strips links, images, styles, stamps, card layout,
+- copies the title, text, and note type (card style, location kind, and target heading);
+- preserves Markdown and paragraph text, but strips links, images, stamps, card layout,
   and every other private detail;
 - creates a new note and leaves the source unchanged and independent;
 - does not keep the two notes in sync.
@@ -217,7 +217,8 @@ The source notes remain exactly as they were.
 - The admin panel shows player names/colors and journal names, with ownership links.
 - Owners and the GM can rename a workspace; duplicate names are rejected.
 - Private notes never appear in shared search, stats, history, backlinks, or the main canvas.
-- Ctrl/Cmd+C and Ctrl/Cmd+V copy notes in both directions; no links, images, styles, or layout.
+- Ctrl/Cmd+C and Ctrl/Cmd+V copy notes in both directions; note types survive, while links,
+  images, stamps, and layout do not.
 - Copying leaves the source note unchanged.
 - Two sessions signed in as the same user do not overwrite each other silently.
 

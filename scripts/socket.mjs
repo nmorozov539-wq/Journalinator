@@ -394,15 +394,24 @@ async function handleMessage(message, senderUserId) {
       }
       const texts = Array.isArray(message.blocks) ? message.blocks.slice(0, MAX_DECLASSIFIED_BLOCKS) : [];
       if (texts.some(text => typeof text !== "string" || text.length > MAX_BLOCK_LENGTH)) return;
+      const kind = message.kind === "location" ? "location" : "note";
+      const style = typeof message.style === "string" && Object.hasOwn(CARD_STYLES, message.style)
+        ? message.style : undefined;
+      const targetHeading = typeof message.targetHeading === "string"
+        ? message.targetHeading.trim().slice(0, 80) : "";
       const page = await createNotePage(shared, {
-        title, kind: "note", style: "sticky", x: message.x, y: message.y,
+        title, kind, style, x: message.x, y: message.y,
         authorId: senderUserId, autoTitle: message.autoTitle !== false
       });
       if (!page) return;
       const blocks = texts.length
         ? texts.map(text => ({ blockId: foundry.utils.randomID(), text, authorId: senderUserId }))
         : [{ blockId: foundry.utils.randomID(), text: "", authorId: senderUserId }];
-      await page.update({ "system.blocks": blocks, "system.updatedAt": Date.now() });
+      await page.update({
+        "system.blocks": blocks,
+        "system.updatedAt": Date.now(),
+        ...(targetHeading ? { "system.targetHeading": targetHeading } : {})
+      });
       return;
     }
 

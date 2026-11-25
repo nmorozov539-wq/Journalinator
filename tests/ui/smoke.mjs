@@ -976,6 +976,8 @@ test("private canvas is separate and copies notes through the clipboard", async 
     const page = privateStore.findActive(gmUser.id);
     const data = privateStore.read(page);
     data.notes[privateNote.id].title = "Clipboard private";
+    data.notes[privateNote.id].style = "wanted";
+    data.notes[privateNote.id].targetHeading = "Type preserved";
     await privateStore.save(page, data, privateStore.flags(page).rev);
     await redraw();
 
@@ -996,6 +998,8 @@ test("private canvas is separate and copies notes through the clipboard", async 
     const copied = sharedByName("Clipboard private");
     assert.ok(copied, "clipboard paste created a shared note");
     assert.deepEqual(copied.system.blocks.map(block => block.text), ["- [x] Private task"]);
+    assert.equal(copied.system.style, "wanted", "clipboard preserves the note type");
+    assert.equal(copied.system.targetHeading, "Type preserved");
     assert.equal(copied.system.links.length, 0, "clipboard copies no links");
     assert.ok(privateStore.findActive(gmUser.id), "private copy remains");
 
@@ -1020,6 +1024,8 @@ test("private canvas is separate and copies notes through the clipboard", async 
     const copiedPrivate = Object.values(workspaceAfterCopy.notes).filter(note => note.title === "Clipboard private");
     assert.equal(copiedPrivate.length, 2, "shared note was pasted into the private workspace");
     assert.ok(copiedPrivate.every(note => note.blocks[0].text === "- [x] Private task"));
+    assert.ok(copiedPrivate.every(note => note.style === "wanted"), "shared-to-private paste preserves the type");
+    assert.ok(copiedPrivate.every(note => note.targetHeading === "Type preserved"));
 
     const beforeDelete = Object.keys(privateStore.read(privateStore.findActive(gmUser.id)).notes).length;
     privateCanvasAgain.focus();

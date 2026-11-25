@@ -2,6 +2,12 @@
 
 These notes start with the small board and toolbar polish patches and cover the follow-up fixes and features.
 
+## 0.8.4 — Keep the note type when copying
+
+- Ctrl/Cmd+C and Ctrl/Cmd+V now preserve the card type between the main and private canvases,
+  including the Target card's heading. Content links, images, stamps, and layout are still left
+  behind.
+
 ## 0.8.3 — Private canvas controls and journal manager
 
 - Private notes now have the same canvas controls as the main board: note types, labels, stamps,
