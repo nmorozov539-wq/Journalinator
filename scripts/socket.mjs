@@ -1,5 +1,7 @@
 import { getContainerIds } from "./store/containers.mjs";
 import { CARD_STYLES, seedTilt } from "./styles/registry.mjs";
+import { cardPorts, linkAnchors, moveThreadPin, validCardPorts } from "./card-ports.mjs";
+import { noteImageSource, noteImageUrl } from "./image-url.mjs";
 import { reconcileTypedLinks } from "./wikilinks.mjs";
 import { maybeSnapshot } from "./snapshots.mjs";
 import { recordActivity, addSessionMarker } from "./stats.mjs";
@@ -8,6 +10,7 @@ import {
   authoritativeHolds, authoritativeSnapshot, receiveLockBroadcast, authoritativeLockHolder
 } from "./locks.mjs";
 import { t } from "./i18n.mjs";
+import { attachedStampIds, DEFAULT_STAMP_CORNER, isStampCorner, stampUrl } from "./stamps.mjs";
 
 const MODULE_ID = "fvtt-journalinator";
 const CHANNEL = `module.${MODULE_ID}`;
@@ -200,7 +203,7 @@ async function createNotePage(shared, { title, kind, style, x, y, authorId, auto
   const cardWidth = CARD_STYLES[style]?.defaultWidth ?? 190;
   const nearX = Number.isFinite(x) ? x : 0;
   const nearY = Number.isFinite(y) ? y : 0;
-  const spot = findFreeSpot(existingCards, cardWidth, 90, nearX, nearY);
+  const spot = findFreeSpot(existingCards, cardWidth, CARD_STYLES[style]?.defaultHeight ?? 90, nearX, nearY);
 
   const page = await JournalEntryPage.create({
     name: finalTitle,
@@ -275,7 +278,8 @@ function cleanDeclassifiedNote(shared, message) {
   if (!title || title.length > MAX_TITLE_LENGTH) return null;
   const kind = message.kind === "location" ? "location" : "note";
   const style = typeof message.style === "string" && Object.hasOwn(CARD_STYLES, message.style) ? message.style : "sticky";
-  const image = typeof message.image === "string" && message.image.trim().length <= 1000 ? message.image.trim() || null : null;
+  const image = noteImageSource(message.image);
+  const backgroundImage = noteImageUrl(message.backgroundImage);
 
   if (!Array.isArray(message.blocks) || !message.blocks.length || message.blocks.length > MAX_DECLASSIFIED_BLOCKS) return null;
   const blocks = [];
@@ -298,6 +302,7 @@ function cleanDeclassifiedNote(shared, message) {
       targetId: link.targetId,
       label: "", direction: "one", color: "", lineStyle: "solid",
       ...sanitizeLinkFields(link),
+      ...linkAnchors(link),
       origin: "drawn",
       edited: false,
       createdBy: "",
@@ -309,11 +314,13 @@ function cleanDeclassifiedNote(shared, message) {
   const num = (value, fallback) => Number.isFinite(value) ? value : fallback;
   const size = value => Number.isFinite(value) && value > 0 ? value : null;
   return {
-    noteId: message.noteId, title, kind, style, image, blocks, links,
+    noteId: message.noteId, title, kind, style, image, backgroundImage, blocks, links,
+    targetHeading: typeof message.targetHeading === "string" ? message.targetHeading.trim().slice(0, 80) : "",
     card: {
       x: clampCoordinate(num(card.x, 0)), y: clampCoordinate(num(card.y, 0)),
       width: size(card.width), height: size(card.height),
-      rotation: Math.max(-10, Math.min(10, num(card.rotation, 0)))
+      rotation: Math.max(-10, Math.min(10, num(card.rotation, 0))),
+      ports: cardPorts(card)
     }
   };
 }
@@ -444,17 +451,29 @@ async function handleMessage(message, senderUserId) {
       const page = shared.pages.get(message.noteId);
       if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
       if (typeof message.style !== "string" || !Object.hasOwn(CARD_STYLES, message.style)) return;
-      await page.update({ "system.style": message.style });
+      if (message.kind !== undefined && !["note", "location"].includes(message.kind)) return;
+      await page.update({
+        "system.style": message.style,
+        ...(message.kind ? { "system.kind": message.kind } : {})
+      });
+      return;
+    }
+
+    case "setTargetHeading": {
+      const page = shared.pages.get(message.noteId);
+      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
+      if (typeof message.heading !== "string" || message.heading.length > 80) return;
+      await page.update({ "system.targetHeading": message.heading.trim() });
       return;
     }
 
     case "setNoteImage": {
       const page = shared.pages.get(message.noteId);
       if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
-      if (message.image !== null && typeof message.image !== "string") return;
-      const image = typeof message.image === "string" ? message.image.trim() : null;
-      if (image && image.length > 1000) return;
-      await page.update({ "system.image": image || null });
+      const image = noteImageUrl(message.image);
+      if (message.image !== null && !image) return;
+      const field = message.background === true ? "system.backgroundImage" : "system.image";
+      await page.update({ [field]: image });
       return;
     }
 
@@ -468,6 +487,15 @@ async function handleMessage(message, senderUserId) {
         [`system.cards.${message.noteId}.x`]: message.x,
         [`system.cards.${message.noteId}.y`]: message.y
       });
+      return;
+    }
+
+    case "setCardPorts": {
+      const layout = layoutPage(shared);
+      const note = shared.pages.get(message.noteId);
+      if (!note || note.type !== `${MODULE_ID}.note` || note.system.deleted
+          || !layout?.system.cards?.[message.noteId] || !validCardPorts(message.ports)) return;
+      await layout.update({ [`system.cards.${message.noteId}.ports`]: message.ports });
       return;
     }
 
@@ -487,25 +515,49 @@ async function handleMessage(message, senderUserId) {
 
     case "addLabel": {
       const layout = layoutPage(shared);
-      if (!layout) return;
+      const stamp = message.stamp ?? "";
+      if (!layout) {
+        if (stamp) notifyUser(senderUserId, t("JN.Stamp.SaveFailed"));
+        return;
+      }
+      const noteId = message.noteId ?? "";
+      if (stamp !== "" && !stampUrl(stamp)) return;
+      if (noteId !== "") {
+        if (!stamp || typeof noteId !== "string" || !DOCUMENT_ID_RE.test(noteId)) return;
+        const note = shared.pages.get(noteId);
+        if (!note || note.type !== `${MODULE_ID}.note` || note.system.deleted) return;
+      }
       if (message.text !== undefined && typeof message.text !== "string") return;
-      const text = (message.text ?? t("JN.Label.Default")).slice(0, MAX_LABEL_TEXT_LENGTH);
+      const text = stamp ? "" : (message.text ?? t("JN.Label.Default")).slice(0, MAX_LABEL_TEXT_LENGTH);
       const x = message.x === undefined ? 0 : message.x;
       const y = message.y === undefined ? 0 : message.y;
       const size = message.size === undefined ? 14 : message.size;
       if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(size)) return;
       const color = sanitizeLabelColor(message.color);
       if (color === null) return;
-      const labelId = foundry.utils.randomID();
+      const [existingId, ...duplicates] = attachedStampIds(layout.system.labels, noteId);
+      if (message.corner !== undefined && (!noteId || !isStampCorner(message.corner))) return;
+      const corner = message.corner ?? layout.system.labels?.[existingId]?.corner ?? DEFAULT_STAMP_CORNER;
+      const labelId = existingId ?? foundry.utils.randomID();
       await layout.update({
+        ...Object.fromEntries(duplicates.map(id => [`system.labels.-=${id}`, null])),
         [`system.labels.${labelId}`]: {
           text,
           x: clampCoordinate(x),
           y: clampCoordinate(y),
           size: clampLabelSize(size),
-          color
+          color,
+          stamp,
+          noteId,
+          ...(noteId ? { corner } : {})
         }
+      }).catch(error => {
+        if (stamp) notifyUser(senderUserId, t("JN.Stamp.SaveFailed"));
+        throw error;
       });
+      if (stamp && layout.system.labels?.[labelId]?.stamp !== stamp) {
+        notifyUser(senderUserId, t("JN.Stamp.SaveFailed"));
+      }
       return;
     }
 
@@ -538,6 +590,12 @@ async function handleMessage(message, senderUserId) {
         updates[`system.labels.${message.labelId}.color`] = color;
         changed = true;
       }
+      if ("corner" in message) {
+        const label = layout.system.labels[message.labelId];
+        if (!label.noteId || !stampUrl(label.stamp) || !isStampCorner(message.corner)) return;
+        updates[`system.labels.${message.labelId}.corner`] = message.corner;
+        changed = true;
+      }
       if (!changed) return;
       await layout.update(updates);
       return;
@@ -547,7 +605,10 @@ async function handleMessage(message, senderUserId) {
       const layout = layoutPage(shared);
       if (!layout) return;
       if (typeof message.labelId !== "string" || !layout.system.labels?.[message.labelId]) return;
-      await layout.update({ [`system.labels.-=${message.labelId}`]: null });
+      const label = layout.system.labels[message.labelId];
+      const ids = label.noteId && stampUrl(label.stamp)
+        ? attachedStampIds(layout.system.labels, label.noteId) : [message.labelId];
+      await layout.update(Object.fromEntries(ids.map(id => [`system.labels.-=${id}`, null])));
       return;
     }
 
@@ -558,10 +619,18 @@ async function handleMessage(message, senderUserId) {
       if (!target || target.type !== `${MODULE_ID}.note` || target.system.deleted) return;
       if (message.sourceId === message.targetId) return;
       const links = [...(page.system.links ?? [])];
-      if (links.some(link => link.targetId === message.targetId)) return;
+      const anchors = linkAnchors(message);
+      const existing = links.findIndex(link => link.targetId === message.targetId);
+      if (existing !== -1) {
+        if (!anchors.sourcePoint || !anchors.targetPoint) return;
+        links[existing] = { ...links[existing], ...anchors, origin: "drawn", edited: true };
+        await page.update({ "system.links": links });
+        return;
+      }
       links.push({
         id: foundry.utils.randomID(),
         targetId: message.targetId,
+        ...anchors,
         label: "",
         direction: "one",
         color: "",
@@ -579,8 +648,10 @@ async function handleMessage(message, senderUserId) {
       const page = shared.pages.get(message.noteId);
       if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
       const links = page.system.links ?? [];
-      if (!links.some(link => link.id === message.linkId)) return;
-      const fields = sanitizeLinkFields(message.fields);
+      const existing = links.find(link => link.id === message.linkId);
+      if (!existing) return;
+      const pins = moveThreadPin(existing.pins, message.fields?.pinMove);
+      const fields = pins ? { pins } : sanitizeLinkFields(message.fields);
       if (!fields) return;
       const nextLinks = links.map(link =>
         link.id === message.linkId ? { ...link, ...fields, edited: true } : link
@@ -603,7 +674,7 @@ async function handleMessage(message, senderUserId) {
       const layout = layoutPage(shared);
       const sourceCard = layout?.system.cards[message.sourceId] ?? { x: 0, y: 0 };
       const newPage = await createNotePage(shared, {
-        title: message.title ?? t("JN.Note.Untitled"), style: "sticky",
+        title: message.title ?? t("JN.Note.Untitled"), style: message.style, autoTitle: message.autoTitle === true,
         x: sourceCard.x + 220, y: sourceCard.y, authorId: senderUserId
       });
       if (!newPage) return;
@@ -628,7 +699,9 @@ async function handleMessage(message, senderUserId) {
       if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
       const layout = layoutPage(shared);
       const lastCard = layout?.system.cards[message.noteId] ?? null;
-      await page.update({ "system.deleted": { at: Date.now(), by: senderUserId, lastCard } });
+      const undoId = typeof message.undoId === "string" && DOCUMENT_ID_RE.test(message.undoId)
+        ? message.undoId : null;
+      await page.update({ "system.deleted": { at: Date.now(), by: senderUserId, lastCard, undoId } });
       if (layout) await layout.update({ [`system.cards.-=${message.noteId}`]: null });
       return;
     }
@@ -636,6 +709,9 @@ async function handleMessage(message, senderUserId) {
     case "restoreNote": {
       const page = shared.pages.get(message.noteId);
       if (!page || page.type !== `${MODULE_ID}.note` || !page.system.deleted) return;
+      if (message.undoId !== undefined
+          && (typeof message.undoId !== "string" || !DOCUMENT_ID_RE.test(message.undoId)
+            || page.system.deleted.undoId !== message.undoId || page.system.deleted.by !== senderUserId)) return;
       const layout = layoutPage(shared);
       const lastCard = page.system.deleted.lastCard;
       let spot;
@@ -658,12 +734,9 @@ async function handleMessage(message, senderUserId) {
       const restoreUpdate = { "system.deleted": null };
       if (restoredTitle !== page.name) restoreUpdate.name = restoredTitle;
       await page.update(restoreUpdate);
-      if (restoredTitle !== page.name) {
-        notifyUser(senderUserId, t("JN.Socket.RestoredAs", { restored: restoredTitle, old: oldTitle }));
-      }
       if (layout) {
         await layout.update({
-          [`system.cards.${message.noteId}`]: { x: spot.x, y: spot.y, width: lastCard?.width ?? null, height: lastCard?.height ?? null, rotation: lastCard?.rotation ?? 0 }
+          [`system.cards.${message.noteId}`]: { x: spot.x, y: spot.y, width: lastCard?.width ?? null, height: lastCard?.height ?? null, rotation: lastCard?.rotation ?? 0, ports: cardPorts(lastCard) }
         });
       }
       return;
@@ -672,7 +745,13 @@ async function handleMessage(message, senderUserId) {
     case "emptyTrash": {
       if (!game.users.get(senderUserId)?.isGM) return; // only the GM may permanently empty the trash (spec §10/§11)
       const trashed = shared.pages.filter(p => p.type === `${MODULE_ID}.note` && p.system.deleted);
-      await JournalEntryPage.deleteDocuments(trashed.map(p => p.id), { parent: shared });
+      const trashedIds = new Set(trashed.map(p => p.id));
+      await JournalEntryPage.deleteDocuments([...trashedIds], { parent: shared });
+      const layout = layoutPage(shared);
+      const labelUpdates = Object.fromEntries(Object.entries(layout?.system.labels ?? {})
+        .filter(([, label]) => trashedIds.has(label.noteId))
+        .map(([id]) => [`system.labels.-=${id}`, null]));
+      if (Object.keys(labelUpdates).length) await layout.update(labelUpdates);
       const ids2 = getContainerIds();
       const historyPage = ids2?.historyPage ? game.journal.get(ids2.history)?.pages.get(ids2.historyPage) : null;
       if (historyPage) {
@@ -741,7 +820,9 @@ async function handleMessage(message, senderUserId) {
         system: {
           kind: note.kind === "location" ? "location" : "note",
           style: note.style,
+          targetHeading: note.targetHeading,
           image: note.image,
+          backgroundImage: note.backgroundImage,
           blocks: note.blocks.map(b => ({ ...b, authorId: senderUserId })),
           links: note.links,
           authorId: senderUserId,
@@ -771,6 +852,7 @@ async function handleMessage(message, senderUserId) {
         targetId: target.id,
         label: "", direction: "one", color: "", lineStyle: "solid",
         ...sanitizeLinkFields(message.link),
+        ...linkAnchors(message.link),
         origin: "drawn",
         edited: true,
         createdBy: senderUserId,

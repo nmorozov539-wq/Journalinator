@@ -4,7 +4,5 @@
  */
 export function t(key, data) {
   const i18n = globalThis.game?.i18n;
-  let text = i18n?.localize ? i18n.localize(key) : key;
-  if (data && i18n?.format) text = i18n.format(text, data);
-  return text;
+  return i18n?.localize ? i18n.localize(key, data) : key;
 }

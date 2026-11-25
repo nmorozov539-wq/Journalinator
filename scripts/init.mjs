@@ -21,6 +21,9 @@ Hooks.once("init", () => {
   });
   registerContainerSettings();
   registerGmTierSettings();
+  game.settings.register(MODULE_ID, "boardTheme", {
+    scope: "client", config: false, type: String, default: "classic"
+  });
   registerSidebarHiding();
 });
 

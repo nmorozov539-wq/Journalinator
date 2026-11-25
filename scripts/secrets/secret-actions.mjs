@@ -3,11 +3,14 @@ import { notesStore } from "../store/notes-store.mjs";
 import { requestWrite } from "../socket.mjs";
 import { reconcileTypedLinks, parseWikilinks } from "../wikilinks.mjs";
 import { CARD_STYLES, seedTilt } from "../styles/registry.mjs";
+import { linkAnchors, moveThreadPin, validCardPorts } from "../card-ports.mjs";
+import { noteImageUrl } from "../image-url.mjs";
 import {
   makeSecretTitle, stripSecretPrefix, hasSecretPrefix, mergeBlocks, orderOf, declassifyAnchor,
   resolveSecretTitle, findFreeSpot
 } from "./model.mjs";
 import { t } from "../i18n.mjs";
+import { attachedStampIds, DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, stampUrl } from "../stamps.mjs";
 
 /**
  * GM-tier write operations (spec §14). These run in the acting GM's own client and write the
@@ -108,7 +111,7 @@ function createSecretNoteIn(vault, { title, kind = "note", x = 0, y = 0, style =
   style = Object.hasOwn(CARD_STYLES, style) ? style : "sticky";
   const id = randomID();
   const width = CARD_STYLES[style]?.defaultWidth ?? 190;
-  const spot = findFreeSpot(mergedCards(vault), width, 90, x, y);
+  const spot = findFreeSpot(mergedCards(vault), width, CARD_STYLES[style]?.defaultHeight ?? 90, x, y);
   vault.notes[id] = {
     id,
     name: makeSecretTitle(title).slice(0, MAX_TITLE_LENGTH),
@@ -191,9 +194,15 @@ export function renameSecretNote(noteId, base) {
   });
 }
 
-export function setSecretNoteStyle(noteId, style) {
+export function setSecretNoteStyle(noteId, style, kind) {
   if (!Object.hasOwn(CARD_STYLES, style)) return;
-  return vaultStore.mutate(vault => { if (vault.notes[noteId]) vault.notes[noteId].style = style; });
+  if (kind !== undefined && !["note", "location"].includes(kind)) return;
+  return vaultStore.mutate(vault => {
+    const note = vault.notes[noteId];
+    if (!note) return;
+    note.style = style;
+    if (kind) note.kind = kind;
+  });
 }
 
 export function setSecretNoteKind(noteId, kind) {
@@ -206,9 +215,20 @@ export function setSecretNoteKind(noteId, kind) {
   });
 }
 
-export function setSecretNoteImage(noteId, image) {
-  const clean = typeof image === "string" ? image.trim().slice(0, 1000) || null : null;
-  return vaultStore.mutate(vault => { if (vault.notes[noteId]) vault.notes[noteId].image = clean; });
+export function setSecretTargetHeading(noteId, heading) {
+  if (typeof heading !== "string" || heading.length > 80) return;
+  return vaultStore.mutate(vault => {
+    if (vault.notes[noteId]) vault.notes[noteId].targetHeading = heading.trim();
+  });
+}
+
+export function setSecretNoteImage(noteId, image, background = false) {
+  const clean = noteImageUrl(image);
+  if (image !== null && !clean) return;
+  return vaultStore.mutate(vault => {
+    const note = vault.notes[noteId];
+    if (note) note[background ? "backgroundImage" : "image"] = clean;
+  });
 }
 
 export function moveSecretCard(noteId, x, y) {
@@ -216,6 +236,14 @@ export function moveSecretCard(noteId, x, y) {
   return vaultStore.mutate(vault => {
     const note = vault.notes[noteId];
     if (note) note.card = { ...(note.card ?? {}), x, y };
+  });
+}
+
+export function setSecretCardPorts(noteId, ports) {
+  if (!validCardPorts(ports)) return;
+  return vaultStore.mutate(vault => {
+    const card = vault.notes[noteId]?.card;
+    if (card) card.ports = [...ports];
   });
 }
 
@@ -433,7 +461,10 @@ export async function declassifyNote(noteId, title) {
   const sharedIds = new Set(liveSharedNotes().map(p => p.id));
   const publicLinks = (note.links ?? [])
     .filter(l => l.origin !== "typed" && sharedIds.has(l.targetId))
-    .map(({ targetId, label, direction, color, lineStyle }) => ({ targetId, label, direction, color, lineStyle }));
+    .map(link => {
+      const { targetId, label, direction, color, lineStyle } = link;
+      return { targetId, label, direction, color, lineStyle, ...linkAnchors(link) };
+    });
 
   const ok = await sendAndConfirm({
     type: "gmCreateNote",
@@ -441,7 +472,9 @@ export async function declassifyNote(noteId, title) {
     title,
     kind: note.kind,
     style: note.style,
+    targetHeading: note.targetHeading,
     image: note.image,
+    backgroundImage: note.backgroundImage,
     blocks: note.blocks.map(({ blockId, text }) => ({ blockId, text })),
     links: publicLinks,
     card: note.card
@@ -470,15 +503,20 @@ function newLink(targetId, extra = {}) {
 }
 
 /** A GM-only link. Links touching a secret note are always GM-only. */
-export function addHiddenLink(sourceId, targetId) {
+export function addHiddenLink(sourceId, targetId, ports) {
   if (sourceId === targetId) return;
   return vaultStore.mutate(vault => {
     const secret = vault.notes[sourceId];
     const existing = secret ? secret.links : (vault.hiddenLinks[sourceId] ?? []);
     const sharedExisting = notesStore.getSharedPage(sourceId)?.system.links ?? [];
-    if ([...existing, ...sharedExisting].some(l => l.targetId === targetId)) return;
-    if (secret) secret.links = [...existing, newLink(targetId)];
-    else if (notesStore.getSharedPage(sourceId)) vault.hiddenLinks[sourceId] = [...existing, newLink(targetId)];
+    if (sharedExisting.some(l => l.targetId === targetId)) return;
+    const anchors = linkAnchors(ports);
+    const previous = existing.find(l => l.targetId === targetId);
+    if (previous && (!anchors.sourcePoint || !anchors.targetPoint)) return;
+    const links = previous ? existing.map(link => link === previous ? { ...link, ...anchors, origin: "drawn", edited: true } : link)
+      : [...existing, newLink(targetId, anchors)];
+    if (secret) secret.links = links;
+    else if (notesStore.getSharedPage(sourceId)) vault.hiddenLinks[sourceId] = links;
   });
 }
 
@@ -490,6 +528,8 @@ export function updateHiddenLink(sourceId, linkId, fields) {
     const link = list?.find(l => l.id === linkId);
     if (!link) return;
     for (const key of LINK_FIELDS) if (key in fields) link[key] = fields[key];
+    const pins = moveThreadPin(link.pins, fields.pinMove);
+    if (pins) link.pins = pins;
     link.edited = true;
   });
 }
@@ -533,7 +573,7 @@ export async function hideSharedLink(sourceId, linkId) {
   await vaultStore.mutate(vault => {
     const list = vault.hiddenLinks[sourceId] ?? [];
     if (!list.some(l => l.targetId === link.targetId)) {
-      vault.hiddenLinks[sourceId] = [...list, { ...newLink(link.targetId), label: link.label, direction: link.direction, color: link.color, lineStyle: link.lineStyle, edited: true }];
+      vault.hiddenLinks[sourceId] = [...list, { ...newLink(link.targetId, linkAnchors(link)), label: link.label, direction: link.direction, color: link.color, lineStyle: link.lineStyle, edited: true }];
     }
   });
   await requestWrite({ type: "deleteLink", noteId: sourceId, linkId });
@@ -541,6 +581,19 @@ export async function hideSharedLink(sourceId, linkId) {
 }
 
 // --- Labels ---------------------------------------------------------------------------------
+
+export function addSecretStamp(noteId, stamp, color = STAMP_COLORS.red, corner) {
+  if (!stampUrl(stamp) || (corner !== undefined && !isStampCorner(corner))) return;
+  return vaultStore.mutate(vault => {
+    if (!vault.notes[noteId]) return;
+    const [existingId, ...duplicates] = attachedStampIds(vault.labels, noteId);
+    for (const id of duplicates) delete vault.labels[id];
+    vault.labels[existingId ?? randomID()] = {
+      noteId, stamp, color: Object.values(STAMP_COLORS).includes(color) ? color : STAMP_COLORS.red,
+      corner: corner ?? vault.labels[existingId]?.corner ?? DEFAULT_STAMP_CORNER
+    };
+  });
+}
 
 export function addHiddenLabel(x, y, text = "GM label") {
   return vaultStore.mutate(vault => {
@@ -555,11 +608,18 @@ export function updateHiddenLabel(labelId, fields) {
     if (typeof fields.text === "string") label.text = fields.text.slice(0, 500);
     if (Number.isFinite(fields.x)) label.x = fields.x;
     if (Number.isFinite(fields.y)) label.y = fields.y;
+    if (label.stamp && Object.values(STAMP_COLORS).includes(fields.color)) label.color = fields.color;
+    if (label.noteId && stampUrl(label.stamp) && isStampCorner(fields.corner)) label.corner = fields.corner;
   });
 }
 
 export function removeHiddenLabel(labelId) {
-  return vaultStore.mutate(vault => { delete vault.labels[labelId]; });
+  return vaultStore.mutate(vault => {
+    const label = vault.labels[labelId];
+    const ids = label?.noteId && stampUrl(label.stamp)
+      ? attachedStampIds(vault.labels, label.noteId) : [labelId];
+    for (const id of ids) delete vault.labels[id];
+  });
 }
 
 export async function revealLabel(labelId) {

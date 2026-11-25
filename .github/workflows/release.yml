@@ -38,9 +38,9 @@ jobs:
       - name: Build Foundry package
         shell: bash
         run: |
-          package="fvtt-journalinator-${GITHUB_REF_NAME}.zip"
+          package="Journalinator-${GITHUB_REF_NAME}.zip"
           mkdir -p dist/fvtt-journalinator
-          cp -R module.json LICENSE README.md lang scripts styles dist/fvtt-journalinator/
+          cp -R module.json LICENSE README.md assets lang scripts styles dist/fvtt-journalinator/
           cp module.json dist/module.json
           cd dist
           zip -9 -r "${package}" fvtt-journalinator
@@ -52,7 +52,7 @@ jobs:
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             "dist/module.json#Foundry VTT manifest" \
-            "dist/fvtt-journalinator-${GITHUB_REF_NAME}.zip#Ready-to-install module" \
+            "dist/Journalinator-${GITHUB_REF_NAME}.zip#Ready-to-install module" \
             --title "Journalinator ${GITHUB_REF_NAME}" \
             --generate-notes \
             --verify-tag
