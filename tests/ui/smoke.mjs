@@ -5,6 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
+import showdown from "showdown";
 
 const JN = new URL("../../", import.meta.url).href.replace(/\/$/, "");
 const dom = new JSDOM("<!doctype html><body></body>", { pretendToBeVisual: true });
@@ -16,6 +17,8 @@ const { installFoundry, makeContainers, makeUser } = await import(`${JN}/tests/f
 const gmUser = makeUser("GMuser0000000001", { isGM: true, name: "GM" });
 const env = installFoundry({ user: gmUser, users: [gmUser] });
 const containers = await makeContainers(env);
+globalThis.showdown = showdown;
+globalThis.foundry.utils.cleanHTML = html => html;
 
 // Dialog fakes: queue answers per call.
 const answers = [];
@@ -839,6 +842,80 @@ test("offline mode disables write controls and says the board is read-only", asy
     app._onClose();
     host.remove();
     gmUser.active = true;
+  }
+});
+
+test("renders Markdown in the editor and toggles a task item", async () => {
+  const heading = foundry.utils.randomID();
+  const tasks = foundry.utils.randomID();
+  const page = await JournalEntryPage.create({
+    name: "Markdown fixture",
+    type: "fvtt-journalinator.note",
+    system: {
+      kind: "note", style: "sticky", authorId: gmUser.id,
+      blocks: [
+        { blockId: heading, text: "# Heading", authorId: gmUser.id },
+        { blockId: tasks, text: "- [ ] first\n- [x] second", authorId: gmUser.id }
+      ],
+      createdAt: Date.now(), updatedAt: Date.now()
+    }
+  }, { parent: containers.shared });
+
+  editor.open(page.id);
+  editor.render();
+  assert.ok(editor.root.querySelector(".jn-block-markdown h1"), "heading rendered");
+  const boxes = editor.root.querySelectorAll("input.jn-task-checkbox");
+  assert.equal(boxes.length, 2);
+  assert.equal(boxes[0].disabled, false);
+  boxes[0].click();
+  await settle();
+  assert.equal(page.system.blocks[1].text, "- [x] first\n- [x] second");
+});
+
+test("toggling a task from another card opens that note for the lock listener", async () => {
+  const blockId = foundry.utils.randomID();
+  const page = await JournalEntryPage.create({
+    name: "Task elsewhere",
+    type: "fvtt-journalinator.note",
+    system: {
+      kind: "note", style: "sticky", authorId: gmUser.id,
+      blocks: [{ blockId, text: "- [ ] remote task", authorId: gmUser.id }],
+      createdAt: Date.now(), updatedAt: Date.now()
+    }
+  }, { parent: containers.shared });
+
+  editor.open(null);
+  editor.render();
+  editor.toggleTask(page.id, blockId, 0);
+  await settle();
+  assert.equal(editor.noteId, page.id);
+  assert.equal(page.system.blocks[0].text, "- [x] remote task");
+});
+
+test("canvas cards render Markdown and forward task checkboxes", () => {
+  const calls = [];
+  const canvas = new JournalCanvas({
+    onToggleTask: (noteId, blockId, index) => calls.push([noteId, blockId, index])
+  });
+  document.body.appendChild(canvas.root);
+  const note = {
+    _id: "markdowncard00001",
+    name: "Markdown card",
+    system: {
+      style: "sticky", links: [],
+      blocks: [{ blockId: "markdownblock001", text: "# Card heading\n\n- [ ] card task" }]
+    }
+  };
+  try {
+    canvas.update([note], { cards: { [note._id]: { x: 0, y: 0, rotation: 0 } } });
+    assert.ok(canvas.root.querySelector(".jn-card-block-body h1"));
+    const box = canvas.root.querySelector("input.jn-task-checkbox");
+    assert.ok(box);
+    box.click();
+    assert.deepEqual(calls, [[note._id, "markdownblock001", 0]]);
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
   }
 });
 

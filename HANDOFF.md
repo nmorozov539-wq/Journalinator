@@ -18,6 +18,8 @@ during review, and the GM-side design.
 | Fullscreen app shell, top bar, switcher, trash, stats UI | `scripts/app/journal-app.mjs` |
 | Canvas, cards, labels, links, pan/zoom | `scripts/app/canvas.mjs` |
 | Block editor, locks, split/merge, drafts | `scripts/app/editor.mjs` |
+| Markdown rendering and task toggles | `scripts/markdown.mjs` |
+| Markdown closing-pair helpers | `scripts/markdown-edit.mjs` |
 | Socket protocol, GM write path, typed links, trash | `scripts/socket.mjs` |
 | Ephemeral lock state machine | `scripts/locks.mjs` |
 | Typed `[[wikilink]]` reconciliation | `scripts/wikilinks.mjs` |

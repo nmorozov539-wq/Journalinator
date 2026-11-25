@@ -19,6 +19,8 @@ readable form.
 - **One shared canvas.** Notes are cards; there is no separate drawer or unplaced state.
 - **Obsidian-ish editing.** Click a paragraph to edit it; blank line + Enter splits, Backspace at
   the start merges. Unsaved text survives reloads as a local draft.
+- **Markdown.** Headings, emphasis, lists, task checkboxes, tables, quotes, code, and links render
+  in the editor and on cards. Typing `()` or a second `*` closes the pair automatically.
 - **Per-paragraph locks.** The active GM arbitrates edits, so two people cannot write the same
   paragraph at once. Different paragraphs can be edited simultaneously.
 - **Links.** Drag from a card's link handle, or type `[[Note]]` / `[[Note|label]]`. Links carry a
@@ -146,7 +148,6 @@ language file there and register it in `module.json` to extend it.
 
 - Pre-alpha. The GM tier is covered by Node tests against a fake Foundry but has not been run in
   a real session yet.
-- Notes are rendered as plain text; basic markdown rendering is still on the roadmap.
 - The editor panel is fixed-width; a fullscreen reading mode is not implemented yet.
 - The module stores notes as its own `JournalEntryPage` sub-types. Deactivating the module hides
   those pages until it is enabled again; the data is not lost.
@@ -170,6 +171,8 @@ Layout:
 | Fullscreen app shell, top bar, switcher, trash, stats | `scripts/app/journal-app.mjs` |
 | Canvas, cards, labels, links | `scripts/app/canvas.mjs` |
 | Block editor, locks, drafts | `scripts/app/editor.mjs` |
+| Markdown rendering and task toggles | `scripts/markdown.mjs` |
+| Markdown typing helpers | `scripts/markdown-edit.mjs` |
 | Socket protocol, GM write path | `scripts/socket.mjs` |
 | Lock state machine | `scripts/locks.mjs` |
 | Storage containers and read layer | `scripts/store/` |

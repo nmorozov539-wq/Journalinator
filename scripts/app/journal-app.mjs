@@ -97,6 +97,7 @@ export default class JournalApp extends ApplicationV2 {
     onEditCardBlock: (id, blockId, slot) => {
       this.#editor.editBoardBlock(id, blockId, slot);
     },
+    onToggleTask: (id, blockId, index) => this.#editor.toggleTask(id, blockId, index),
     onEditCardImage: id => this.#editor.editNoteImage(id),
     onEditCardBackground: id => this.#editor.editNoteImage(id, true),
     onEditNote: async id => {

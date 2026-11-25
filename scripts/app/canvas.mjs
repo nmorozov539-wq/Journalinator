@@ -5,6 +5,7 @@ import {
 import { arrowHead, pinnedThreadPath, ThreadMotion } from "../link-thread.mjs";
 import { noteImageSource, noteImageUrl } from "../image-url.mjs";
 import { hasAnyLock } from "../locks.mjs";
+import { renderMarkdown } from "../markdown.mjs";
 import { t } from "../i18n.mjs";
 import { DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, STAMP_CORNERS, STAMP_IDS, stampUrl } from "../stamps.mjs";
 
@@ -255,9 +256,20 @@ export default class JournalCanvas {
         row.dataset.blockId = block.blockId;
         row.dataset.cardText = "block";
         row.tabIndex = 0;
-        row.appendChild(document.createElement("span"));
+        const body = document.createElement("div");
+        body.className = "jn-card-block-body";
+        row.appendChild(body);
       }
-      row.firstElementChild.textContent = block.text || t("JN.Editor.EditCardText");
+      const body = row.firstElementChild;
+      const markdownKey = `${this.readOnly ? "r" : "w"}\u0000${block.text}`;
+      if (body.dataset.markdownKey !== markdownKey) {
+        body.dataset.markdownKey = markdownKey;
+        if (block.text.trim()) {
+          body.innerHTML = renderMarkdown(block.text, { interactiveTasks: !this.readOnly });
+        } else {
+          body.textContent = t("JN.Editor.EditCardText");
+        }
+      }
       row.classList.toggle("jn-card-block-empty", !block.text);
       if (excerpt.children[index] !== row) excerpt.insertBefore(row, excerpt.children[index] ?? null);
       existing.delete(block.blockId);
@@ -907,6 +919,17 @@ export default class JournalCanvas {
       this.#pickLinkPoint(ev);
     }, { capture: true });
 
+    this.root.addEventListener("click", ev => {
+      const box = ev.target.closest(".jn-card-block input[type=\"checkbox\"]");
+      if (!box || this.readOnly) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const row = box.closest(".jn-card-block");
+      const noteId = box.closest(".jn-card")?.dataset.id;
+      const index = [...row.querySelectorAll('input[type="checkbox"]')].indexOf(box);
+      if (noteId && index >= 0) this.callbacks.onToggleTask?.(noteId, row.dataset.blockId, index);
+    });
+
     this.root.addEventListener("keydown", ev => {
       if (ev.key === "Escape" && this.linkPlacement) {
         ev.preventDefault();
@@ -930,6 +953,8 @@ export default class JournalCanvas {
 
     this.root.addEventListener("pointerdown", ev => {
       if (ev.target.closest(".jn-card-image-button")) return;
+      if (!this.linkPlacement && !ev.altKey
+          && ev.target.closest(".jn-card-block a[href], .jn-card-block input[type=\"checkbox\"]")) return;
       if ((this.linkPlacement || ev.altKey) && ev.button === 0 && !ev.target.closest(".jn-context-menu, .jn-link-toolbar, input, textarea")) {
         ev.preventDefault();
         lastBoardClick = null;

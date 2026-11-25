@@ -5,6 +5,8 @@ import { CARD_STYLES, cardStyleKey } from "../styles/registry.mjs";
 import { noteImageUrl } from "../image-url.mjs";
 import * as secrets from "../secrets/secret-actions.mjs";
 import { stripSecretPrefix } from "../secrets/model.mjs";
+import { renderMarkdown, toggleTaskListItem } from "../markdown.mjs";
+import { applyMarkdownAutocomplete } from "../markdown-edit.mjs";
 import { t } from "../i18n.mjs";
 
 const { DialogV2 } = foundry.applications.api;
@@ -46,6 +48,7 @@ export default class NoteEditor {
     this.pendingBlockId = null;
     this.inlineSlot = null;
     this.pendingMerge = null; // { blockId, prevBlockId }
+    this.pendingTaskToggle = null; // { noteId, blockId, index, text } waiting for a lock
     this.drafts = new Map();
     this.heartbeatTimer = null;
     this.hookId = null;
@@ -125,6 +128,40 @@ export default class NoteEditor {
     this.#releasePendingLocks();
     this.inlineSlot = slot;
     if (!this.#clickBlock(blockId)) this.inlineSlot = null;
+  }
+
+  /** Toggles a rendered GFM task checkbox, taking the block lock when the block is shared. */
+  toggleTask(noteId, blockId, index) {
+    if (this.readOnly) return this.#warnReadOnly();
+    if (this.pendingTaskToggle) {
+      releaseLock(this.pendingTaskToggle.noteId, this.pendingTaskToggle.blockId);
+      this.pendingTaskToggle = null;
+    }
+    const note = notesStore.getNote(noteId);
+    const block = note?.system.blocks.find(item => item.blockId === blockId);
+    if (!block) return;
+    // The lock listener only follows the open note, so make this note current before requesting.
+    this.open(noteId);
+    const next = toggleTaskListItem(block.text, index);
+    if (next === null) return;
+
+    if (note.secret || notesStore.isHiddenBlock(noteId, blockId)) {
+      gm(() => secrets.saveSecretBlock(noteId, blockId, next));
+      return;
+    }
+    const lock = getLock(noteId, blockId);
+    if (lock && lock.userId !== game.user.id) return;
+    if (isHeldByMe(noteId, blockId)) {
+      this.#saveTaskToggle(noteId, blockId, next);
+      return;
+    }
+    this.pendingTaskToggle = { noteId, blockId, index, text: next };
+    requestLock(noteId, blockId);
+  }
+
+  #saveTaskToggle(noteId, blockId, text) {
+    const write = requestWrite({ type: "saveBlock", noteId, blockId, text });
+    this.#releaseAfterWrite(write, noteId, blockId);
   }
 
   #warnReadOnly() {
@@ -301,10 +338,11 @@ export default class NoteEditor {
       return `<div class="${classes.join(" ")}" data-block-id="${block.blockId}" style="${vars}">${tag}<textarea class="jn-block-input">${foundry.utils.escapeHTML(text)}</textarea></div>`;
     }
     const cursor = lockedByOther ? "not-allowed" : "text";
-    const empty = !block.text
-      ? `<span class="jn-empty-block">${block.hidden ? t("JN.Editor.EmptyHiddenBlock") : t("JN.Editor.EmptyBlock")}</span>`
-      : "";
-    return `<p class="${classes.join(" ")}" data-block-id="${block.blockId}" style="${vars};cursor:${cursor}" title="${foundry.utils.escapeHTML(author?.name ?? "")}">${tag}${this.#gmBlockActions(note, block, lockedByOther)}${foundry.utils.escapeHTML(block.text)}${empty}</p>`;
+    const rendered = renderMarkdown(block.text, { interactiveTasks: !this.readOnly });
+    const body = rendered
+      ? `<div class="jn-block-markdown">${rendered}</div>`
+      : `<span class="jn-empty-block">${block.hidden ? t("JN.Editor.EmptyHiddenBlock") : t("JN.Editor.EmptyBlock")}</span>`;
+    return `<div class="${classes.join(" ")}" data-block-id="${block.blockId}" style="${vars};cursor:${cursor}" title="${foundry.utils.escapeHTML(author?.name ?? "")}">${tag}${this.#gmBlockActions(note, block, lockedByOther)}${body}</div>`;
   }
 
   /** Hover controls for GMs: hide a shared block, reveal/delete a hidden one, add a hidden block after. */
@@ -417,11 +455,22 @@ export default class NoteEditor {
     });
 
     this.root.querySelectorAll(".jn-block:not(.editing)").forEach(el => {
-      el.addEventListener("click", () => this.#clickBlock(el.dataset.blockId));
+      el.addEventListener("click", ev => {
+        if (ev.target.closest("a[href], input[type=\"checkbox\"]")) return;
+        this.#clickBlock(el.dataset.blockId);
+      });
+      el.querySelectorAll('input[type="checkbox"]').forEach((box, index) => {
+        box.addEventListener("click", ev => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          this.toggleTask(note._id, el.dataset.blockId, index);
+        });
+      });
     });
 
     const textarea = this.#activeTextarea();
     if (textarea) {
+      textarea.addEventListener("keydown", ev => applyMarkdownAutocomplete(ev, textarea));
       textarea.addEventListener("input", () => this.#queueDraftSave());
       textarea.onblur = () => this.#stopEditing({ save: true });
       if (this.inlineSlot) {
@@ -442,6 +491,10 @@ export default class NoteEditor {
       this.#warnReadOnly();
       return false;
     }
+    if (this.pendingTaskToggle) {
+      releaseLock(this.pendingTaskToggle.noteId, this.pendingTaskToggle.blockId);
+      this.pendingTaskToggle = null;
+    }
     if (this.editingBlockId === blockId || this.pendingBlockId === blockId) return;
     if (notesStore.isHiddenBlock(this.noteId, blockId)) {
       // GM-only blocks take no lock: lock traffic is broadcast and would reveal the block exists.
@@ -461,6 +514,14 @@ export default class NoteEditor {
 
   #onLockChanged(blockId, lock) {
     const mine = lock?.userId === game.user.id;
+
+    if (this.pendingTaskToggle?.blockId === blockId) {
+      const task = this.pendingTaskToggle;
+      this.pendingTaskToggle = null;
+      if (mine) this.#saveTaskToggle(task.noteId, task.blockId, task.text);
+      else this.render();
+      return;
+    }
 
     if (this.pendingBlockId === blockId) {
       this.pendingBlockId = null;
@@ -519,8 +580,10 @@ export default class NoteEditor {
     if (!this.noteId) return;
     if (this.pendingBlockId) releaseLock(this.noteId, this.pendingBlockId);
     if (this.pendingMerge) releaseLock(this.noteId, this.pendingMerge.prevBlockId);
+    if (this.pendingTaskToggle) releaseLock(this.pendingTaskToggle.noteId, this.pendingTaskToggle.blockId);
     this.pendingBlockId = null;
     this.pendingMerge = null;
+    this.pendingTaskToggle = null;
     if (!this.editingBlockId) this.inlineSlot = null;
   }
 
