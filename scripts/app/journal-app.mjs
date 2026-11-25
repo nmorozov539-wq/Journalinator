@@ -31,8 +31,8 @@ function tooltipAttrs(label) {
   return `${game.tooltip ? `data-tooltip="${text}" data-tooltip-direction="DOWN"` : `title="${text}"`} aria-label="${text}"`;
 }
 
-function toolbarButton(className, icon, label) {
-  return `<button type="button" class="jn-toolbar-icon ${className}" ${tooltipAttrs(label)}>
+function toolbarButton(className, icon, label, disabled = false) {
+  return `<button type="button" class="jn-toolbar-icon ${className}"${disabled ? " disabled" : ""} ${tooltipAttrs(label)}>
     <i class="fa-solid ${icon}" aria-hidden="true"></i></button>`;
 }
 
@@ -165,6 +165,10 @@ export default class JournalApp extends ApplicationV2 {
   }
 
   async #createNoteAt({ x, y, secret = false, kind = "note", style, initialTitle, immediate = false }) {
+    if (!game.users.activeGM) {
+      ui.notifications?.warn(t("JN.TopBar.Offline"));
+      return;
+    }
     const note = immediate
       ? { title: defaultNoteTitle(kind, style), style, autoTitle: true }
       : await promptNewNote(t(secret ? "JN.Prompt.NewSecretNote" : "JN.Prompt.NewNote"), { kind, style, initialTitle });
@@ -178,7 +182,7 @@ export default class JournalApp extends ApplicationV2 {
     const rerender = () => this.render();
     for (const hook of [
       "createJournalEntryPage", "updateJournalEntryPage", "deleteJournalEntryPage",
-      "updateJournalEntry"
+      "updateJournalEntry", "createUser", "updateUser", "deleteUser", "userConnected"
     ]) {
       this.#hookIds.push([hook, Hooks.on(hook, rerender)]);
     }
@@ -285,6 +289,7 @@ export default class JournalApp extends ApplicationV2 {
     root.className = `journalinator-root${context.merged ? " jn-gm-view" : ""}`;
     root.dataset.theme = context.theme;
     const escape = foundry.utils.escapeHTML;
+    const offline = !context.gmOnline;
     const filters = (items, selected, kind) => items.map(([id, label, color]) =>
       `<label class="jn-menu-option"><input type="checkbox" data-kind="${kind}" value="${escape(id)}"
         ${selected.has(id) ? "checked" : ""}>${color ? `<span class="jn-dot" style="background:${escape(String(color))}"></span>` : ""}
@@ -299,9 +304,9 @@ export default class JournalApp extends ApplicationV2 {
         </div>
         <div class="jn-toolbar-tools">
           <div class="jn-toolbar-group">
-        ${toolbarButton("journalinator-new", "fa-note-sticky", t("JN.TopBar.NewNote"))}
-        ${toolbarButton("journalinator-add-label", "fa-font", t("JN.TopBar.AddLabel"))}
-        ${toolbarButton("journalinator-add-link", "fa-link", t("JN.Link.Tool"))}
+        ${toolbarButton("journalinator-new", "fa-note-sticky", t("JN.TopBar.NewNote"), offline)}
+        ${toolbarButton("journalinator-add-label", "fa-font", t("JN.TopBar.AddLabel"), offline)}
+        ${toolbarButton("journalinator-add-link", "fa-link", t("JN.Link.Tool"), offline)}
           </div>
           <div class="jn-toolbar-group">
         <details class="jn-toolbar-dropdown journalinator-filters${this.#filterAuthors.size || this.#filterStyles.size ? " on" : ""}">
@@ -338,6 +343,8 @@ export default class JournalApp extends ApplicationV2 {
     // Moving the canvas into the detached render result blurs it, even though we reuse the node.
     if (document.activeElement === this.#canvas.root) this.#focusedCanvasRenders.add(root);
     this.#editor.suspendBlur();
+    this.#canvas.readOnly = offline;
+    this.#editor.readOnly = offline;
     this.#canvas.mount(root.querySelector(".journalinator-canvas-slot"));
     this.#canvas.selectedNoteId = this.#selectedNoteId;
     this.#canvas.gmMode = context.merged;
@@ -465,14 +472,16 @@ export default class JournalApp extends ApplicationV2 {
         else set.delete(input.value);
         input.closest("details").classList.toggle("on", !!(this.#filterAuthors.size || this.#filterStyles.size));
         this.#filterCanvasForSearch();
+        if (this.#switcherOpen) this.#renderSwitcher(root, notesStore.getAllNotes());
       });
     });
   }
 
   #switcherList(allNotes) {
     const q = this.#query.trim().toLowerCase();
-    if (!q) return allNotes.slice().sort((a, b) => (b.system.updatedAt ?? 0) - (a.system.updatedAt ?? 0)).slice(0, 6);
-    return allNotes.filter(n => this.#matchesQuery(n, q));
+    const matching = allNotes.filter(n => this.#matchesQuery(n, q) && this.#matchesFilters(n));
+    if (!q) return matching.slice().sort((a, b) => (b.system.updatedAt ?? 0) - (a.system.updatedAt ?? 0)).slice(0, 6);
+    return matching;
   }
 
   #filterCanvasForSearch() {
@@ -483,7 +492,7 @@ export default class JournalApp extends ApplicationV2 {
   #renderSwitcher(root, allNotes) {
     const q = this.#query.trim();
     const list = this.#switcherList(allNotes);
-    const offerCreate = q && !allNotes.some(n => n.name.toLowerCase() === q.toLowerCase());
+    const offerCreate = !!game.users.activeGM && q && !allNotes.some(n => n.name.toLowerCase() === q.toLowerCase());
     this.#switcherHighlight = Math.max(0, Math.min(this.#switcherHighlight, list.length - (offerCreate ? 0 : 1)));
 
     const el = root.querySelector(".jn-switcher");
@@ -531,7 +540,7 @@ export default class JournalApp extends ApplicationV2 {
     const allNotes = notesStore.getAllNotes();
     const list = this.#switcherList(allNotes);
     const q = this.#query.trim();
-    const offerCreate = q && !allNotes.some(n => n.name.toLowerCase() === q.toLowerCase());
+    const offerCreate = !!game.users.activeGM && q && !allNotes.some(n => n.name.toLowerCase() === q.toLowerCase());
     const count = list.length + (offerCreate ? 1 : 0);
 
     if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
@@ -621,9 +630,10 @@ export default class JournalApp extends ApplicationV2 {
   }
 
   async #openTrash() {
+    const offline = !game.users.activeGM;
     const trashed = notesStore.getTrashedNotes();
     const rows = trashed
-      .map(n => `<div class="jn-trash-row"><span>${foundry.utils.escapeHTML(n.name)}</span><button type="button" class="jn-trash-restore" data-id="${n._id}">${t("JN.Common.Restore")}</button></div>`)
+      .map(n => `<div class="jn-trash-row"><span>${foundry.utils.escapeHTML(n.name)}</span><button type="button" class="jn-trash-restore" data-id="${n._id}"${offline ? " disabled" : ""}>${t("JN.Common.Restore")}</button></div>`)
       .join("") || `<p class="journalinator-empty">${t("JN.Trash.Empty")}</p>`;
 
     await foundry.applications.api.DialogV2.wait({

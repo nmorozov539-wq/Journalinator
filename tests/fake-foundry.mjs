@@ -139,6 +139,14 @@ export function installFoundry({ user, users, worldId = "test-world" }) {
   const userMap = new Map(users.map(u => [u.id, u]));
 
   globalThis.Hooks = Hooks;
+  globalThis.JournalEntry = {
+    async create(data) {
+      const entry = new FakeEntry(data);
+      journal.set(entry.id, entry);
+      Hooks.callAll("createJournalEntry", entry);
+      return entry;
+    }
+  };
   globalThis.JournalEntryPage = JournalEntryPage;
   globalThis.CONST = { USER_ROLES: { PLAYER: 1, TRUSTED: 2, ASSISTANT: 3, GAMEMASTER: 4 }, DOCUMENT_OWNERSHIP_LEVELS: { NONE: 0, OBSERVER: 2, OWNER: 3 } };
   globalThis.foundry = {

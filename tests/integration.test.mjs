@@ -363,6 +363,36 @@ test("a non-active GM addresses write requests to the active GM only", async () 
   game.user = gmUser;
 });
 
+test("typed links count toward links drawn exactly once", async () => {
+  await fromPlayer({ type: "createNote", title: "Activity Source", x: 0, y: 0 });
+  const source = sharedByName("Activity Source");
+  const blockId = source.system.blocks[0].blockId;
+  const linkActivity = () => Object.values(notesStore.getStats()?.activity ?? {})
+    .reduce((total, day) => total + Object.values(day).reduce((sum, bucket) => sum + (bucket.links ?? 0), 0), 0);
+  const before = linkActivity();
+
+  await fromPlayer({ type: "requestLock", noteId: source.id, blockId });
+  await fromPlayer({ type: "saveBlock", noteId: source.id, blockId, text: "See [[Activity Target]]." });
+  await fromPlayer({ type: "releaseLock", noteId: source.id, blockId });
+  assert.equal(linkActivity(), before + 1, "a new typed link is counted");
+
+  await fromPlayer({ type: "requestLock", noteId: source.id, blockId });
+  await fromPlayer({ type: "saveBlock", noteId: source.id, blockId, text: "See [[Activity Target]] again." });
+  await fromPlayer({ type: "releaseLock", noteId: source.id, blockId });
+  assert.equal(linkActivity(), before + 1, "re-saving the same typed link is not counted twice");
+});
+
+test("offline writes warn instead of disappearing silently", async () => {
+  const wasActive = gmUser.active;
+  gmUser.active = false;
+  env.notifications.length = 0;
+  const result = await requestWrite({ type: "createNote", title: "Offline Note", x: 0, y: 0 });
+  assert.equal(result, false);
+  assert.equal(sharedByName("Offline Note"), undefined);
+  assert.ok(env.notifications.some(([level, message]) => level === "warn" && message.includes("Read-only")));
+  gmUser.active = wasActive;
+});
+
 test("final leak check (key is in the world now: open mode, so only ciphertext is checked)", () => {
   // In open mode the key is readable by design, so check the vault blob holds no plaintext.
   const blob = JSON.stringify(containers.secrets.flags["fvtt-journalinator"].vault);

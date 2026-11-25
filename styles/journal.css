@@ -205,6 +205,10 @@
   padding: 0;
   font-size: 14px;
 }
+.journalinator-topbar .jn-toolbar-icon:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 .journalinator-root:has([data-placing-link]) .journalinator-add-link {
   border-color: var(--jn-acc);
   color: var(--jn-acc);
@@ -809,6 +813,14 @@
   overflow-wrap: anywhere;
 }
 .journalinator-editor:has(.journalinator-editor-inner:empty) { display: none; }
+.journalinator-editor .jn-readonly .jn-note-tool-panel button,
+.journalinator-editor .jn-readonly .jn-note-tool-panel select,
+.journalinator-editor .jn-readonly .jn-note-tool-panel input,
+.journalinator-editor .jn-readonly .jn-inline-title,
+.journalinator-editor .jn-readonly .journalinator-restore {
+  pointer-events: none;
+  opacity: 0.55;
+}
 
 .journalinator-eh {
   display: flex;

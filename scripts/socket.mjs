@@ -40,6 +40,7 @@ function senderIsGM(senderUserId) {
  * what makes the spec's "the GM serializes writes" assumption true.
  */
 let writeQueue = Promise.resolve();
+let offlineNoticeAt = 0;
 
 function enqueueWrite(message, senderUserId) {
   writeQueue = writeQueue
@@ -51,6 +52,14 @@ function enqueueWrite(message, senderUserId) {
     })
     .catch(err => console.error("Journalinator: write failed", err));
   return writeQueue;
+}
+
+/** Tell the user once in a while why their edit did not apply while the board is read-only. */
+function warnNoGM() {
+  const now = Date.now();
+  if (now - offlineNoticeAt < 5000) return;
+  offlineNoticeAt = now;
+  ui.notifications?.warn(t("JN.TopBar.Offline"));
 }
 
 /**
@@ -231,6 +240,7 @@ async function createNotePage(shared, { title, kind, style, x, y, authorId, auto
 async function reconcileAndSave(shared, page, blocks, senderUserId, extraSystemUpdates = {}) {
   const layout = layoutPage(shared);
   const sourceCard = layout?.system.cards[page.id] ?? { x: 0, y: 0 };
+  const existingLinkIds = new Set((page.system.links ?? []).map(link => link.id));
   const links = await reconcileTypedLinks(page, blocks, {
     senderUserId,
     findNoteByTitle: {
@@ -249,6 +259,7 @@ async function reconcileAndSave(shared, page, blocks, senderUserId, extraSystemU
     }
   });
 
+  const addedTypedLinks = links.filter(link => link.origin === "typed" && !existingLinkIds.has(link.id)).length;
   await page.update({
     "system.blocks": blocks,
     "system.links": links,
@@ -256,6 +267,7 @@ async function reconcileAndSave(shared, page, blocks, senderUserId, extraSystemU
     ...extraSystemUpdates
   });
   await maybeSnapshot(page);
+  if (addedTypedLinks) await recordActivity(senderUserId, { links: addedTypedLinks });
 }
 
 /** Credits added characters (capped per save, spec §12) to whoever just saved. */
@@ -904,7 +916,10 @@ async function handleMessage(message, senderUserId) {
  */
 export function requestWrite(message) {
   const activeGM = game.users.activeGM;
-  if (!activeGM) return;
+  if (!activeGM) {
+    warnNoGM();
+    return Promise.resolve(false);
+  }
   if (activeGM.id === game.user.id) {
     return enqueueWrite(message, game.user.id);
   }

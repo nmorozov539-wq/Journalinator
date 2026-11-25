@@ -51,6 +51,7 @@ export default class NoteEditor {
     this.hookId = null;
     this.draftTimer = null;
     this.onPageHide = null;
+    this.readOnly = false; // no active GM: notes can be read but not edited
   }
 
   /**
@@ -102,6 +103,7 @@ export default class NoteEditor {
   editFirstBlock(noteId, slot) {
     this.open(noteId);
     this.render();
+    if (this.readOnly) return;
     const note = notesStore.getNote(noteId);
     const block = note?.system.blocks?.[0];
     if (block && slot) this.editBoardBlock(noteId, slot.dataset.blockId, slot);
@@ -110,6 +112,10 @@ export default class NoteEditor {
 
   editBoardBlock(noteId, blockId, slot) {
     this.open(noteId);
+    if (this.readOnly) {
+      this.render();
+      return this.#warnReadOnly();
+    }
     if (this.editingBlockId === blockId) {
       this.inlineSlot = slot;
       this.render();
@@ -121,7 +127,12 @@ export default class NoteEditor {
     if (!this.#clickBlock(blockId)) this.inlineSlot = null;
   }
 
+  #warnReadOnly() {
+    ui.notifications?.warn(t("JN.TopBar.Offline"));
+  }
+
   renameNote(noteId, title) {
+    if (this.readOnly) return this.#warnReadOnly();
     const note = notesStore.getNote(noteId);
     if (!note || note.system.deleted || !title) return;
     const current = note.secret ? stripSecretPrefix(note.name) : note.name;
@@ -131,6 +142,7 @@ export default class NoteEditor {
   }
 
   setTargetHeading(noteId, heading) {
+    if (this.readOnly) return this.#warnReadOnly();
     const note = notesStore.getNote(noteId);
     if (!note || note.system.deleted || heading === (note.system.targetHeading ?? "")) return;
     return note.secret ? gm(() => secrets.setSecretTargetHeading(noteId, heading))
@@ -138,6 +150,7 @@ export default class NoteEditor {
   }
 
   async editNoteImage(noteId, background = false) {
+    if (this.readOnly) return this.#warnReadOnly();
     const note = notesStore.getNote(noteId);
     if (!note || note.system.deleted) return;
     const existing = note.system[background ? "backgroundImage" : "image"];
@@ -182,6 +195,7 @@ export default class NoteEditor {
     this.#captureDraftBeforeRebuild();
     this.suspendBlur();
     this.#clearInlineInput();
+    this.root.classList.toggle("jn-readonly", this.readOnly);
     const note = this.noteId ? notesStore.getNote(this.noteId) : null;
     if (!note) {
       this.root.replaceChildren();
@@ -198,6 +212,7 @@ export default class NoteEditor {
         </div>
       `;
       this.root.querySelector(".journalinator-restore").addEventListener("click", () => {
+        if (this.readOnly) return this.#warnReadOnly();
         requestWrite({ type: "restoreNote", noteId: this.noteId });
       });
       return;
@@ -423,6 +438,10 @@ export default class NoteEditor {
   }
 
   #clickBlock(blockId) {
+    if (this.readOnly) {
+      this.#warnReadOnly();
+      return false;
+    }
     if (this.editingBlockId === blockId || this.pendingBlockId === blockId) return;
     if (notesStore.isHiddenBlock(this.noteId, blockId)) {
       // GM-only blocks take no lock: lock traffic is broadcast and would reveal the block exists.
@@ -779,6 +798,10 @@ export default class NoteEditor {
     if (!block) return;
     if (act === "add") return this.#addHiddenAfter(blockId);
 
+    // Include anything typed in the active textarea so a reveal confirmation sees the text that
+    // is about to be published, not the older saved copy.
+    const currentText = this.editingBlockId === blockId && this.noteId === noteId
+      ? (this.#activeTextarea()?.value ?? block.text) : block.text;
     if (this.editingBlockId === blockId) this.#stopEditing({ save: true });
 
     if (act === "delete") {
@@ -791,7 +814,7 @@ export default class NoteEditor {
     }
 
     if (act === "reveal") {
-      if (!(await this.#confirmBareMentions(block.text, t("JN.Editor.WhatBlock")))) return;
+      if (!(await this.#confirmBareMentions(currentText, t("JN.Editor.WhatBlock")))) return;
       gm(() => secrets.declassifyBlock(noteId, blockId));
       return;
     }
@@ -806,9 +829,15 @@ export default class NoteEditor {
   }
 
   async #declassifyNote(note) {
+    // Capture the in-progress textarea before opening the title dialog: opening it can blur the
+    // editor and save, after which `note` is an older snapshot.
+    const text = note.system.blocks.map(block => {
+      const live = this.noteId === note._id && this.editingBlockId === block.blockId
+        ? this.#activeTextarea()?.value : null;
+      return live ?? block.text;
+    }).join("\n");
     const title = await this.#promptText(t("JN.Editor.DeclassifyPublicTitle"), stripSecretPrefix(note.name));
     if (!title) return;
-    const text = note.system.blocks.map(b => b.text).join("\n");
     if (!(await this.#confirmBareMentions(text, t("JN.Editor.WhatNote")))) return;
     this.#stopEditing({ save: true });
     gm(() => secrets.declassifyNote(note._id, title));

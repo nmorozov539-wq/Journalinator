@@ -55,6 +55,7 @@ export default class JournalCanvas {
     this.linkPlacement = null;
     this.dimMatch = () => true; // (note) => does it match the active search/filters?
     this.gmMode = false; // GM view with secrets merged in: shows hide/reveal/hint controls
+    this.readOnly = false; // no active GM: allow selecting/reading but no writes
 
     this.root = document.createElement("div");
     this.root.className = "jn-canvas";
@@ -161,6 +162,10 @@ export default class JournalCanvas {
     this.#syncLinkToolbar();
   }
 
+  #warnReadOnly() {
+    ui.notifications?.warn(t("JN.TopBar.Offline"));
+  }
+
   #renderCard(note, stamp) {
     const cardData = this.layout.cards?.[note._id] ?? { x: 0, y: 0, rotation: 0 };
     const styleDef = CARD_STYLES[cardStyleKey(note.system.style)];
@@ -261,6 +266,7 @@ export default class JournalCanvas {
   }
 
   #editCardText(id, field) {
+    if (this.readOnly) return this.#warnReadOnly();
     this.#setSelection([id], id);
     if (field.dataset.cardText === "block") {
       this.callbacks.onEditCardBlock?.(id, field.dataset.blockId, field);
@@ -527,7 +533,7 @@ export default class JournalCanvas {
 
   #syncLinkToolbar() {
     const link = this.selectedLinkId ? this.linksById.get(this.selectedLinkId) : null;
-    if (!link) { this.linkToolbar.style.display = "none"; return; }
+    if (!link || this.readOnly) { this.linkToolbar.style.display = "none"; return; }
 
     this.#positionLinkToolbar(link);
     this.linkToolbar.style.display = "flex";
@@ -696,6 +702,7 @@ export default class JournalCanvas {
   }
 
   toggleLinkTool() {
+    if (this.readOnly) return this.#warnReadOnly();
     if (this.linkPlacement) return this.cancelLinkTool();
     this.#closeContextMenu();
     this.linkPlacement = { source: null, pins: [] };
@@ -781,6 +788,7 @@ export default class JournalCanvas {
   }
 
   #openContextMenu(clientX, clientY, { noteId, labelId, editStamp = false } = {}) {
+    if (this.readOnly) return this.#warnReadOnly();
     const point = this.#toWorld(clientX, clientY);
     if (editStamp) labelId ??= this.cardEls.get(noteId)?.querySelector(".jn-card-stamps .jn-stamp")?.dataset.stampLabelId;
     const label = this.layout.labels?.[labelId];
@@ -940,11 +948,11 @@ export default class JournalCanvas {
       }
       try { this.root.setPointerCapture(ev.pointerId); } catch { /* no active pointer (e.g. synthetic event) */ }
       const cardEl = ev.target.closest(".jn-card");
-      const resizeHandle = ev.target.closest(".jn-card-resize");
+      const resizeHandle = this.readOnly ? null : ev.target.closest(".jn-card-resize");
       const labelEl = ev.target.closest(".jn-label");
-      const stampId = ev.target.closest("[data-stamp-label-id]")?.dataset.stampLabelId;
+      const stampId = this.readOnly ? null : ev.target.closest("[data-stamp-label-id]")?.dataset.stampLabelId;
       const linkHit = ev.target.closest(".jn-link-hit");
-      const pin = ev.target.closest("[data-pin-index]");
+      const pin = this.readOnly ? null : ev.target.closest("[data-pin-index]");
       if (ev.button !== 0 || cardEl || labelEl || linkHit) lastBoardClick = null;
 
       // Middle mouse always pans, even when the pointer starts over a card, handle, or link.
@@ -986,17 +994,18 @@ export default class JournalCanvas {
           type: "card", id, ids: selected, origins,
           toggle: ev.ctrlKey || ev.metaKey, initialIds, initialLabelIds,
           text: ev.target.closest("[data-card-text]"),
-          sx: ev.clientX, sy: ev.clientY, moved: 0
+          sx: ev.clientX, sy: ev.clientY, moved: 0, readOnly: this.readOnly
         };
       } else if (labelEl) {
         const id = labelEl.dataset.id;
         const data = this.layout.labels?.[id] ?? { x: 0, y: 0 };
         drag = { type: "label", id, sx: ev.clientX, sy: ev.clientY, ox: data.x, oy: data.y, moved: 0,
-          toggle: ev.ctrlKey || ev.metaKey };
+          toggle: ev.ctrlKey || ev.metaKey, readOnly: this.readOnly };
       } else if (linkHit) {
         const id = linkHit.dataset.id;
         const motion = this.threads.get(id)?.motion;
-        drag = { type: "link", id, sx: ev.clientX, sy: ev.clientY, moved: 0, x: motion?.x ?? 0, y: motion?.y ?? 0 };
+        drag = { type: "link", id, sx: ev.clientX, sy: ev.clientY, moved: 0, x: motion?.x ?? 0, y: motion?.y ?? 0,
+          readOnly: this.readOnly };
       } else {
         drag = {
           type: "selection", sx: ev.clientX, sy: ev.clientY, moved: 0,
@@ -1034,6 +1043,7 @@ export default class JournalCanvas {
         el.classList.add("jn-sized");
         this.#queueLinkDraw();
       } else if (drag.type === "card") {
+        if (drag.readOnly) return;
         for (const id of drag.ids) {
           const el = this.cardEls.get(id);
           const origin = drag.origins.get(id);
@@ -1044,6 +1054,7 @@ export default class JournalCanvas {
         // other clients see one final movement while the dragging client gets a fluid preview.
         this.#queueLinkDraw();
       } else if (drag.type === "label") {
+        if (drag.readOnly) return;
         const el = this.labelEls.get(drag.id);
         const x = drag.ox + dx / this.view.k, y = drag.oy + dy / this.view.k;
         el.style.left = `${x}px`;
@@ -1064,7 +1075,7 @@ export default class JournalCanvas {
           this.svg.querySelector("defs").outerHTML = this.#threadMask(boxes, this.threads);
         }
         this.#paintThread(drag.id, thread);
-      } else if (drag.type === "link" && drag.moved > DRAG_THRESHOLD) {
+      } else if (drag.type === "link" && !drag.readOnly && drag.moved > DRAG_THRESHOLD) {
         const thread = this.threads.get(drag.id);
         if (!thread) return;
         this.movingThreads.delete(drag.id);
@@ -1117,6 +1128,7 @@ export default class JournalCanvas {
             } else lastCardClick = { id: drag.id, at: now };
           }
         } else {
+          if (drag.readOnly) return;
           for (const id of drag.ids) {
             const el = this.cardEls.get(id);
             this.callbacks.onMoveCard(id, parseFloat(el.style.left), parseFloat(el.style.top));
@@ -1142,16 +1154,18 @@ export default class JournalCanvas {
         if (wasClick) {
           const { id } = drag;
           const now = Date.now();
-          if (!stampUrl(this.layout.labels?.[id]?.stamp) && lastLabelClick?.id === id && now - lastLabelClick.at < 420) {
+          if (!drag.readOnly && !stampUrl(this.layout.labels?.[id]?.stamp)
+              && lastLabelClick?.id === id && now - lastLabelClick.at < 420) {
             this.callbacks.onEditLabel(id);
             lastLabelClick = null;
           } else lastLabelClick = { id, at: now };
-        } else {
+        } else if (!drag.readOnly) {
           const el = this.labelEls.get(drag.id);
           this.callbacks.onMoveLabel(drag.id, parseFloat(el.style.left), parseFloat(el.style.top));
         }
       } else if (drag.type === "link" && !wasClick) {
         this.lastLinkClick = null;
+        if (drag.readOnly) { drag = null; return; }
         const thread = this.threads.get(drag.id);
         if (thread?.motion.moving) {
           if (this.root.ownerDocument.defaultView.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
@@ -1166,7 +1180,7 @@ export default class JournalCanvas {
         const now = Date.now();
         if (this.lastLinkClick?.id === drag.id && now - this.lastLinkClick.at < 420) {
           const link = this.linksById.get(drag.id);
-          if (link) this.callbacks.onDeleteLink(link.sourceId, link.id);
+          if (link && !drag.readOnly) this.callbacks.onDeleteLink(link.sourceId, link.id);
           this.lastLinkClick = null;
           this.selectedLinkId = null;
           this.#syncLinkToolbar();
@@ -1214,6 +1228,7 @@ export default class JournalCanvas {
     this.root.addEventListener("dblclick", ev => {
       if (ev.target.closest("[data-stamp-label-id], .jn-label")) return;
       if (ev.target.closest(".jn-card-resize")) {
+        if (this.readOnly) return this.#warnReadOnly();
         const cardEl = ev.target.closest(".jn-card");
         const id = cardEl.dataset.id;
         cardEl.style.width = "";
@@ -1226,6 +1241,7 @@ export default class JournalCanvas {
   }
 
   addLabelButton() {
+    if (this.readOnly) return this.#warnReadOnly();
     const rect = this.root.getBoundingClientRect();
     const { x, y } = this.#toWorld(rect.left + rect.width / 2, rect.top + rect.height / 2);
     this.callbacks.onAddLabelAt(x, y);

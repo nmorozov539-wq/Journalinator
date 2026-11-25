@@ -144,6 +144,24 @@ test("+ Hidden block adds an empty GM-only block and opens it", async () => {
   await settle();
 });
 
+test("declassifying while editing checks the unsaved text for secret mentions", async () => {
+  const sourceId = await secrets.createSecretNote({ title: "Warn Source", x: 0, y: 200 });
+  await secrets.createSecretNote({ title: "Quiet Ally", x: 220, y: 200 });
+  const blockId = vaultStore.data.notes[sourceId].blocks[0].blockId;
+
+  editor.open(sourceId);
+  editor.render();
+  blockEl(blockId).click();
+  const textarea = editor.root.querySelector(".jn-block-input");
+  textarea.value = "The plan involves [[Quiet Ally]].";
+  answers.push("Warn Source", false); // title, then decline the bare-mention confirmation
+  editor.root.querySelector(".journalinator-declassify").click();
+  await settle();
+
+  assert.equal(sharedByName("Warn Source"), undefined);
+  assert.ok(vaultStore.data.notes[sourceId], "cancelled declassification leaves the secret note intact");
+});
+
 test("secret note shows the GM banner, renames keep the prefix, declassify publishes", async () => {
   editor.open(vexId);
   editor.render();
@@ -623,6 +641,14 @@ test("search holds focus and results through input and a background redraw", asy
     input.dispatchEvent(new Event("input", { bubbles: true }));
     assert.equal(document.activeElement, input);
     assert.ok(host.querySelector(`.jn-switcher-item[data-id="${tavernId}"]`));
+    const documentFilter = host.querySelector('.journalinator-filters [data-kind="style"][value="document"]');
+    documentFilter.checked = true;
+    documentFilter.dispatchEvent(new Event("change", { bubbles: true }));
+    assert.equal(host.querySelector(`.jn-switcher-item[data-id="${tavernId}"]`), null,
+      "author/style filters also apply to the quick switcher");
+    documentFilter.checked = false;
+    documentFilter.dispatchEvent(new Event("change", { bubbles: true }));
+    assert.ok(host.querySelector(`.jn-switcher-item[data-id="${tavernId}"]`));
     await redraw();
     input = host.querySelector(".journalinator-search");
     assert.equal(document.activeElement, input);
@@ -791,6 +817,28 @@ test("left drag plucks one thread and keeps its anchors and the other thread fix
   } finally {
     canvas.disconnectGeometry();
     canvas.root.remove();
+  }
+});
+
+test("offline mode disables write controls and says the board is read-only", async () => {
+  gmUser.active = false;
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  try {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+    assert.ok(host.querySelector(".journalinator-offline-banner"));
+    assert.equal(host.querySelector(".journalinator-new").disabled, true);
+    assert.equal(host.querySelector(".journalinator-add-label").disabled, true);
+    assert.equal(host.querySelector(".journalinator-add-link").disabled, true);
+    assert.equal(host.querySelector(".journalinator-stats").disabled, false);
+    assert.equal(host.querySelector(".jn-context-menu").style.display === "flex", false);
+  } finally {
+    app._onClose();
+    host.remove();
+    gmUser.active = true;
   }
 });
 

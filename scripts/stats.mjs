@@ -76,8 +76,17 @@ export function deriveSessions(activity, sessions) {
   const dates = Object.keys(activity).sort();
   if (!dates.length) return [];
 
-  if (sessions?.length) {
-    return sessions.map(s => ({ label: s.label || s.date, totals: sumDates([s.date], activity) }));
+  const markers = (sessions ?? [])
+    .filter(session => typeof session?.date === "string" && session.date)
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  if (markers.length) {
+    return markers.map((session, index) => {
+      const start = session.date;
+      const end = markers[index + 1]?.date ?? null; // next marker starts the next session
+      const range = dates.filter(date => date >= start && (end === null || date < end));
+      return { label: session.label || session.date, totals: sumDates(range, activity) };
+    });
   }
 
   const groups = [];

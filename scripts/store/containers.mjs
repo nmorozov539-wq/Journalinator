@@ -3,6 +3,18 @@ import { t } from "../i18n.mjs";
 const MODULE_ID = "fvtt-journalinator";
 const SETTING_KEY = "containerIds";
 
+const CONTAINERS = {
+  shared: { nameKey: "JN.Container.Shared", ownership: "OBSERVER" },
+  history: { nameKey: "JN.Container.History", ownership: "NONE" },
+  secrets: { nameKey: "JN.Container.Secrets", ownership: "NONE" }
+};
+
+const PAGES = {
+  layoutPage: { entry: "shared", name: "__layout__", type: `${MODULE_ID}.layout` },
+  statsPage: { entry: "shared", name: "__stats__", type: `${MODULE_ID}.stats` },
+  historyPage: { entry: "history", name: "__history__", type: `${MODULE_ID}.history` }
+};
+
 export function registerContainerSettings() {
   game.settings.register(MODULE_ID, SETTING_KEY, {
     scope: "world",
@@ -13,7 +25,10 @@ export function registerContainerSettings() {
 }
 
 /**
- * Finds or creates the three JournalEntry containers (spec §5.1). Runs only on the GM client.
+ * Finds or creates the three JournalEntry containers and their system pages (spec §5.1). Runs
+ * only on the GM client. This is also the repair path: a deleted layout/stats/history page, or a
+ * deleted container that still has an id in the setting, is recreated and the setting updated.
+ *
  * Ownership NONE on the GM Secrets entry hides it from the sidebar and blocks the edit UI for
  * players, but does NOT keep its content out of player browsers: Foundry v14 sends every
  * JournalEntry's full data to every connected client regardless of ownership (traced in
@@ -25,71 +40,47 @@ export function registerContainerSettings() {
 export async function ensureContainers() {
   if (!game.user.isGM) return;
 
-  let ids = game.settings.get(MODULE_ID, SETTING_KEY);
-  if (ids && ids.shared && game.journal.get(ids.shared)) {
-    return await ensureHistoryPage(ids); // upgrade path for worlds created before Phase 5
+  const ids = getContainerIds() ?? {};
+  const shared = await ensureContainer("shared", ids.shared);
+  const history = await ensureContainer("history", ids.history);
+  const secrets = await ensureContainer("secrets", ids.secrets);
+  const entries = { shared, history, secrets };
+
+  const next = { ...ids, shared: shared.id, history: history.id, secrets: secrets.id };
+  for (const [key, page] of Object.entries(PAGES)) {
+    next[key] = await ensurePage(entries[page.entry], ids[key], page.name, page.type);
   }
 
-  const shared = await JournalEntry.create({
-    name: t("JN.Container.Shared"),
-    flags: { [MODULE_ID]: { container: "shared" } },
-    ownership: { default: CONST.DOCUMENT_OWNERSHIP_LEVELS.OBSERVER }
-  });
-
-  const history = await JournalEntry.create({
-    name: t("JN.Container.History"),
-    flags: { [MODULE_ID]: { container: "history" } },
-    ownership: { default: CONST.DOCUMENT_OWNERSHIP_LEVELS.NONE }
-  });
-
-  const secrets = await JournalEntry.create({
-    name: t("JN.Container.Secrets"),
-    flags: { [MODULE_ID]: { container: "secrets" } },
-    ownership: { default: CONST.DOCUMENT_OWNERSHIP_LEVELS.NONE }
-  });
-
-  const layoutPage = await JournalEntryPage.create({
-    name: "__layout__",
-    type: `${MODULE_ID}.layout`,
-    system: {}
-  }, { parent: shared });
-
-  const statsPage = await JournalEntryPage.create({
-    name: "__stats__",
-    type: `${MODULE_ID}.stats`,
-    system: {}
-  }, { parent: shared });
-
-  const historyPage = await JournalEntryPage.create({
-    name: "__history__",
-    type: `${MODULE_ID}.history`,
-    system: {}
-  }, { parent: history });
-
-  ids = {
-    shared: shared.id,
-    history: history.id,
-    secrets: secrets.id,
-    layoutPage: layoutPage.id,
-    statsPage: statsPage.id,
-    historyPage: historyPage.id
-  };
-  await game.settings.set(MODULE_ID, SETTING_KEY, ids);
-  return ids;
+  if (Object.keys(next).some(key => ids[key] !== next[key])) {
+    await game.settings.set(MODULE_ID, SETTING_KEY, next);
+  }
+  return next;
 }
 
-/** Adds the history sub-type page for worlds whose containers were created before Phase 5. */
-async function ensureHistoryPage(ids) {
-  if (ids.historyPage && game.journal.get(ids.history)?.pages.get(ids.historyPage)) return ids;
-  const history = game.journal.get(ids.history);
-  const historyPage = await JournalEntryPage.create({
-    name: "__history__",
-    type: `${MODULE_ID}.history`,
-    system: {}
-  }, { parent: history });
-  ids = { ...ids, historyPage: historyPage.id };
-  await game.settings.set(MODULE_ID, SETTING_KEY, ids);
-  return ids;
+/** Reuses a container by id or by its module flag, then creates it if it was deleted. */
+async function ensureContainer(kind, id) {
+  const byId = id ? game.journal.get(id) : null;
+  if (byId) return byId;
+  const byFlag = [...(game.journal?.values?.() ?? [])]
+    .find(entry => entry.flags?.[MODULE_ID]?.container === kind);
+  if (byFlag) return byFlag;
+
+  const { nameKey, ownership } = CONTAINERS[kind];
+  return JournalEntry.create({
+    name: t(nameKey),
+    flags: { [MODULE_ID]: { container: kind } },
+    ownership: { default: CONST.DOCUMENT_OWNERSHIP_LEVELS[ownership] }
+  });
+}
+
+/** Reuses a page by id or name/type, then creates it if the old one was deleted. */
+async function ensurePage(entry, id, name, type) {
+  const byId = id ? entry.pages.get(id) : null;
+  if (byId) return byId.id;
+  const byName = [...entry.pages.values()].find(page => page.name === name && page.type === type);
+  if (byName) return byName.id;
+  const page = await JournalEntryPage.create({ name, type, system: {} }, { parent: entry });
+  return page.id;
 }
 
 export function getContainerIds() {

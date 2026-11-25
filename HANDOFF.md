@@ -202,10 +202,11 @@ Validate every field in `handleMessage`:
 - `emptyTrash` / `addSessionMarker`: keep the sender `isGM` check; also handle the case where
   the sender user no longer exists.
 
-**Offline GM.** `requestWrite` now does nothing when there is no active GM (it used to emit
-into the void), and GM-tier actions that need the active GM warn instead of waiting. The UI shows a
-read-only banner but the buttons remain active. Either disable write controls while
-`game.users.activeGM` is null, or queue local intent and explain that it will not apply.
+**Offline GM.** `requestWrite` now warns when there is no active GM instead of emitting into
+the void, and GM-tier actions that need the active GM warn instead of waiting. Write controls
+are disabled while `game.users.activeGM` is null: the toolbar buttons, canvas drag/resize/link
+gestures, context menus, editor block edits, and trash restores all stay read-only. The app
+re-renders on user connect/disconnect so the banner and controls update without a reload.
 
 **Secrets and history.** See section 3. Do not treat `ownership: NONE` as privacy anywhere.
 History snapshots only ever contain shared content. Secret edits never touch stats, snapshots,
@@ -215,9 +216,12 @@ or shared-page timestamps.
 `localStorage` like any other draft, and "remember on this browser" stores the raw data key
 there. Both stay on the GM's own machine; "Lock on this browser" forgets the key but not drafts.
 
-**Vault concurrency.** Each GM client serializes its own vault writes, but two GMs writing in
-the same instant can clobber each other (each write re-encrypts the whole vault). A `rev`
-compare-and-retry would close this if co-GMing becomes common.
+**Vault concurrency.** Each GM client serializes its own vault writes and now compares the
+stored blob id before encryption, after encryption, and after the write. A stale client
+refreshes and re-applies its mutation on top of the newer vault, so two GMs no longer silently
+overwrite each other in the common case. Foundry has no conditional document update, so this
+is optimistic rather than a hard lock; a rapid double-failure of both writers can still need a
+retry.
 
 **Snapshots and activity are read-modify-write.** `recordActivity` and `maybeSnapshot` are now
 inside the queue, so they are safe from concurrent handlers. If the queue is ever made
@@ -248,23 +252,15 @@ ordering is still well-defined.
   renamed note because `formerNames` is recorded, but the visible text is not rewritten and a
   freshly typed `[[Old Title]]` will create a new note. Rewriting wikilink text on rename (or
   resolving aliases for new links) is the next refinement.
-- **Stats sessions ignore post-marker days.** `deriveSessions` treats each marker as a single
-  date, so activity on days after a marker but before the next marker is omitted. Define
-  marker ranges instead.
-- **Typed links do not count toward "links drawn."** `reconcileTypedLinks` creates links
-  without `recordActivity({ links: 1 })`. Decide whether typed links should count.
 - **Contribution credit is net length, not a real diff.** Replacing 100 characters with 100
   different characters credits zero. It is a reasonable MVP approximation; document it or
   move to a proper diff.
 - **Link toolbar is rebuilt on every document update.** Even with `onchange`, typing can lose
   focus if an unrelated update re-renders the toolbar. Consider updating just the input value
   or not rebuilding while it has focus.
-- **Search/filter interaction.** The quick-switcher list ignores author/style filter chips;
-  the spec says filters combine with search. Decide whether the dropdown should apply them too.
 - **`emptyTrash` assumes the history entry/page still exists.** If the history container was
   deleted, the page lookup is null and snapshot cleanup is skipped; the delete itself still
-  works. `ensureContainers` also only repairs a missing history page, not missing layout/stats
-  pages.
+  works. `ensureContainers` now repairs missing containers and layout/stats/history pages.
 - **Race on first-run container creation.** Two GMs loading a fresh world at the same time can
   both create containers before the setting is saved.
 

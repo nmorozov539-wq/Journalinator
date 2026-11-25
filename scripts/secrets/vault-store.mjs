@@ -24,7 +24,7 @@ const REMEMBER_PREFIX = "journalinator.vaultKey.";
  * status: "unavailable" (not a GM-tier user) | "absent" (never set up) | "locked" |
  *         "unlocked" | "error" (could not decrypt with the key we had)
  */
-class VaultStore {
+export class VaultStore {
   status = "unavailable";
   error = null;
   #key = null;
@@ -45,6 +45,10 @@ class VaultStore {
 
   #flags() {
     return this.#entry()?.flags?.[MODULE_ID] ?? {};
+  }
+
+  #storedVaultIv(entry = this.#entry()) {
+    return entry?.flags?.[MODULE_ID]?.vault?.iv ?? null;
   }
 
   #worldId() {
@@ -170,27 +174,46 @@ class VaultStore {
     return this.#enqueue(async () => {
       const entry = this.#entry();
       if (!entry) throw new Error("Journalinator: the GM Secrets container is missing");
-      if (this.#flags().keyring && !this.isUnlocked) throw new Error("Journalinator: unlock the vault before changing its key");
 
-      const data = normalizeVault(this.#data ?? emptyVault());
-      data.rev = (data.rev ?? 0) + 1;
-      const key = await generateDataKey();
-      const keyring = await createKeyring(key, { mode, passphrase, worldId: this.#worldId() });
-      const blob = await encryptVault(data, key, { keyId: keyring.keyId, worldId: this.#worldId() });
+      for (let attempt = 0; attempt < 5; attempt++) {
+        if (this.#storedVaultIv(entry) !== this.#lastBlobIv) {
+          await this.#refresh();
+          if (this.#flags().keyring && !this.isUnlocked) throw new Error("Journalinator: unlock the vault before changing its key");
+          continue;
+        }
+        if (this.#flags().keyring && !this.isUnlocked) throw new Error("Journalinator: unlock the vault before changing its key");
 
-      this.#key = key;
-      this.#keyring = keyring;
-      this.#data = data;
-      this.#lastBlobIv = blob.iv;
-      this.status = "unlocked";
-      if (mode === "passphrase" && remember) await this.#remember(keyring.keyId, key);
-      else this.#clearRemembered();
+        const data = normalizeVault(this.#data ?? emptyVault());
+        data.rev = (data.rev ?? 0) + 1;
+        const key = await generateDataKey();
+        const keyring = await createKeyring(key, { mode, passphrase, worldId: this.#worldId() });
+        const blob = await encryptVault(data, key, { keyId: keyring.keyId, worldId: this.#worldId() });
+        // Another GM may have written while we were rotating the key.
+        if (this.#storedVaultIv(entry) !== this.#lastBlobIv) {
+          await this.#refresh();
+          if (this.#flags().keyring && !this.isUnlocked) throw new Error("Journalinator: unlock the vault before changing its key");
+          continue;
+        }
 
-      await entry.update({
-        [`flags.${MODULE_ID}.keyring`]: keyring,
-        [`flags.${MODULE_ID}.vault`]: blob
-      });
-      this.#emit();
+        this.#key = key;
+        this.#keyring = keyring;
+        this.#data = data;
+        this.#lastBlobIv = blob.iv;
+        this.status = "unlocked";
+        await entry.update({
+          [`flags.${MODULE_ID}.keyring`]: keyring,
+          [`flags.${MODULE_ID}.vault`]: blob
+        });
+        if (this.#storedVaultIv(entry) !== blob.iv) {
+          await this.#refresh();
+          continue;
+        }
+        if (mode === "passphrase" && remember) await this.#remember(keyring.keyId, key);
+        else this.#clearRemembered();
+        this.#emit();
+        return;
+      }
+      throw new Error("Journalinator: the vault changed repeatedly while saving; try again");
     });
   }
 
@@ -225,6 +248,10 @@ class VaultStore {
    * Applies `fn(draft)` to a copy of the vault, re-encrypts, and writes it. Finished or
    * interrupted declassifications are tidied first (reconcileVault). Returns fn's result.
    * `fn` may be async but must not call mutate() itself.
+   *
+   * Two GMs can hold different copies of the vault. We watch the stored blob id and retry on a
+   * newer one before and after encryption, and again after the write, so an older copy cannot
+   * silently clobber a newer one without its change being re-applied on top.
    */
   mutate(fn) {
     return this.#enqueue(async () => {
@@ -232,17 +259,36 @@ class VaultStore {
       const entry = this.#entry();
       if (!entry) throw new Error("Journalinator: the GM Secrets container is missing");
 
-      const draft = normalizeVault(foundry.utils.deepClone(this.#data));
-      reconcileVault(draft, sharedInfo());
-      const result = await fn(draft);
-      draft.rev = (this.#data.rev ?? 0) + 1;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        if (this.#storedVaultIv(entry) !== this.#lastBlobIv) {
+          await this.#refresh();
+          if (!this.isUnlocked) throw new Error("Journalinator: the secrets vault is locked");
+          continue;
+        }
 
-      const blob = await encryptVault(draft, this.#key, { keyId: this.#keyring.keyId, worldId: this.#worldId() });
-      this.#data = draft;
-      this.#lastBlobIv = blob.iv;
-      this.#emit();
-      await entry.update({ [`flags.${MODULE_ID}.vault`]: blob });
-      return result;
+        const draft = normalizeVault(foundry.utils.deepClone(this.#data));
+        reconcileVault(draft, sharedInfo());
+        const result = await fn(draft);
+        draft.rev = (this.#data.rev ?? 0) + 1;
+
+        const blob = await encryptVault(draft, this.#key, { keyId: this.#keyring.keyId, worldId: this.#worldId() });
+        // Another GM may have written while we were encrypting.
+        if (this.#storedVaultIv(entry) !== this.#lastBlobIv) {
+          await this.#refresh();
+          if (!this.isUnlocked) throw new Error("Journalinator: the secrets vault is locked");
+          continue;
+        }
+
+        this.#data = draft;
+        this.#lastBlobIv = blob.iv;
+        this.#emit();
+        await entry.update({ [`flags.${MODULE_ID}.vault`]: blob });
+
+        // If someone wrote over us between the check above and this update, retry on their copy.
+        if (this.#storedVaultIv(entry) === blob.iv) return result;
+        await this.#refresh();
+      }
+      throw new Error("Journalinator: the vault changed repeatedly while saving; try again");
     });
   }
 
