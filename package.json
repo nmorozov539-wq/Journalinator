@@ -1,6 +1,6 @@
 {
   "name": "fvtt-journalinator",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "private": true,
   "description": "Dev-only manifest for tests. Foundry loads the module from module.json; nothing here ships.",
   "type": "module",

@@ -1,6 +1,6 @@
 # Private Workspaces — Design
 
-Status: implemented in 0.8.0.
+Status: implemented in 0.8.x.
 
 ## Summary
 
@@ -94,7 +94,10 @@ secrets containers. It is hidden from the sidebar like the module's other contai
 
 ### Workspace record
 
-One `JournalEntryPage` per workspace. The page is the workspace.
+One `JournalEntryPage` per workspace. The page is the workspace. New pages use the core `text` page
+type so they do not depend on a module-specific page type being registered by the manifest. The
+old `fvtt-journalinator.private` type stays registered so pages created during the beta can still
+be opened and saved.
 
 - `page.id` is the stable workspace ID. It is not the user ID and never changes.
 - `page.name` is the workspace name. This is the only metadata the GM admin panel shows.
@@ -102,13 +105,13 @@ One `JournalEntryPage` per workspace. The page is the workspace.
 - `page.flags` stores:
   - `ownerUserId: string | null`
   - `pendingOwnerUserId: string | null`
-  - `state: "active" | "orphaned" | "pending"`
+  - `state: "active" | "orphaned" | "pending" | "archived"`
   - `rev: number`
-- `page.system` stores the private canvas payload:
-  - notes (title, Markdown blocks, card style, card position)
-  - layout and viewport
-  - private trash
-  - timestamps
+  - the private canvas payload:
+    - notes (title, Markdown blocks, card style, card position)
+    - layout and viewport
+    - private trash
+    - timestamps
 
 The page name is intentionally public metadata. The note contents are not.
 

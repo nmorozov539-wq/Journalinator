@@ -12,6 +12,8 @@ const { privateStore, emptyWorkspace } = await import("../scripts/store/private-
 
 test("creates one active workspace per profile", async () => {
   const page = await privateStore.createFor(first);
+  assert.equal(page.type, "text", "uses a core page type so stale manifests can still create it");
+  assert.ok(privateStore.flags(page).workspace, "workspace payload is stored in flags");
   assert.equal(privateStore.findActive(first.id)?.id, page.id);
   assert.equal(privateStore.flags(page).state, "active");
   assert.equal(privateStore.flags(page).ownerUserId, first.id);

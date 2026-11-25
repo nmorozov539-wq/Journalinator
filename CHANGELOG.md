@@ -2,6 +2,14 @@
 
 These notes start with the small board and toolbar polish patches and cover the follow-up fixes and features.
 
+## 0.8.1 — Private canvas fix
+
+- Private workspaces now use a standard Foundry journal page type. This fixes the
+  “private is not a valid page type” error when the Foundry server was started before the
+  module update.
+- Existing private pages created during the beta still open and save.
+- Restart Foundry after updating so the browser, server manifest, and module files all match.
+
 ## 0.8.0 — Private canvases
 
 - Every player profile gets a **Private canvas** next to the main board. Private notes, cards,

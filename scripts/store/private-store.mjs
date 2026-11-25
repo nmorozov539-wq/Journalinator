@@ -3,7 +3,7 @@ import { CARD_STYLES, seedTilt } from "../styles/registry.mjs";
 import { t } from "../i18n.mjs";
 
 const MODULE_ID = "fvtt-journalinator";
-const PRIVATE_TYPE = `${MODULE_ID}.private`;
+const PRIVATE_TYPE = "text";
 const FLAG = "private";
 const MAX_NAME_LENGTH = 100;
 const MAX_TITLE_LENGTH = 200;
@@ -88,7 +88,10 @@ class PrivateStore {
   }
 
   pages() {
-    return [...(this.#container()?.pages ?? [])].filter(page => page.type === PRIVATE_TYPE);
+    return [...(this.#container()?.pages ?? [])]
+      .filter(page => page.flags?.[MODULE_ID]?.[FLAG]?.ownerUserId !== undefined
+        || page.flags?.[MODULE_ID]?.[FLAG]?.state !== undefined
+        || page.flags?.[MODULE_ID]?.[FLAG]?.workspace !== undefined);
   }
 
   flags(page) {
@@ -116,7 +119,10 @@ class PrivateStore {
   }
 
   read(page) {
-    return normalizeWorkspace(page?.system?.workspace);
+    const privateFlag = page?.flags?.[MODULE_ID]?.[FLAG] ?? {};
+    // Older builds stored the workspace under system.workspace; read it once so any pages created
+    // during the beta keep their notes, then write everything back under flags.
+    return normalizeWorkspace(privateFlag.workspace ?? page?.system?.workspace);
   }
 
   defaultName(user) {
@@ -144,11 +150,14 @@ class PrivateStore {
     return JournalEntryPage.create({
       name,
       type: PRIVATE_TYPE,
-      system: { workspace: emptyWorkspace() },
+      system: {},
       ownership: { default: NONE(), [user.id]: OWNER() },
       flags: {
         [MODULE_ID]: {
-          [FLAG]: { ownerUserId: user.id, pendingOwnerUserId: null, state: "active", rev: 0 }
+          [FLAG]: {
+            ownerUserId: user.id, pendingOwnerUserId: null, state: "active", rev: 0,
+            workspace: emptyWorkspace()
+          }
         }
       }
     }, { parent: container });
@@ -162,7 +171,7 @@ class PrivateStore {
     }
     const clean = normalizeWorkspace(workspace);
     await page.update({
-      "system.workspace": clean,
+      [`flags.${MODULE_ID}.${FLAG}.workspace`]: clean,
       [`flags.${MODULE_ID}.${FLAG}.rev`]: rev + 1
     });
     return { workspace: clean, rev: rev + 1 };
