@@ -178,6 +178,10 @@ export default class PrivateNoteEditor {
     const styleOptions = Object.entries(CARD_STYLES)
       .map(([key, def]) => `<option value="${key}" ${currentType === key ? "selected" : ""}>${t(def.labelKey)}</option>`)
       .join("");
+    const backlinks = this.callbacks.getBacklinks?.(note.id) ?? [];
+    const backlinkHTML = backlinks
+      .map(link => `<button type="button" class="journalinator-chip" data-id="${link.id}">${esc(link.name)}</button>`)
+      .join("") || `<small class="journalinator-meta">${t("JN.Common.NoneYet")}</small>`;
     const tool = (icon, label, content) => `<details class="jn-note-tool">
       <summary title="${esc(label)}" aria-label="${esc(label)}"><i class="fa-solid ${icon}" aria-hidden="true"></i></summary>
       <div class="jn-note-tool-panel">${content}</div></details>`;
@@ -187,6 +191,7 @@ export default class PrivateNoteEditor {
         ${tool("fa-pencil", t("JN.Editor.RenameTitle"), `<div class="journalinator-eh">
           <b><button type="button" class="jn-inline-title" title="${t("JN.Editor.RenameTitle")}">${esc(note.name)}</button></b>
         </div>`)}
+        ${tool("fa-link", t("JN.Editor.RelatedNotes"), `<div class="journalinator-chips">${backlinkHTML}</div>`)}
         ${tool("fa-layer-group", t("JN.Editor.Type"), `
           <select class="journalinator-kind" aria-label="${t("JN.Editor.Type")}">${styleOptions}
             <option value="location" ${currentType === "location" ? "selected" : ""}>${t("JN.Kind.Location")}</option>
@@ -229,6 +234,10 @@ export default class PrivateNoteEditor {
       });
       input.focus();
       input.select();
+    });
+
+    this.root.querySelectorAll(".journalinator-chip").forEach(chip => {
+      chip.addEventListener("click", () => this.callbacks.onFocusNote?.(chip.dataset.id));
     });
 
     this.root.querySelector(".journalinator-kind")?.addEventListener("change", async event => {

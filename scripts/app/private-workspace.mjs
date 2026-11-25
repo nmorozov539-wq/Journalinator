@@ -1,7 +1,9 @@
 import JournalCanvas from "./canvas.mjs";
 import PrivateNoteEditor from "./private-editor.mjs";
 import { privateStore } from "../store/private-store.mjs";
-import { CARD_STYLES } from "../styles/registry.mjs";
+import { CARD_STYLES, cardStyleKey } from "../styles/registry.mjs";
+import { linkAnchors, moveThreadPin } from "../card-ports.mjs";
+import { attachedStampIds, DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, stampUrl } from "../stamps.mjs";
 import { toggleTaskListItem } from "../markdown.mjs";
 import { t } from "../i18n.mjs";
 
@@ -33,6 +35,7 @@ export default class PrivateWorkspace {
         kind === "heading" ? { targetHeading: value } : { title: value }),
       onEditCardBlock: (id, blockId, slot) => this.editor.editBoardBlock(id, blockId, slot),
       onEditCardImage: id => this.editor.editNoteImage(id),
+      onEditCardBackground: id => this.editor.editNoteImage(id, true),
       onEditNote: id => {
         this.selectedNoteId = id;
         this.editor.open(id);
@@ -45,14 +48,25 @@ export default class PrivateWorkspace {
       onResizeCard: (id, width, height) => this.resizeCard(id, width, height),
       onResetCardSize: id => this.resizeCard(id, null, null),
       onToggleTask: (id, blockId, index) => this.toggleTask(id, blockId, index),
-      onDeleteNote: id => this.deleteNotes([id])
+      onDeleteNote: id => this.deleteNotes([id]),
+      onAddLabelAt: (x, y) => this.addLabel({ x, y }),
+      onRemoveLabel: id => this.removeLabel(id),
+      onMoveLabel: (id, x, y) => this.updateLabel(id, { x, y }),
+      onEditLabel: id => this.editLabel(id),
+      onAttachStamp: (noteId, stamp, color, corner) => this.attachStamp(noteId, stamp, color, corner),
+      onStampCorner: (id, corner) => this.updateLabel(id, { corner }),
+      onStampColor: (id, color) => this.updateLabel(id, { color }),
+      onCreateLink: (sourceId, targetId, ports) => this.createLink(sourceId, targetId, ports),
+      onUpdateLink: (noteId, linkId, fields) => this.updateLink(noteId, linkId, fields),
+      onDeleteLink: (noteId, linkId) => this.deleteLink(noteId, linkId)
     });
-    this.canvas.simpleMode = true;
 
     this.editor = new PrivateNoteEditor({
       getNote: id => this.getNote(id),
       updateNote: (id, patch) => this.updateNote(id, patch),
-      deleteNote: id => this.deleteNotes([id])
+      deleteNote: id => this.deleteNotes([id]),
+      getBacklinks: id => this.getBacklinks(id),
+      onFocusNote: id => this.focusNote(id)
     });
   }
 
@@ -83,13 +97,27 @@ export default class PrivateWorkspace {
     return note ? privateStore.noteView(this.page, note) : null;
   }
 
+  getBacklinks(noteId) {
+    if (!this.workspace?.notes?.[noteId]) return [];
+    const found = new Map();
+    for (const note of Object.values(this.workspace.notes)) {
+      if (note.id === noteId) continue;
+      if (note.links?.some(link => link.targetId === noteId)) found.set(note.id, note.title);
+    }
+    const self = this.workspace.notes[noteId];
+    for (const link of self.links ?? []) {
+      const target = this.workspace.notes[link.targetId];
+      if (target) found.set(target.id, target.title);
+    }
+    return [...found].map(([id, name]) => ({ id, name }));
+  }
+
   renderInto(canvasSlot, editorSlot) {
     if (!this.page) return;
     this.canvas.mount(canvasSlot);
     this.canvas.selectedNoteId = this.selectedNoteId;
     this.canvas.gmMode = false;
     this.canvas.readOnly = false;
-    this.canvas.simpleMode = true;
     this.canvas.update(this.notes(), this.layout(), {
       deferGeometry: true,
       dimMatch: this.dimMatch
@@ -173,6 +201,119 @@ export default class PrivateWorkspace {
     return this.updateNote(noteId, { blocks });
   }
 
+  async addLabel({ x = 0, y = 0, text = t("JN.Label.Default"), size = 14, color = "", stamp = "", noteId = "", corner = DEFAULT_STAMP_CORNER } = {}) {
+    const id = foundry.utils.randomID();
+    await this.#save(data => {
+      data.layout.labels[id] = {
+        text: String(text ?? ""), x, y, size, color: String(color ?? ""), stamp, noteId,
+        corner: isStampCorner(corner) ? corner : DEFAULT_STAMP_CORNER
+      };
+    });
+    return id;
+  }
+
+  async updateLabel(labelId, fields) {
+    return this.#save(data => {
+      const label = data.layout.labels[labelId];
+      if (!label) return;
+      if (typeof fields.text === "string") label.text = fields.text.slice(0, 500);
+      if (Number.isFinite(fields.x)) label.x = fields.x;
+      if (Number.isFinite(fields.y)) label.y = fields.y;
+      if (Number.isFinite(fields.size)) label.size = Math.max(8, Math.min(96, fields.size));
+      if (Object.values(STAMP_COLORS).includes(fields.color)) label.color = fields.color;
+      if (label.stamp && isStampCorner(fields.corner)) label.corner = fields.corner;
+    });
+  }
+
+  async removeLabels(labelIds) {
+    return this.#save(data => {
+      for (const id of labelIds) {
+        const label = data.layout.labels[id];
+        if (!label) continue;
+        const ids = label.noteId && stampUrl(label.stamp)
+          ? attachedStampIds(data.layout.labels, label.noteId) : [id];
+        for (const removeId of ids) delete data.layout.labels[removeId];
+      }
+    });
+  }
+
+  removeLabel(labelId) {
+    return this.removeLabels([labelId]);
+  }
+
+  async editLabel(labelId) {
+    const label = this.workspace?.layout?.labels?.[labelId];
+    if (!label || label.stamp) return;
+    const text = await DialogV2.prompt({
+      window: { title: t("JN.Prompt.EditLabel") },
+      content: `<input type="text" name="value" autofocus value="${esc(label.text)}">`,
+      ok: { label: t("JN.Common.OK"), callback: (event, button) => button.form.elements.value.value.trim() },
+      rejectClose: false
+    });
+    if (text === null) return;
+    if (!text) return this.removeLabel(labelId);
+    return this.updateLabel(labelId, { text });
+  }
+
+  async attachStamp(noteId, stamp, color = STAMP_COLORS.red, corner = DEFAULT_STAMP_CORNER) {
+    if (!stampUrl(stamp) || !this.workspace?.notes?.[noteId]) return;
+    return this.#save(data => {
+      const ids = attachedStampIds(data.layout.labels, noteId);
+      const id = ids[0] ?? foundry.utils.randomID();
+      for (const duplicate of ids.slice(1)) delete data.layout.labels[duplicate];
+      const previous = data.layout.labels[id];
+      data.layout.labels[id] = {
+        text: "", x: 0, y: 0, size: 14,
+        color: Object.values(STAMP_COLORS).includes(color) ? color : STAMP_COLORS.red,
+        stamp, noteId,
+        corner: isStampCorner(corner) ? corner : previous?.corner ?? DEFAULT_STAMP_CORNER
+      };
+    });
+  }
+
+  async createLink(sourceId, targetId, ports) {
+    if (sourceId === targetId) return;
+    return this.#save(data => {
+      const source = data.notes[sourceId];
+      if (!source || !data.notes[targetId]) return;
+      const anchors = linkAnchors(ports);
+      const existing = source.links.find(link => link.targetId === targetId);
+      if (existing) {
+        if (!anchors.sourcePoint || !anchors.targetPoint) return;
+        Object.assign(existing, anchors, { origin: "drawn", edited: true });
+        return;
+      }
+      source.links.push({
+        id: foundry.utils.randomID(), targetId, ...anchors,
+        label: "", direction: "one", color: "", lineStyle: "solid",
+        origin: "drawn", edited: false, createdBy: this.page ? privateStore.ownerId(this.page) || "" : ""
+      });
+    });
+  }
+
+  async updateLink(noteId, linkId, fields) {
+    return this.#save(data => {
+      const link = data.notes[noteId]?.links.find(item => item.id === linkId);
+      if (!link) return;
+      if (typeof fields.label === "string") link.label = fields.label.slice(0, 200);
+      if (["none", "one", "two"].includes(fields.direction)) link.direction = fields.direction;
+      if (typeof fields.color === "string" && ["", "#a393f2", "#d6a45c", "#d77b91"].includes(fields.color)) {
+        link.color = fields.color;
+      }
+      if (fields.lineStyle === "solid" || fields.lineStyle === "dashed") link.lineStyle = fields.lineStyle;
+      const pins = moveThreadPin(link.pins, fields.pinMove);
+      if (pins) link.pins = pins;
+      link.edited = true;
+    });
+  }
+
+  async deleteLink(noteId, linkId) {
+    return this.#save(data => {
+      const note = data.notes[noteId];
+      if (note) note.links = note.links.filter(link => link.id !== linkId);
+    });
+  }
+
   async moveCard(id, x, y) {
     if (!Number.isFinite(x) || !Number.isFinite(y) || !this.workspace?.layout?.cards?.[id]) return;
     return this.#save(data => {
@@ -211,9 +352,40 @@ export default class PrivateWorkspace {
     this.onChange();
   }
 
-  deleteSelected() {
-    const ids = this.getSelectedNoteIds();
-    if (ids.length) this.deleteNotes(ids);
+  async deleteSelected() {
+    const labelIds = this.getSelectedLabelIds();
+    const noteIds = this.getSelectedNoteIds();
+    if (!labelIds.length && !noteIds.length) return;
+    const undoId = foundry.utils.randomID();
+    const deletedAt = Date.now();
+    const ok = await this.#save(data => {
+      for (const id of labelIds) {
+        const label = data.layout.labels[id];
+        if (!label) continue;
+        const ids = label.noteId && stampUrl(label.stamp)
+          ? attachedStampIds(data.layout.labels, label.noteId) : [id];
+        for (const removeId of ids) delete data.layout.labels[removeId];
+      }
+      for (const id of noteIds) {
+        const note = data.notes[id];
+        if (!note) continue;
+        data.trash.unshift({ note, card: data.layout.cards[id] ?? null, deletedAt, undoId });
+        delete data.notes[id];
+        delete data.layout.cards[id];
+      }
+    });
+    if (!ok) return;
+    if (noteIds.length) {
+      this.history.push({ noteIds, undoId });
+      if (this.history.length > 20) this.history.shift();
+    }
+    if (noteIds.includes(this.selectedNoteId)) this.selectedNoteId = null;
+    this.canvas.clearSelection();
+    this.onChange();
+  }
+
+  getSelectedLabelIds() {
+    return this.canvas.getSelectedLabelIds();
   }
 
   async undo() {
@@ -247,6 +419,31 @@ export default class PrivateWorkspace {
   async emptyTrash() {
     await this.#save(data => { data.trash = []; });
     this.onChange();
+  }
+
+  async openStats() {
+    const notes = Object.values(this.workspace?.notes ?? {});
+    const chars = notes.reduce((total, note) =>
+      total + note.blocks.reduce((sum, block) => sum + block.text.length, 0), 0);
+    const trashed = this.workspace?.trash?.length ?? 0;
+    const styles = {};
+    for (const note of notes) {
+      const style = cardStyleKey(note.style);
+      styles[style] = (styles[style] ?? 0) + 1;
+    }
+    await DialogV2.wait({
+      window: { title: t("JN.Private.StatsTitle") },
+      content: `
+        <p>${t("JN.Private.StatsNotes", { count: notes.length })}</p>
+        <p>${t("JN.Private.StatsChars", { count: chars })}</p>
+        <p>${t("JN.Private.StatsTrash", { count: trashed })}</p>
+        <div class="journalinator-meta">${t("JN.Private.StatsStyles")}</div>
+        ${Object.entries(styles).map(([style, count]) =>
+          `<div class="jn-stat-bar"><span>${esc(t(CARD_STYLES[style]?.labelKey ?? "JN.Style.Sticky"))}</span><em>${count}</em></div>`
+        ).join("") || `<p class="journalinator-empty">${t("JN.Common.NoneYet")}</p>`}`,
+      buttons: [{ action: "close", label: t("JN.Common.Close"), default: true }],
+      rejectClose: false
+    });
   }
 
   async openTrash() {

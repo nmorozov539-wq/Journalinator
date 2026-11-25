@@ -24,7 +24,6 @@ This is a **UI-private** feature, not encryption. See the security boundary belo
 - Encryption at rest.
 - Sharing a private note with selected readers.
 - Merging two private workspaces.
-- Private links between notes in the first version.
 - Hiding the existence of a workspace from the GM or the host.
 
 ## Security boundary
@@ -62,7 +61,7 @@ notes, but:
 
 - no block locks are needed — the profile owner is the only writer;
 - private notes do not appear in shared stats or history;
-- private links are out of scope for the first version; `[[...]]` text stays plain text;
+- private notes can be linked to each other; those links never leave the workspace;
 - the private workspace has its own undo, trash, and restore behaviour.
 
 ### Copying between canvases
@@ -102,7 +101,7 @@ be opened and saved.
 - `page.flags` stores:
   - `ownerUserId: string | null`
   - `pendingOwnerUserId: string | null`
-  - `state: "active" | "orphaned" | "pending" | "archived"`
+  - `state: "active" | "orphaned" | "pending"`
   - `rev: number`
   - the private canvas payload:
     - notes (title, Markdown blocks, card style, card position)
@@ -128,7 +127,7 @@ The page name is intentionally public metadata. The note contents are not.
 Foundry user IDs are stable across renames. Renaming a player keeps the same workspace.
 
 Deleting a user does **not** delete their workspace. It becomes orphaned internally. The
-workspace ID, name, and contents remain until the GM explicitly archives or deletes it.
+workspace ID, name, and contents remain until the GM explicitly deletes it.
 
 A newly created user gets a new user ID and therefore a fresh empty workspace. The GM can
 reassign an orphaned workspace to that user, with player confirmation.
@@ -137,15 +136,16 @@ The system never matches workspaces by player name. Names are editable metadata,
 
 ## GM admin panel
 
-The GM gets a **Private Journals** manager. Its list shows only workspace names — no owner,
-state, note count, dates, or contents.
+The GM gets a **Private Journals** manager with two columns: players on the left, journals on the
+right. A connector shows who owns which journal. Solid lines are active; dashed lines are waiting
+for the player to accept. Journals without an owner appear after the linked ones under an
+**Unassigned** divider. Players are shown by name and color only.
 
-Per workspace actions:
+Right-clicking a journal (or using its menu button) opens the actions:
 
 - **Rename**
 - **Assign to player…**
 - **Detach from player**
-- **Archive**
 - **Delete…** with a strong confirmation
 
 Rules:
@@ -155,8 +155,7 @@ Rules:
 - The GM never opens the workspace contents from this panel.
 - The panel is the only place to repair or transfer orphaned workspaces.
 
-Because status is not displayed, invalid actions are reported as short errors rather than
-persistent status badges.
+Invalid actions are reported as short errors.
 
 ## Reassignment and player confirmation
 
@@ -171,7 +170,7 @@ On opening the private tab, the player sees a prompt containing only the workspa
 - **Decline** clears the pending owner and returns the workspace to orphaned.
 
 No note count, dates, or contents are shown in the prompt. This protects the previous owner's
-content and follows the name-only admin rule.
+content.
 
 The confirmation prevents the common failure mode where a recreated user accidentally inherits
 a stranger’s workspace.
@@ -182,7 +181,7 @@ a stranger’s workspace.
   `Богдан — Private`.
 - The owner can rename their workspace.
 - The GM can rename any workspace from the admin panel, so orphaned journals can be labelled.
-- Workspace names are unique case-insensitively so the name-only admin list stays usable.
+- Workspace names are unique case-insensitively so the admin lists stay readable.
 - The name is visible to the GM and in raw world data.
 
 ## Creation flow
@@ -215,7 +214,7 @@ The source notes remain exactly as they were.
 - A recreated player gets a fresh workspace by default.
 - The GM can assign an orphaned workspace to a player; the player accepts or declines.
 - A player with an existing workspace cannot be assigned another one.
-- The admin panel lists only workspace names.
+- The admin panel shows player names/colors and journal names, with ownership links.
 - Owners and the GM can rename a workspace; duplicate names are rejected.
 - Private notes never appear in shared search, stats, history, backlinks, or the main canvas.
 - Ctrl/Cmd+C and Ctrl/Cmd+V copy notes in both directions; no links, images, styles, or layout.
@@ -226,7 +225,6 @@ The source notes remain exactly as they were.
 
 - Encryption and per-profile keys.
 - Sharing a private workspace or note with another player.
-- Importing shared notes into a private workspace.
 - Merging workspaces.
-- Private links and private statistics.
+- Private statistics across sessions.
 - Hiding workspace existence from the GM or host.

@@ -69,11 +69,8 @@ test("saving increments the revision and rejects a stale writer", async () => {
   assert.equal(privateStore.read(page).notes.note.blocks[0].text, "hello");
 });
 
-test("archiving and deleting remove the workspace from active use", async () => {
+test("deleting a workspace removes it from active use", async () => {
   const page = privateStore.findActive(second.id);
-  await privateStore.archive(page);
-  assert.equal(privateStore.flags(page).state, "archived");
-  assert.equal(privateStore.findActive(second.id), null);
   await privateStore.remove(page);
   assert.equal(privateStore.findById(page.id), null);
   assert.ok(containers.private);

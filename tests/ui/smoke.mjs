@@ -934,14 +934,18 @@ test("private canvas is separate and copies notes through the clipboard", async 
   try {
     app._onFirstRender();
     await redraw();
-    const select = host.querySelector(".jn-view-switch");
-    select.value = "private";
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-    await redraw();
+    const switchView = async view => {
+      host.querySelector(".jn-view-switch").click();
+      host.querySelector(`.jn-view-option[data-view="${view}"]`).click();
+      await redraw();
+    };
+    await switchView("private");
     assert.ok(host.querySelector(".jn-private-view"));
-    assert.ok(host.querySelector(".jn-workspace-name").textContent.includes(privatePage.name));
-    assert.equal(host.querySelector(".journalinator-filters"), null);
+    assert.ok(host.querySelector(".jn-view-rename"), "private workspace rename icon is in the switcher");
+    assert.ok(host.querySelector(".journalinator-filters"), "private style filters are available");
     assert.ok(host.querySelector(".journalinator-private-new"));
+    assert.ok(host.querySelector(".journalinator-private-add-label"));
+    assert.ok(host.querySelector(".journalinator-private-add-link"));
 
     host.querySelector(".journalinator-private-new").click();
     await settle();
@@ -981,9 +985,7 @@ test("private canvas is separate and copies notes through the clipboard", async 
     }));
     await settle();
 
-    select.value = "shared";
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-    await redraw();
+    await switchView("shared");
     const sharedCanvas = host.querySelector(".jn-canvas");
     sharedCanvas.dispatchEvent(new KeyboardEvent("keydown", {
       key: "v", ctrlKey: true, bubbles: true, cancelable: true
@@ -1007,9 +1009,7 @@ test("private canvas is separate and copies notes through the clipboard", async 
     }));
     await settle();
 
-    select.value = "private";
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-    await redraw();
+    await switchView("private");
     const privateCanvasAgain = host.querySelector(".jn-canvas");
     privateCanvasAgain.dispatchEvent(new KeyboardEvent("keydown", {
       key: "v", ctrlKey: true, bubbles: true, cancelable: true
@@ -1020,6 +1020,17 @@ test("private canvas is separate and copies notes through the clipboard", async 
     const copiedPrivate = Object.values(workspaceAfterCopy.notes).filter(note => note.title === "Clipboard private");
     assert.equal(copiedPrivate.length, 2, "shared note was pasted into the private workspace");
     assert.ok(copiedPrivate.every(note => note.blocks[0].text === "- [x] Private task"));
+
+    const beforeDelete = Object.keys(privateStore.read(privateStore.findActive(gmUser.id)).notes).length;
+    privateCanvasAgain.focus();
+    privateCanvasAgain.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Backspace", bubbles: true, cancelable: true
+    }));
+    await settle();
+    await redraw();
+    const afterDelete = privateStore.read(privateStore.findActive(gmUser.id));
+    assert.equal(Object.keys(afterDelete.notes).length, beforeDelete - 1, "Backspace deletes a private note");
+    assert.ok(afterDelete.trash.length >= 1, "deleted private note went to the private trash");
   } finally {
     app._onClose();
     host.remove();

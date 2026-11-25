@@ -19,9 +19,9 @@ See [CHANGELOG.md](CHANGELOG.md) for recent changes.
 ## Features
 
 - **One shared canvas.** Notes are cards; there is no separate drawer or unplaced state.
-- **Private canvas.** Each player profile gets an isolated personal workspace with its own board,
-  notes, search, trash, and layout. Notes can be copied between the private and shared canvases
-  with Ctrl/Cmd+C and Ctrl/Cmd+V.
+- **Private canvas.** Each player profile gets an isolated personal workspace with the same
+  note types, labels, links, styles, stats, and trash controls as the main board. Notes can be
+  copied between the private and shared canvases with Ctrl/Cmd+C and Ctrl/Cmd+V.
 - **Obsidian-ish editing.** Click a paragraph to edit it; blank line + Enter splits, Backspace at
   the start merges. Unsaved text survives reloads as a local draft.
 - **Markdown.** Headings, emphasis, lists, task checkboxes, tables, quotes, code, and links render
@@ -194,7 +194,7 @@ Layout:
 
 ## Branches
 
-- **`main`** — Journalinator, the active module (`fvtt-journalinator`, v0.8.2).
+- **`main`** — Journalinator, the active module (`fvtt-journalinator`, v0.8.3).
 - **`investigation-board`** — an earlier, independent realization of the same design, originally
   built by Larkar. It is a separate Foundry module
   (`investigation-board`, 0.3.0-alpha.1), kept for reference. It does

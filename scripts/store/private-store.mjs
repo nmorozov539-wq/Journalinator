@@ -1,5 +1,7 @@
 import { getContainerIds } from "./containers.mjs";
 import { CARD_STYLES, seedTilt } from "../styles/registry.mjs";
+import { CARD_SIDES, MAX_THREAD_PINS, validLinkPoint, validThreadPin } from "../card-ports.mjs";
+import { DEFAULT_STAMP_CORNER, STAMP_COLORS, isStampCorner, stampUrl } from "../stamps.mjs";
 import { t } from "../i18n.mjs";
 
 const MODULE_ID = "fvtt-journalinator";
@@ -9,7 +11,6 @@ const MAX_NAME_LENGTH = 100;
 const MAX_TITLE_LENGTH = 200;
 
 const randomID = () => foundry.utils.randomID();
-const clone = value => (foundry.utils?.deepClone ? foundry.utils.deepClone(value) : structuredClone(value));
 const NONE = () => CONST.DOCUMENT_OWNERSHIP_LEVELS.NONE;
 const OWNER = () => CONST.DOCUMENT_OWNERSHIP_LEVELS.OWNER;
 
@@ -27,6 +28,48 @@ function normalizeBlock(block) {
   return { blockId, text: typeof block?.text === "string" ? block.text : "" };
 }
 
+function normalizeLink(link) {
+  const direction = ["none", "one", "two"].includes(link?.direction) ? link.direction : "none";
+  const lineStyle = link?.lineStyle === "dashed" ? "dashed" : "solid";
+  const clean = {
+    id: typeof link?.id === "string" && link.id ? link.id : randomID(),
+    targetId: typeof link?.targetId === "string" ? link.targetId : "",
+    label: typeof link?.label === "string" ? link.label.slice(0, 200) : "",
+    direction,
+    color: typeof link?.color === "string" ? link.color : "",
+    lineStyle,
+    origin: link?.origin === "typed" ? "typed" : "drawn",
+    edited: link?.edited === true,
+    createdBy: typeof link?.createdBy === "string" ? link.createdBy : "",
+    hint: false
+  };
+  for (const key of ["sourceSide", "targetSide"]) {
+    if (CARD_SIDES.includes(link?.[key])) clean[key] = link[key];
+  }
+  for (const key of ["sourcePoint", "targetPoint"]) {
+    if (validLinkPoint(link?.[key])) clean[key] = { x: link[key].x, y: link[key].y };
+  }
+  if (Array.isArray(link?.pins)) {
+    clean.pins = link.pins.slice(0, MAX_THREAD_PINS).filter(validThreadPin).map(({ x, y }) => ({ x, y }));
+  }
+  return clean;
+}
+
+function normalizeLabel(label) {
+  const stamp = typeof label?.stamp === "string" && stampUrl(label.stamp) ? label.stamp : "";
+  const color = Object.values(STAMP_COLORS).includes(label?.color) ? label.color : "";
+  return {
+    text: typeof label?.text === "string" ? label.text.slice(0, 500) : "",
+    x: Number.isFinite(label?.x) ? label.x : 0,
+    y: Number.isFinite(label?.y) ? label.y : 0,
+    size: Number.isFinite(label?.size) ? label.size : 14,
+    color,
+    stamp,
+    noteId: typeof label?.noteId === "string" ? label.noteId : "",
+    corner: isStampCorner(label?.corner) ? label.corner : DEFAULT_STAMP_CORNER
+  };
+}
+
 function normalizeNote(note) {
   const style = Object.hasOwn(CARD_STYLES, note?.style) ? note.style : "sticky";
   const kind = note?.kind === "location" ? "location" : "note";
@@ -41,6 +84,7 @@ function normalizeNote(note) {
     blocks: Array.isArray(note?.blocks) && note.blocks.length
       ? note.blocks.map(normalizeBlock)
       : [{ blockId: randomID(), text: "" }],
+    links: (Array.isArray(note?.links) ? note.links : []).map(normalizeLink),
     createdAt: Number.isFinite(note?.createdAt) ? note.createdAt : Date.now(),
     updatedAt: Number.isFinite(note?.updatedAt) ? note.updatedAt : Date.now()
   };
@@ -63,6 +107,10 @@ export function normalizeWorkspace(input) {
       rotation: Number.isFinite(card.rotation) ? card.rotation : 0
     };
   }
+  const labels = {};
+  for (const [id, label] of Object.entries(source.layout?.labels ?? {})) {
+    labels[id] = normalizeLabel(label);
+  }
   const trash = (Array.isArray(source.trash) ? source.trash : []).map(entry => ({
     note: normalizeNote(entry?.note),
     card: entry?.card && Number.isFinite(entry.card.x) && Number.isFinite(entry.card.y) ? entry.card : null,
@@ -74,7 +122,7 @@ export function normalizeWorkspace(input) {
     notes,
     layout: {
       cards,
-      labels: {},
+      labels,
       viewport: source.layout?.viewport ?? null
     },
     trash
@@ -120,9 +168,12 @@ class PrivateStore {
 
   read(page) {
     const privateFlag = page?.flags?.[MODULE_ID]?.[FLAG] ?? {};
-    // Older builds stored the workspace under system.workspace; read it once so any pages created
-    // during the beta keep their notes, then write everything back under flags.
-    return normalizeWorkspace(privateFlag.workspace ?? page?.system?.workspace);
+    const raw = privateFlag.workspace ?? page?.system?.workspace;
+    let value = raw;
+    if (typeof raw === "string") {
+      try { value = JSON.parse(raw); } catch { value = null; }
+    }
+    return normalizeWorkspace(value);
   }
 
   defaultName(user) {
@@ -156,7 +207,7 @@ class PrivateStore {
         [MODULE_ID]: {
           [FLAG]: {
             ownerUserId: user.id, pendingOwnerUserId: null, state: "active", rev: 0,
-            workspace: emptyWorkspace()
+            workspace: JSON.stringify(emptyWorkspace())
           }
         }
       }
@@ -171,7 +222,7 @@ class PrivateStore {
     }
     const clean = normalizeWorkspace(workspace);
     await page.update({
-      [`flags.${MODULE_ID}.${FLAG}.workspace`]: clean,
+      [`flags.${MODULE_ID}.${FLAG}.workspace`]: JSON.stringify(clean),
       [`flags.${MODULE_ID}.${FLAG}.rev`]: rev + 1
     });
     return { workspace: clean, rev: rev + 1 };
@@ -230,15 +281,6 @@ class PrivateStore {
     });
   }
 
-  async archive(page) {
-    await page.update({
-      [`flags.${MODULE_ID}.${FLAG}.ownerUserId`]: null,
-      [`flags.${MODULE_ID}.${FLAG}.pendingOwnerUserId`]: null,
-      [`flags.${MODULE_ID}.${FLAG}.state`]: "archived",
-      ownership: { default: NONE() }
-    });
-  }
-
   async remove(page) {
     await page.delete();
   }
@@ -287,7 +329,7 @@ class PrivateStore {
         image: note.image,
         backgroundImage: note.backgroundImage,
         blocks: note.blocks,
-        links: [],
+        links: note.links ?? [],
         authorId: ownerId,
         createdAt: note.createdAt,
         updatedAt: note.updatedAt,
@@ -335,6 +377,7 @@ class PrivateStore {
         image: null,
         backgroundImage: null,
         blocks: [{ blockId: randomID(), text: "" }],
+        links: [],
         createdAt: Date.now(),
         updatedAt: Date.now()
       },

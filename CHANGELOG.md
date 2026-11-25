@@ -2,6 +2,18 @@
 
 These notes start with the small board and toolbar polish patches and cover the follow-up fixes and features.
 
+## 0.8.3 — Private canvas controls and journal manager
+
+- Private notes now have the same canvas controls as the main board: note types, labels, stamps,
+  card backgrounds, links, style filters, theme, stats, and trash.
+- Deleting a private note now correctly removes its card and keeps a restorable trash copy.
+- The workspace picker is a proper dropdown. The button beside New Note is gone, and the private
+  entry has a pencil icon for renaming the workspace.
+- The Private Journals manager is now a two-column layout: players on the left, journals on the
+  right, with lines showing ownership. Right-click a journal for rename, assign, detach, and
+  delete.
+- Archived journals were removed; unowned journals are simply listed as unassigned.
+
 ## 0.8.2 — Copy and paste notes
 
 - Select notes and use Ctrl/Cmd+C and Ctrl/Cmd+V to copy them between the main canvas and the
@@ -21,8 +33,8 @@ These notes start with the small board and toolbar polish patches and cover the 
 
 - Every player profile gets a **Private canvas** next to the main board. Private notes, cards,
   search, and trash stay out of the shared canvas.
-- Private journals can be renamed. Players get their own; the GM can create, detach, assign,
-  archive, or delete them from a name-only management list.
+- Private journals can be renamed. Players get their own; the GM can create, detach, assign, or
+  delete them from the management panel.
 - If a player is deleted or recreated, their old private journal is kept and can be reassigned.
   The receiving player must accept the offer first.
 - A private note can be published to the shared board as a new copy. Only the title and text are

@@ -350,7 +350,9 @@ export default class JournalApp extends ApplicationV2 {
   }
 
   #matchesFilters(note) {
-    if (this.#view === "private") return true;
+    if (this.#view === "private") {
+      return !this.#filterStyles.size || this.#filterStyles.has(cardStyleKey(note.system.style));
+    }
     if (this.#filterAuthors.size && !this.#filterAuthors.has(note.system.authorId)) return false;
     if (this.#filterStyles.size && !this.#filterStyles.has(cardStyleKey(note.system.style))) return false;
     return true;
@@ -367,9 +369,9 @@ export default class JournalApp extends ApplicationV2 {
   async _prepareContext() {
     const view = this.#view;
     const isPrivate = view === "private";
-    const privatePage = isPrivate ? privateStore.findActive(game.user.id) : null;
-    const pendingPage = isPrivate ? privateStore.findPending(game.user.id) : null;
-    const privateData = privatePage ? privateStore.read(privatePage) : null;
+    const privatePage = privateStore.findActive(game.user.id);
+    const pendingPage = privateStore.findPending(game.user.id);
+    const privateData = isPrivate && privatePage ? privateStore.read(privatePage) : null;
     const notes = isPrivate && privateData
       ? privateStore.noteViews(privatePage, privateData)
       : notesStore.getAllNotes();
@@ -437,23 +439,41 @@ export default class JournalApp extends ApplicationV2 {
       </div>`;
     const privateToolbar = `
       <div class="jn-toolbar-group">
-        ${privatePage ? `<button type="button" class="jn-workspace-name" title="${t("JN.Private.RenameWorkspace")}">
-          <i class="fa-solid fa-lock" aria-hidden="true"></i><span class="jn-workspace-title">${escape(privatePage.name)}</span></button>` : ""}
         ${privatePage ? toolbarButton("journalinator-private-new", "fa-note-sticky", t("JN.TopBar.NewNote")) : ""}
+        ${privatePage ? toolbarButton("journalinator-private-add-label", "fa-font", t("JN.TopBar.AddLabel")) : ""}
+        ${privatePage ? toolbarButton("journalinator-private-add-link", "fa-link", t("JN.Link.Tool")) : ""}
       </div>
-      <div class="jn-toolbar-group">${themePicker}</div>
       <div class="jn-toolbar-group">
+        <details class="jn-toolbar-dropdown journalinator-filters${this.#filterStyles.size ? " on" : ""}">
+          <summary class="jn-toolbar-icon" ${tooltipAttrs(t("JN.Filter.Title"))}><i class="fa-solid fa-filter" aria-hidden="true"></i></summary>
+          <div class="jn-toolbar-panel">
+            <div class="jn-menu-heading">${t("JN.Filter.Styles")}</div>
+            ${filters(Object.entries(CARD_STYLES).map(([id, style]) => [id, t(style.labelKey)]), this.#filterStyles, "style")}
+          </div>
+        </details>
+        ${themePicker}
+      </div>
+      <div class="jn-toolbar-group">
+        ${privatePage ? toolbarButton("journalinator-private-stats", "fa-chart-column", t("JN.TopBar.Stats")) : ""}
         ${privatePage ? toolbarButton("journalinator-trash", "fa-trash", t("JN.TopBar.Trash")) : ""}
         ${context.canManagePrivate ? `<button type="button" class="jn-toolbar-icon journalinator-private-admin"
           ${tooltipAttrs(t("JN.Private.AdminTitle"))}><i class="fa-solid fa-user-shield" aria-hidden="true"></i></button>` : ""}
       </div>`;
+    const viewLabel = privateView ? t("JN.Private.PrivateCanvas") : t("JN.Private.MainCanvas");
     root.innerHTML = `
       <header class="journalinator-topbar">
         <b class="jn-current-user"><span class="jn-dot" style="background:${escape(String(game.user.color ?? "#8d8d97"))}"></span>${escape(game.user.name)}</b>
-        <select class="jn-view-switch" aria-label="${t("JN.Private.ViewSwitch")}">
-          <option value="shared" ${privateView ? "" : "selected"}>${t("JN.Private.MainCanvas")}</option>
-          <option value="private" ${privateView ? "selected" : ""}>${t("JN.Private.PrivateCanvas")}</option>
-        </select>
+        <details class="jn-view-menu jn-toolbar-dropdown" aria-label="${t("JN.Private.ViewSwitch")}">
+          <summary class="jn-view-switch" ${tooltipAttrs(t("JN.Private.ViewSwitch"))}>${viewLabel}<i class="fa-solid fa-chevron-down" aria-hidden="true"></i></summary>
+          <div class="jn-view-panel">
+            <button type="button" class="jn-view-option${privateView ? "" : " on"}" data-view="shared">${t("JN.Private.MainCanvas")}</button>
+            <div class="jn-view-private-row">
+              <button type="button" class="jn-view-option${privateView ? " on" : ""}" data-view="private">${t("JN.Private.PrivateCanvas")}</button>
+              ${privatePage ? `<button type="button" class="jn-view-rename" title="${t("JN.Private.RenameWorkspace")}"
+                aria-label="${t("JN.Private.RenameWorkspace")}"><i class="fa-solid fa-pen" aria-hidden="true"></i></button>` : ""}
+            </div>
+          </div>
+        </details>
         <div class="journalinator-search-wrap">
           <input type="text" inputmode="search" autocomplete="off" class="journalinator-search"
             aria-label="${t(privateView ? "JN.Private.Search" : "JN.TopBar.Search")}"
@@ -619,22 +639,33 @@ export default class JournalApp extends ApplicationV2 {
     });
     search?.addEventListener("keydown", ev => this.#onSearchKeydown(ev));
 
-    root.querySelector(".jn-view-switch")?.addEventListener("change", event => {
-      const next = event.target.value === "private" ? "private" : "shared";
-      if (next === this.#view) return;
-      if (this.#view === "shared") this.#editor.suspend();
-      else this.#private.editor.close();
-      this.#view = next;
-      this.#query = "";
-      this.#switcherOpen = false;
-      this.#switcherHighlight = 0;
-      this.#canvas.cancelLinkTool();
-      this.#private.canvas.cancelLinkTool();
-      this.render();
+    root.querySelectorAll(".jn-view-option").forEach(option => {
+      option.addEventListener("click", () => {
+        const next = option.dataset.view === "private" ? "private" : "shared";
+        option.closest("details")?.removeAttribute("open");
+        if (next === this.#view) return;
+        if (this.#view === "shared") this.#editor.suspend();
+        else this.#private.editor.close();
+        this.#view = next;
+        this.#query = "";
+        this.#switcherOpen = false;
+        this.#switcherHighlight = 0;
+        this.#filterAuthors.clear();
+        this.#filterStyles.clear();
+        this.#canvas.cancelLinkTool();
+        this.#private.canvas.cancelLinkTool();
+        this.render();
+      });
     });
 
     root.querySelector(".journalinator-private-new")?.addEventListener("click", () => {
       this.#private.createNoteAt({ ...this.#private.canvas.newCardPosition(), title: t("JN.Private.NewNoteTitle") });
+    });
+    root.querySelector(".journalinator-private-add-label")?.addEventListener("click", () => {
+      this.#private.canvas.addLabelButton();
+    });
+    root.querySelector(".journalinator-private-add-link")?.addEventListener("click", () => {
+      this.#private.canvas.toggleLinkTool();
     });
 
     root.querySelector(".journalinator-new")?.addEventListener("click", () => {
@@ -652,7 +683,9 @@ export default class JournalApp extends ApplicationV2 {
     });
 
     root.querySelector(".journalinator-private-admin")?.addEventListener("click", () => openPrivateAdmin());
-    root.querySelector(".jn-workspace-name")?.addEventListener("click", async () => {
+    root.querySelector(".jn-view-rename")?.addEventListener("click", async event => {
+      event.stopPropagation();
+      event.currentTarget.closest("details")?.removeAttribute("open");
       const page = privateStore.findActive(game.user.id);
       if (!page) return;
       const name = await foundry.applications.api.DialogV2.prompt({
@@ -689,6 +722,10 @@ export default class JournalApp extends ApplicationV2 {
       const { x, y } = this.#canvas.newCardPosition(0, 0);
       gm(() => secrets.addHiddenLabel(x, y));
     });
+    root.querySelector(".journalinator-private-stats")?.addEventListener("click", () => {
+      this.#private.openStats();
+    });
+
     root.querySelector(".journalinator-stats")?.addEventListener("click", () => this.#openStats());
 
     root.querySelectorAll(".journalinator-filters input").forEach(input => {
