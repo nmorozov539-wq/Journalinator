@@ -1,4 +1,5 @@
 import { getContainerIds } from "./store/containers.mjs";
+import { privateStore } from "./store/private-store.mjs";
 import { CARD_STYLES, seedTilt } from "./styles/registry.mjs";
 import { cardPorts, linkAnchors, moveThreadPin, validCardPorts } from "./card-ports.mjs";
 import { noteImageSource, noteImageUrl } from "./image-url.mjs";
@@ -349,6 +350,58 @@ async function handleMessage(message, senderUserId) {
         title: message.title, kind: message.kind, style: message.style, x: message.x, y: message.y,
         authorId: senderUserId, autoTitle: message.autoTitle === true
       });
+      return;
+    }
+
+    case "privateCreate": {
+      const user = game.users.get(senderUserId);
+      if (!user) return;
+      try {
+        await privateStore.createFor(user);
+      } catch (err) {
+        notifyUser(senderUserId, err.message);
+      }
+      return;
+    }
+
+    case "privateAccept": {
+      const page = privateStore.findPending(senderUserId);
+      if (!page) return;
+      try {
+        await privateStore.accept(page, senderUserId);
+      } catch (err) {
+        notifyUser(senderUserId, err.message);
+      }
+      return;
+    }
+
+    case "privateDecline": {
+      const page = privateStore.findPending(senderUserId);
+      if (!page) return;
+      try {
+        await privateStore.decline(page, senderUserId);
+      } catch (err) {
+        notifyUser(senderUserId, err.message);
+      }
+      return;
+    }
+
+    case "privatePublish": {
+      const title = typeof message.title === "string" ? message.title.trim() : "";
+      if (!title || title.length > MAX_TITLE_LENGTH) {
+        notifyUser(senderUserId, title ? t("JN.Socket.TitleTooLong", { max: MAX_TITLE_LENGTH }) : t("JN.Socket.TitleEmpty"));
+        return;
+      }
+      const texts = Array.isArray(message.blocks) ? message.blocks.slice(0, MAX_DECLASSIFIED_BLOCKS) : [];
+      if (texts.some(text => typeof text !== "string" || text.length > MAX_BLOCK_LENGTH)) return;
+      const page = await createNotePage(shared, {
+        title, kind: "note", style: "sticky", x: message.x, y: message.y, authorId: senderUserId
+      });
+      if (!page) return;
+      const blocks = texts.length
+        ? texts.map(text => ({ blockId: foundry.utils.randomID(), text, authorId: senderUserId }))
+        : [{ blockId: foundry.utils.randomID(), text: "", authorId: senderUserId }];
+      await page.update({ "system.blocks": blocks, "system.updatedAt": Date.now() });
       return;
     }
 

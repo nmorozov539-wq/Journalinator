@@ -45,6 +45,48 @@
   max-width: 150px;
   overflow: hidden;
 }
+.jn-view-switch {
+  flex: none;
+  max-width: 130px;
+  height: 30px;
+  box-sizing: border-box;
+  padding: 2px 6px;
+  border: 1px solid var(--jn-line);
+  border-radius: 6px;
+  background: var(--jn-bg);
+  color: var(--jn-text);
+  font-size: 12px;
+}
+.journalinator-root.jn-private-view .jn-view-switch {
+  border-color: var(--jn-gm);
+  color: var(--jn-gm);
+}
+.jn-workspace-name {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 1 auto;
+  min-width: 120px;
+  max-width: 240px;
+  height: 30px;
+  padding: 0 9px;
+  overflow: hidden;
+  white-space: nowrap;
+  border: 1px solid var(--jn-line);
+  border-radius: 6px;
+  background: var(--jn-bg);
+  color: var(--jn-text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.jn-workspace-name .jn-workspace-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.jn-workspace-name i { color: var(--jn-gm); }
+.jn-workspace-name:hover { border-color: var(--jn-gm); }
 
 .jn-toolbar-dropdown {
   flex: none;
@@ -324,6 +366,116 @@
   min-width: 0;
   position: relative;
   overflow: hidden;
+}
+
+/* --- Private workspace --- */
+
+.jn-private-body {
+  background: var(--jn-bg);
+}
+.jn-private-gate-wrap {
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.jn-private-gate {
+  width: min(460px, 92%);
+  box-sizing: border-box;
+  padding: 22px 24px;
+  border: 1px solid var(--jn-gm);
+  border-radius: 10px;
+  background: var(--jn-panel);
+  text-align: center;
+}
+.jn-private-gate h3 {
+  margin: 0 0 8px;
+  color: var(--jn-gm);
+  font-size: 18px;
+}
+.jn-private-gate p {
+  margin: 0 0 16px;
+  color: var(--jn-text);
+  font-size: 13px;
+}
+.jn-private-gate-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+}
+.jn-private-gate button,
+.jn-private-admin-create {
+  padding: 6px 12px;
+  border: 1px solid var(--jn-line);
+  border-radius: 6px;
+  background: var(--jn-bg);
+  color: var(--jn-text);
+  cursor: pointer;
+}
+.jn-private-gate button:hover,
+.jn-private-admin-create:hover {
+  border-color: var(--jn-gm);
+  color: var(--jn-gm);
+}
+.jn-private-gate button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.jn-private-admin-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 55vh;
+  overflow: auto;
+  margin: 10px 0;
+}
+.jn-private-admin-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--jn-line);
+  border-radius: 6px;
+  background: var(--jn-bg);
+}
+.jn-private-admin-name {
+  flex: 1;
+  min-width: 120px;
+  font-weight: 600;
+}
+.jn-private-admin-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.jn-private-admin-actions button {
+  padding: 2px 6px;
+  border: 1px solid var(--jn-line);
+  border-radius: 4px;
+  background: var(--jn-panel);
+  color: var(--jn-text);
+  font-size: 11px;
+  cursor: pointer;
+}
+.jn-private-admin-actions button:hover {
+  border-color: var(--jn-gm);
+  color: var(--jn-gm);
+}
+.jn-note-action {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--jn-line);
+  border-radius: 6px;
+  background: var(--jn-bg);
+  color: var(--jn-text);
+  cursor: pointer;
+}
+.jn-note-action:hover {
+  border-color: var(--jn-acc);
+  color: var(--jn-acc);
 }
 
 /* --- Canvas --- */

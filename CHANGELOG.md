@@ -2,7 +2,19 @@
 
 These notes start with the small board and toolbar polish patches and cover the follow-up fixes and features.
 
-## Board and toolbar
+## 0.8.0 — Private canvases
+
+- Every player profile gets a **Private canvas** next to the main board. Private notes, cards,
+  search, and trash stay out of the shared canvas.
+- Private journals can be renamed. Players get their own; the GM can create, detach, assign,
+  archive, or delete them from a name-only management list.
+- If a player is deleted or recreated, their old private journal is kept and can be reassigned.
+  The receiving player must accept the offer first.
+- A private note can be published to the shared board as a new copy. Only the title and text are
+  copied; links, images, styles, and layout stay private.
+- Private workspaces are UI-private, not encrypted.
+
+## UI polish and fixes
 
 - Card images are smaller and have rounded corners, so they take up less room on the board.
 - The little pencil badge that shows someone is editing a note now sits in the top-right corner and no longer jumps when you hover.

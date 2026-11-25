@@ -1,9 +1,9 @@
 # Journalinator — Handoff Notes
 
-Status: pre-alpha, v0.3.0. Phases 1–8 of the spec are implemented. Phase 8 (GM tier) is built
-and covered by Node tests against a fake Foundry, but has **not yet been exercised in a real
-Foundry session** (see section 6). This file records the current architecture, the bugs found
-during review, and the GM-side design.
+Status: pre-alpha, v0.8.0. Phases 1–8 of the spec are implemented, plus per-profile private canvases.
+Phase 8 (GM tier) is built and covered by Node tests against a fake Foundry, but has **not yet been
+exercised in a real Foundry session** (see section 6). This file records the current architecture,
+the bugs found during review, and the GM-side design.
 
 ---
 
@@ -18,6 +18,8 @@ during review, and the GM-side design.
 | Fullscreen app shell, top bar, switcher, trash, stats UI | `scripts/app/journal-app.mjs` |
 | Canvas, cards, labels, links, pan/zoom | `scripts/app/canvas.mjs` |
 | Block editor, locks, split/merge, drafts | `scripts/app/editor.mjs` |
+| Private canvas, editor, publish flow | `scripts/app/private-workspace.mjs`, `scripts/app/private-editor.mjs` |
+| Private workspace store and GM admin | `scripts/store/private-store.mjs`, `scripts/app/private-admin.mjs` |
 | Markdown rendering and task toggles | `scripts/markdown.mjs` |
 | Markdown closing-pair helpers | `scripts/markdown-edit.mjs` |
 | Socket protocol, GM write path, typed links, trash | `scripts/socket.mjs` |

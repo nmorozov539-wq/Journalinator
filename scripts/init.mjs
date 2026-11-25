@@ -2,12 +2,14 @@ import NoteModel from "./data/note-model.mjs";
 import LayoutModel from "./data/layout-model.mjs";
 import StatsModel from "./data/stats-model.mjs";
 import HistoryModel from "./data/history-model.mjs";
+import PrivateWorkspaceModel from "./data/private-model.mjs";
 import { registerContainerSettings, ensureContainers, registerSidebarHiding } from "./store/containers.mjs";
 import { registerSocket } from "./socket.mjs";
 import { startExpirySweep, startLockResync } from "./locks.mjs";
 import JournalApp from "./app/journal-app.mjs";
 import { registerGmTierSettings } from "./secrets/access.mjs";
 import { vaultStore } from "./secrets/vault-store.mjs";
+import { privateStore } from "./store/private-store.mjs";
 import { t } from "./i18n.mjs";
 
 const MODULE_ID = "fvtt-journalinator";
@@ -17,7 +19,8 @@ Hooks.once("init", () => {
     [`${MODULE_ID}.note`]: NoteModel,
     [`${MODULE_ID}.layout`]: LayoutModel,
     [`${MODULE_ID}.stats`]: StatsModel,
-    [`${MODULE_ID}.history`]: HistoryModel
+    [`${MODULE_ID}.history`]: HistoryModel,
+    [`${MODULE_ID}.private`]: PrivateWorkspaceModel
   });
   registerContainerSettings();
   registerGmTierSettings();
@@ -29,10 +32,15 @@ Hooks.once("init", () => {
 
 Hooks.once("ready", async () => {
   await ensureContainers();
+  if (game.user.isGM) await privateStore.orphanMissingUsers();
   registerSocket();
   startExpirySweep();
   startLockResync();
   await vaultStore.init();
+  Hooks.on("deleteUser", user => {
+    if (!game.user.isGM) return;
+    privateStore.orphanUser(user.id).catch(err => console.error("Journalinator: private workspace orphan failed", err));
+  });
 });
 
 Hooks.on("getSceneControlButtons", controls => {

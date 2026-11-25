@@ -41,6 +41,7 @@ const { vaultStore } = await import(`${JN}/scripts/secrets/vault-store.mjs`);
 const { notesStore } = await import(`${JN}/scripts/store/notes-store.mjs`);
 const secrets = await import(`${JN}/scripts/secrets/secret-actions.mjs`);
 const { registerSocket, requestWrite } = await import(`${JN}/scripts/socket.mjs`);
+const { privateStore } = await import(`${JN}/scripts/store/private-store.mjs`);
 const { default: NoteEditor } = await import(`${JN}/scripts/app/editor.mjs`);
 const { default: JournalCanvas } = await import(`${JN}/scripts/app/canvas.mjs`);
 const { default: JournalApp, isTextEntryTarget } = await import(`${JN}/scripts/app/journal-app.mjs`);
@@ -916,6 +917,68 @@ test("canvas cards render Markdown and forward task checkboxes", () => {
   } finally {
     canvas.disconnectGeometry();
     canvas.root.remove();
+  }
+});
+
+test("private canvas is separate and publishes title and text only", async () => {
+  const privatePage = await privateStore.createFor(gmUser);
+  assert.ok(privatePage);
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  try {
+    await redraw();
+    const select = host.querySelector(".jn-view-switch");
+    select.value = "private";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await redraw();
+    assert.ok(host.querySelector(".jn-private-view"));
+    assert.ok(host.querySelector(".jn-workspace-name").textContent.includes(privatePage.name));
+    assert.equal(host.querySelector(".journalinator-filters"), null);
+    assert.ok(host.querySelector(".journalinator-private-new"));
+
+    host.querySelector(".journalinator-private-new").click();
+    await settle();
+    await redraw();
+    const workspace = privateStore.read(privateStore.findActive(gmUser.id));
+    const privateNote = Object.values(workspace.notes)[0];
+    assert.ok(privateNote, "private note created");
+    assert.equal(sharedByName(privateNote.title), undefined, "private note was not published to the shared canvas");
+
+    const card = host.querySelector(`.jn-card[data-id="${privateNote.id}"]`);
+    assert.ok(card);
+    const block = card.querySelector(".jn-card-block");
+    block.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 0, clientY: 0 }));
+    block.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 0, clientY: 0 }));
+    const textarea = card.querySelector(".jn-block-input");
+    textarea.value = "- [ ] Private task";
+    textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }));
+    await settle();
+    await redraw();
+    assert.equal(privateStore.read(privateStore.findActive(gmUser.id)).notes[privateNote.id].blocks[0].text, "- [ ] Private task");
+    const task = host.querySelector(`.jn-card[data-id="${privateNote.id}"] input.jn-task-checkbox`);
+    assert.ok(task, "private task checkbox rendered");
+    task.click();
+    await settle();
+    await redraw();
+    assert.equal(privateStore.read(privateStore.findActive(gmUser.id)).notes[privateNote.id].blocks[0].text, "- [x] Private task");
+
+    answers.push("Published private note");
+    host.querySelector(".jn-private-publish").click();
+    await settle();
+    const published = sharedByName("Published private note");
+    assert.ok(published, "publish created a shared note");
+    assert.deepEqual(published.system.blocks.map(block => block.text), ["- [x] Private task"]);
+    assert.equal(published.system.links.length, 0, "publishing copies no links");
+    assert.ok(privateStore.findActive(gmUser.id), "private copy remains");
+  } finally {
+    app._onClose();
+    host.remove();
   }
 });
 

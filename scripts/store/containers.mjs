@@ -6,7 +6,8 @@ const SETTING_KEY = "containerIds";
 const CONTAINERS = {
   shared: { nameKey: "JN.Container.Shared", ownership: "OBSERVER" },
   history: { nameKey: "JN.Container.History", ownership: "NONE" },
-  secrets: { nameKey: "JN.Container.Secrets", ownership: "NONE" }
+  secrets: { nameKey: "JN.Container.Secrets", ownership: "NONE" },
+  private: { nameKey: "JN.Container.Private", ownership: "NONE" }
 };
 
 const PAGES = {
@@ -44,9 +45,13 @@ export async function ensureContainers() {
   const shared = await ensureContainer("shared", ids.shared);
   const history = await ensureContainer("history", ids.history);
   const secrets = await ensureContainer("secrets", ids.secrets);
-  const entries = { shared, history, secrets };
+  const privateJournal = await ensureContainer("private", ids.private);
+  const entries = { shared, history, secrets, private: privateJournal };
 
-  const next = { ...ids, shared: shared.id, history: history.id, secrets: secrets.id };
+  const next = {
+    ...ids,
+    shared: shared.id, history: history.id, secrets: secrets.id, private: privateJournal.id
+  };
   for (const [key, page] of Object.entries(PAGES)) {
     next[key] = await ensurePage(entries[page.entry], ids[key], page.name, page.type);
   }
@@ -93,7 +98,7 @@ export function registerSidebarHiding() {
     const el = element instanceof HTMLElement ? element : element[0];
     const ids = getContainerIds();
     if (!ids) return;
-    const hidden = new Set([ids.shared, ids.history, ids.secrets]);
+    const hidden = new Set([ids.shared, ids.history, ids.secrets, ids.private]);
     for (const id of hidden) {
       el.querySelector(`li[data-entry-id="${id}"]`)?.remove();
     }

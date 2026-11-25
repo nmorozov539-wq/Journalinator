@@ -1,8 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { JSDOM } from "jsdom";
-import showdown from "showdown";
 
+let JSDOM = null;
+let showdown = null;
+try {
+  ({ JSDOM } = await import("jsdom"));
+  showdown = (await import("showdown")).default;
+} catch {
+  // Bare checkout without npm install: skip the dependency-backed renderer tests.
+}
+
+if (!JSDOM || !showdown) {
+  test("Markdown tests (run `npm install` to enable)", { skip: true }, () => {});
+} else {
 const dom = new JSDOM("<!doctype html><body></body>");
 globalThis.document = dom.window.document;
 globalThis.showdown = showdown;
@@ -136,3 +146,4 @@ test("missing Showdown falls back to escaped text instead of dropping the block"
     globalThis.showdown = saved;
   }
 });
+}

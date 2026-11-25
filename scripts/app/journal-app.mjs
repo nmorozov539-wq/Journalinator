@@ -2,6 +2,9 @@ import { notesStore } from "../store/notes-store.mjs";
 import { requestWrite } from "../socket.mjs";
 import JournalCanvas from "./canvas.mjs";
 import NoteEditor from "./editor.mjs";
+import PrivateWorkspace from "./private-workspace.mjs";
+import { openPrivateAdmin } from "./private-admin.mjs";
+import { privateStore } from "../store/private-store.mjs";
 import { defaultNoteTitle, promptNewNote } from "./note-dialog.mjs";
 import { computeJournalStats, deriveSessions } from "../stats.mjs";
 import { CARD_STYLES, cardStyleKey } from "../styles/registry.mjs";
@@ -60,6 +63,7 @@ export default class JournalApp extends ApplicationV2 {
     position: { width: 1200, height: 750 }
   };
 
+  #view = "shared";
   #selectedNoteId = null;
   #query = "";
   #filterAuthors = new Set();
@@ -69,6 +73,7 @@ export default class JournalApp extends ApplicationV2 {
   #hookIds = [];
   #onGlobalKeydown = null;
   #onToolbarPointerDown = null;
+  #toolbarPointerTarget = null;
   #focusedCanvasRenders = new WeakSet();
   #deletionHistory = [];
   #replacingHTML = false;
@@ -154,6 +159,8 @@ export default class JournalApp extends ApplicationV2 {
     onToggleLinkHint: (noteId, linkId, hint) => requestWrite({ type: "gmSetLinkHint", noteId, linkId, hint })
   });
 
+  #private = new PrivateWorkspace({ onChange: () => this.render() });
+
   #select(noteId) {
     if (!noteId) return;
     this.#selectedNoteId = noteId;
@@ -200,12 +207,27 @@ export default class JournalApp extends ApplicationV2 {
       }
 
       if (ev.defaultPrevented || ev.isComposing || isTextEntryTarget(ev.target)) return;
-      if (!this.#canvas.root.contains(ev.target) || !game.users.activeGM) return;
-
       const consume = () => {
         ev.preventDefault();
         ev.stopImmediatePropagation();
       };
+
+      if (this.#view === "private") {
+        if (!this.#private.canvas.root.contains(ev.target)) return;
+        if (ev.key === "Backspace" && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey) {
+          consume();
+          if (!ev.repeat) this.#private.deleteSelected();
+          return;
+        }
+        if ((ev.ctrlKey || ev.metaKey) && !ev.shiftKey && !ev.altKey
+            && (ev.code === "KeyZ" || ev.key.toLowerCase() === "z")) {
+          consume();
+          if (!ev.repeat) this.#private.undo();
+        }
+        return;
+      }
+
+      if (!this.#canvas.root.contains(ev.target) || !game.users.activeGM) return;
 
       if (ev.key === "Backspace" && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey) {
         consume();
@@ -245,13 +267,17 @@ export default class JournalApp extends ApplicationV2 {
     this.#editor.deactivate();
     this.#canvas.cancelLinkTool();
     this.#canvas.disconnectGeometry();
+    this.#private.destroy();
     this.#switcherOpen = false;
     for (const [hook, id] of this.#hookIds) Hooks.off(hook, id);
     this.#hookIds = [];
     if (this.#onGlobalKeydown) removeEventListener("keydown", this.#onGlobalKeydown, true);
     this.#onGlobalKeydown = null;
-    if (this.#onToolbarPointerDown) this.element.removeEventListener("pointerdown", this.#onToolbarPointerDown);
+    if (this.#onToolbarPointerDown && this.#toolbarPointerTarget) {
+      this.#toolbarPointerTarget.removeEventListener("pointerdown", this.#onToolbarPointerDown);
+    }
     this.#onToolbarPointerDown = null;
+    this.#toolbarPointerTarget = null;
   }
 
   #matchesQuery(note, q) {
@@ -262,19 +288,40 @@ export default class JournalApp extends ApplicationV2 {
   }
 
   #matchesFilters(note) {
+    if (this.#view === "private") return true;
     if (this.#filterAuthors.size && !this.#filterAuthors.has(note.system.authorId)) return false;
     if (this.#filterStyles.size && !this.#filterStyles.has(cardStyleKey(note.system.style))) return false;
     return true;
   }
 
+  #activeNotes() {
+    if (this.#view === "private") {
+      const page = privateStore.findActive(game.user.id);
+      return page ? privateStore.noteViews(page) : [];
+    }
+    return notesStore.getAllNotes();
+  }
+
   async _prepareContext() {
-    const notes = notesStore.getAllNotes();
+    const view = this.#view;
+    const isPrivate = view === "private";
+    const privatePage = isPrivate ? privateStore.findActive(game.user.id) : null;
+    const pendingPage = isPrivate ? privateStore.findPending(game.user.id) : null;
+    const privateData = privatePage ? privateStore.read(privatePage) : null;
+    const notes = isPrivate && privateData
+      ? privateStore.noteViews(privatePage, privateData)
+      : notesStore.getAllNotes();
     const q = this.#query.trim().toLowerCase();
-    const authors = [...new Map(notes.map(n => [n.system.authorId, game.users.get(n.system.authorId)])).entries()]
+    const authors = isPrivate ? [] : [...new Map(notes.map(n => [n.system.authorId, game.users.get(n.system.authorId)])).entries()]
       .filter(([, u]) => u);
     return {
+      view,
       allNotes: notes,
-      layout: notesStore.getLayout(),
+      layout: isPrivate && privateData ? privateData.layout : notesStore.getLayout(),
+      privatePage,
+      pendingPage,
+      privateName: privatePage?.name ?? pendingPage?.name ?? "",
+      canManagePrivate: game.user.isGM,
       gmOnline: !!game.users.activeGM,
       gmTier: canUseGmTier(),
       vaultStatus: vaultStore.status,
@@ -287,29 +334,30 @@ export default class JournalApp extends ApplicationV2 {
 
   async _renderHTML(context) {
     const root = document.createElement("div");
-    root.className = `journalinator-root${context.merged ? " jn-gm-view" : ""}`;
+    const privateView = context.view === "private";
+    root.className = `journalinator-root${context.merged ? " jn-gm-view" : ""}${privateView ? " jn-private-view" : ""}`;
     root.dataset.theme = context.theme;
     const escape = foundry.utils.escapeHTML;
     const offline = !context.gmOnline;
+    const privatePage = context.privatePage;
     const filters = (items, selected, kind) => items.map(([id, label, color]) =>
       `<label class="jn-menu-option"><input type="checkbox" data-kind="${kind}" value="${escape(id)}"
         ${selected.has(id) ? "checked" : ""}>${color ? `<span class="jn-dot" style="background:${escape(String(color))}"></span>` : ""}
         <span>${escape(label)}</span></label>`).join("");
-    root.innerHTML = `
-      <header class="journalinator-topbar">
-        <b class="jn-current-user"><span class="jn-dot" style="background:${escape(String(game.user.color ?? "#8d8d97"))}"></span>${escape(game.user.name)}</b>
-        <div class="journalinator-search-wrap">
-          <input type="text" inputmode="search" autocomplete="off" class="journalinator-search"
-            aria-label="${t("JN.TopBar.Search")}" placeholder="${t("JN.TopBar.Search")}" value="${foundry.utils.escapeHTML(this.#query)}">
-          <div class="jn-switcher"></div>
-        </div>
-        <div class="jn-toolbar-tools">
-          <div class="jn-toolbar-group">
+    const themePicker = `<details class="jn-toolbar-dropdown journalinator-theme">
+      <summary class="jn-toolbar-icon" ${tooltipAttrs(t("JN.Theme.Picker"))}><i class="fa-solid fa-palette" aria-hidden="true"></i></summary>
+      <div class="jn-toolbar-panel">
+        <button type="button" data-theme-choice="classic" aria-pressed="${context.theme === "classic"}">${t("JN.Theme.Classic")}</button>
+        <button type="button" data-theme-choice="fantasy" aria-pressed="${context.theme === "fantasy"}">${t("JN.Theme.Fantasy")}</button>
+      </div>
+    </details>`;
+    const sharedToolbar = `
+      <div class="jn-toolbar-group">
         ${toolbarButton("journalinator-new", "fa-note-sticky", t("JN.TopBar.NewNote"), offline)}
         ${toolbarButton("journalinator-add-label", "fa-font", t("JN.TopBar.AddLabel"), offline)}
         ${toolbarButton("journalinator-add-link", "fa-link", t("JN.Link.Tool"), offline)}
-          </div>
-          <div class="jn-toolbar-group">
+      </div>
+      <div class="jn-toolbar-group">
         <details class="jn-toolbar-dropdown journalinator-filters${this.#filterAuthors.size || this.#filterStyles.size ? " on" : ""}">
           <summary class="jn-toolbar-icon" ${tooltipAttrs(t("JN.Filter.Title"))}><i class="fa-solid fa-filter" aria-hidden="true"></i></summary>
           <div class="jn-toolbar-panel">
@@ -319,27 +367,59 @@ export default class JournalApp extends ApplicationV2 {
             ${filters(Object.entries(CARD_STYLES).map(([id, style]) => [id, t(style.labelKey)]), this.#filterStyles, "style")}
           </div>
         </details>
-        <details class="jn-toolbar-dropdown journalinator-theme">
-          <summary class="jn-toolbar-icon" ${tooltipAttrs(t("JN.Theme.Picker"))}><i class="fa-solid fa-palette" aria-hidden="true"></i></summary>
-          <div class="jn-toolbar-panel">
-            <button type="button" data-theme-choice="classic" aria-pressed="${context.theme === "classic"}">${t("JN.Theme.Classic")}</button>
-            <button type="button" data-theme-choice="fantasy" aria-pressed="${context.theme === "fantasy"}">${t("JN.Theme.Fantasy")}</button>
-          </div>
-        </details>
-          </div>
-          <div class="jn-toolbar-group">
+        ${themePicker}
+      </div>
+      <div class="jn-toolbar-group">
         ${toolbarButton("journalinator-trash", "fa-trash", t("JN.TopBar.Trash"))}
         ${toolbarButton("journalinator-stats", "fa-chart-column", t("JN.TopBar.Stats"))}
-          </div>
+      </div>`;
+    const privateToolbar = `
+      <div class="jn-toolbar-group">
+        ${privatePage ? `<button type="button" class="jn-workspace-name" title="${t("JN.Private.RenameWorkspace")}">
+          <i class="fa-solid fa-lock" aria-hidden="true"></i><span class="jn-workspace-title">${escape(privatePage.name)}</span></button>` : ""}
+        ${privatePage ? toolbarButton("journalinator-private-new", "fa-note-sticky", t("JN.TopBar.NewNote")) : ""}
+      </div>
+      <div class="jn-toolbar-group">${themePicker}</div>
+      <div class="jn-toolbar-group">
+        ${privatePage ? toolbarButton("journalinator-trash", "fa-trash", t("JN.TopBar.Trash")) : ""}
+        ${context.canManagePrivate ? `<button type="button" class="jn-toolbar-icon journalinator-private-admin"
+          ${tooltipAttrs(t("JN.Private.AdminTitle"))}><i class="fa-solid fa-user-shield" aria-hidden="true"></i></button>` : ""}
+      </div>`;
+    root.innerHTML = `
+      <header class="journalinator-topbar">
+        <b class="jn-current-user"><span class="jn-dot" style="background:${escape(String(game.user.color ?? "#8d8d97"))}"></span>${escape(game.user.name)}</b>
+        <select class="jn-view-switch" aria-label="${t("JN.Private.ViewSwitch")}">
+          <option value="shared" ${privateView ? "" : "selected"}>${t("JN.Private.MainCanvas")}</option>
+          <option value="private" ${privateView ? "selected" : ""}>${t("JN.Private.PrivateCanvas")}</option>
+        </select>
+        <div class="journalinator-search-wrap">
+          <input type="text" inputmode="search" autocomplete="off" class="journalinator-search"
+            aria-label="${t(privateView ? "JN.Private.Search" : "JN.TopBar.Search")}"
+            placeholder="${t(privateView ? "JN.Private.Search" : "JN.TopBar.Search")}" value="${foundry.utils.escapeHTML(this.#query)}">
+          <div class="jn-switcher"></div>
         </div>
-        ${context.gmTier ? this.#gmControlsHTML(context) : ""}
+        <div class="jn-toolbar-tools">
+          ${privateView ? privateToolbar : sharedToolbar}
+        </div>
+        ${!privateView && context.gmTier ? this.#gmControlsHTML(context) : ""}
       </header>
-      ${!context.gmOnline ? `<div class="journalinator-offline-banner">${t("JN.TopBar.Offline")}</div>` : ""}
-      <div class="journalinator-body">
+      ${!privateView && !context.gmOnline ? `<div class="journalinator-offline-banner">${t("JN.TopBar.Offline")}</div>` : ""}
+      ${privateView ? this.#privateBodyHTML(context) : `<div class="journalinator-body">
         <div class="journalinator-canvas-slot"></div>
         <aside class="journalinator-editor"></aside>
-      </div>
+      </div>`}
     `;
+
+    if (privateView) {
+      this.#private.setPage(privatePage);
+      if (privatePage) {
+        this.#private.renderInto(root.querySelector(".journalinator-canvas-slot"), root.querySelector(".journalinator-editor"));
+        this.#private.setDimMatch(note => this.#matchesQuery(note, context.query) && this.#matchesFilters(note));
+        if (document.activeElement === this.#private.canvas.root) this.#focusedCanvasRenders.add(root);
+      }
+      if (this.#switcherOpen) this.#renderSwitcher(root, context.allNotes);
+      return root;
+    }
 
     // Moving the canvas into the detached render result blurs it, even though we reuse the node.
     if (document.activeElement === this.#canvas.root) this.#focusedCanvasRenders.add(root);
@@ -363,6 +443,38 @@ export default class JournalApp extends ApplicationV2 {
     return root;
   }
 
+  #privateBodyHTML(context) {
+    if (context.privatePage) {
+      return `<div class="journalinator-body jn-private-body">
+        <div class="journalinator-canvas-slot"></div>
+        <aside class="journalinator-editor"></aside>
+      </div>`;
+    }
+    if (context.pendingPage) {
+      const disabled = context.gmOnline ? "" : " disabled";
+      return `<div class="journalinator-body jn-private-gate-wrap">
+        <div class="jn-private-gate">
+          <h3>${t("JN.Private.PendingTitle")}</h3>
+          <p>${t("JN.Private.PendingBody", { name: foundry.utils.escapeHTML(context.pendingPage.name) })}</p>
+          <div class="jn-private-gate-actions">
+            <button type="button" class="jn-private-accept"${disabled}>${t("JN.Private.Accept")}</button>
+            <button type="button" class="jn-private-decline"${disabled}>${t("JN.Private.Decline")}</button>
+          </div>
+        </div>
+      </div>`;
+    }
+    const disabled = context.gmOnline ? "" : " disabled";
+    return `<div class="journalinator-body jn-private-gate-wrap">
+      <div class="jn-private-gate">
+        <h3>${t("JN.Private.NoWorkspaceTitle")}</h3>
+        <p>${context.gmOnline ? t("JN.Private.NoWorkspaceBody") : t("JN.Private.NeedGM")}</p>
+        <div class="jn-private-gate-actions">
+          <button type="button" class="jn-private-create"${disabled}>${t("JN.Private.Create")}</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
   _replaceHTML(result, content) {
     const oldSearch = content.querySelector(".journalinator-search");
     const restoreSearch = oldSearch && oldSearch === document.activeElement;
@@ -372,7 +484,8 @@ export default class JournalApp extends ApplicationV2 {
     } finally {
       this.#replacingHTML = false;
     }
-    this.#canvas.refreshGeometry();
+    if (this.#view === "private" && this.#private.page) this.#private.canvas.refreshGeometry();
+    else this.#canvas.refreshGeometry();
     if (restoreSearch) {
       const search = result.querySelector(".journalinator-search");
       search.focus({ preventScroll: true });
@@ -382,7 +495,8 @@ export default class JournalApp extends ApplicationV2 {
     const editorInput = result.querySelector(".jn-card-text-input, .jn-block-input");
     if (editorInput) editorInput.focus({ preventScroll: true });
     else if (this.#focusedCanvasRenders.has(result) && document.activeElement === document.body) {
-      this.#canvas.root.focus({ preventScroll: true });
+      const canvasRoot = this.#view === "private" ? this.#private.canvas.root : this.#canvas.root;
+      canvasRoot.focus({ preventScroll: true });
     }
   }
 
@@ -392,10 +506,11 @@ export default class JournalApp extends ApplicationV2 {
     // queries live dropdown nodes instead of closing over the ones from a particular render.
     if (!this.#onToolbarPointerDown) {
       this.#onToolbarPointerDown = ev => {
-        for (const dropdown of this.element.querySelectorAll(".jn-toolbar-dropdown")) {
+        for (const dropdown of this.#toolbarPointerTarget?.querySelectorAll(".jn-toolbar-dropdown") ?? []) {
           if (!dropdown.contains(ev.target)) dropdown.open = false;
         }
       };
+      this.#toolbarPointerTarget = root;
       root.addEventListener("pointerdown", this.#onToolbarPointerDown);
     }
     const dropdowns = [...root.querySelectorAll(".jn-toolbar-dropdown")];
@@ -428,12 +543,12 @@ export default class JournalApp extends ApplicationV2 {
       this.#query = ev.target.value;
       this.#switcherOpen = true;
       this.#switcherHighlight = 0;
-      this.#renderSwitcher(root, notesStore.getAllNotes());
+      this.#renderSwitcher(root, this.#activeNotes());
       this.#filterCanvasForSearch();
     });
     search?.addEventListener("focus", () => {
       this.#switcherOpen = true;
-      this.#renderSwitcher(root, notesStore.getAllNotes());
+      this.#renderSwitcher(root, this.#activeNotes());
     });
     search?.addEventListener("blur", () => {
       if (this.#replacingHTML || !search.isConnected) return;
@@ -441,6 +556,24 @@ export default class JournalApp extends ApplicationV2 {
       root.querySelector(".jn-switcher").style.display = "none";
     });
     search?.addEventListener("keydown", ev => this.#onSearchKeydown(ev));
+
+    root.querySelector(".jn-view-switch")?.addEventListener("change", event => {
+      const next = event.target.value === "private" ? "private" : "shared";
+      if (next === this.#view) return;
+      if (this.#view === "shared") this.#editor.suspend();
+      else this.#private.editor.close();
+      this.#view = next;
+      this.#query = "";
+      this.#switcherOpen = false;
+      this.#switcherHighlight = 0;
+      this.#canvas.cancelLinkTool();
+      this.#private.canvas.cancelLinkTool();
+      this.render();
+    });
+
+    root.querySelector(".journalinator-private-new")?.addEventListener("click", () => {
+      this.#private.createNoteAt({ ...this.#private.canvas.newCardPosition(), title: t("JN.Private.NewNoteTitle") });
+    });
 
     root.querySelector(".journalinator-new")?.addEventListener("click", () => {
       this.#createNoteAt(this.#canvas.newCardPosition());
@@ -451,7 +584,37 @@ export default class JournalApp extends ApplicationV2 {
     });
     root.querySelector(".journalinator-add-link")?.addEventListener("click", () => this.#canvas.toggleLinkTool());
 
-    root.querySelector(".journalinator-trash")?.addEventListener("click", () => this.#openTrash());
+    root.querySelector(".journalinator-trash")?.addEventListener("click", () => {
+      if (this.#view === "private") this.#private.openTrash();
+      else this.#openTrash();
+    });
+
+    root.querySelector(".journalinator-private-admin")?.addEventListener("click", () => openPrivateAdmin());
+    root.querySelector(".jn-workspace-name")?.addEventListener("click", async () => {
+      const page = privateStore.findActive(game.user.id);
+      if (!page) return;
+      const name = await foundry.applications.api.DialogV2.prompt({
+        window: { title: t("JN.Private.RenameWorkspace") },
+        content: `<input type="text" name="value" autofocus value="${foundry.utils.escapeHTML(page.name)}" maxlength="100">`,
+        ok: { label: t("JN.Common.Save"), callback: (event, button) => button.form.elements.value.value.trim() },
+        rejectClose: false
+      });
+      if (!name) return;
+      try { await privateStore.rename(page, name); this.render(); }
+      catch (err) { ui.notifications?.warn(err.message); }
+    });
+    root.querySelector(".jn-private-create")?.addEventListener("click", () => {
+      if (!game.users.activeGM) return ui.notifications?.warn(t("JN.Private.NeedGM"));
+      requestWrite({ type: "privateCreate" });
+    });
+    root.querySelector(".jn-private-accept")?.addEventListener("click", () => {
+      if (!game.users.activeGM) return ui.notifications?.warn(t("JN.Private.NeedGM"));
+      requestWrite({ type: "privateAccept" });
+    });
+    root.querySelector(".jn-private-decline")?.addEventListener("click", () => {
+      if (!game.users.activeGM) return ui.notifications?.warn(t("JN.Private.NeedGM"));
+      requestWrite({ type: "privateDecline" });
+    });
 
     root.querySelector(".journalinator-vault")?.addEventListener("click", () => openVaultDialog());
     root.querySelector(".journalinator-view-toggle")?.addEventListener("click", () => {
@@ -473,7 +636,7 @@ export default class JournalApp extends ApplicationV2 {
         else set.delete(input.value);
         input.closest("details").classList.toggle("on", !!(this.#filterAuthors.size || this.#filterStyles.size));
         this.#filterCanvasForSearch();
-        if (this.#switcherOpen) this.#renderSwitcher(root, notesStore.getAllNotes());
+        if (this.#switcherOpen) this.#renderSwitcher(root, this.#activeNotes());
       });
     });
   }
@@ -487,13 +650,18 @@ export default class JournalApp extends ApplicationV2 {
 
   #filterCanvasForSearch() {
     const q = this.#query.trim().toLowerCase();
-    this.#canvas.setDimMatch(note => this.#matchesQuery(note, q) && this.#matchesFilters(note));
+    const match = note => this.#matchesQuery(note, q) && this.#matchesFilters(note);
+    if (this.#view === "private") this.#private.setDimMatch(match);
+    else this.#canvas.setDimMatch(match);
   }
 
   #renderSwitcher(root, allNotes) {
     const q = this.#query.trim();
     const list = this.#switcherList(allNotes);
-    const offerCreate = !!game.users.activeGM && q && !allNotes.some(n => n.name.toLowerCase() === q.toLowerCase());
+    const canCreate = this.#view === "private"
+      ? !!privateStore.findActive(game.user.id)
+      : !!game.users.activeGM;
+    const offerCreate = canCreate && q && !allNotes.some(n => n.name.toLowerCase() === q.toLowerCase());
     this.#switcherHighlight = Math.max(0, Math.min(this.#switcherHighlight, list.length - (offerCreate ? 0 : 1)));
 
     const el = root.querySelector(".jn-switcher");
@@ -518,11 +686,16 @@ export default class JournalApp extends ApplicationV2 {
 
   #selectFromSwitcher(noteId) {
     this.#clearSearch();
-    this.#canvas.focusNote(noteId);
+    if (this.#view === "private") this.#private.focusNote(noteId);
+    else this.#canvas.focusNote(noteId);
   }
 
   #createFromSwitcher(title) {
     this.#clearSearch();
+    if (this.#view === "private") {
+      this.#private.createNoteAt({ ...this.#private.canvas.newCardPosition(), title });
+      return;
+    }
     this.#createNoteAt({ ...this.#canvas.newCardPosition(), initialTitle: title });
   }
 
@@ -538,10 +711,13 @@ export default class JournalApp extends ApplicationV2 {
 
   #onSearchKeydown(ev) {
     if (!this.#switcherOpen || ev.isComposing) return;
-    const allNotes = notesStore.getAllNotes();
+    const allNotes = this.#activeNotes();
     const list = this.#switcherList(allNotes);
     const q = this.#query.trim();
-    const offerCreate = !!game.users.activeGM && q && !allNotes.some(n => n.name.toLowerCase() === q.toLowerCase());
+    const canCreate = this.#view === "private"
+      ? !!privateStore.findActive(game.user.id)
+      : !!game.users.activeGM;
+    const offerCreate = canCreate && q && !allNotes.some(n => n.name.toLowerCase() === q.toLowerCase());
     const count = list.length + (offerCreate ? 1 : 0);
 
     if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {

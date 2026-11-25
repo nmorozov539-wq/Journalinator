@@ -15,6 +15,7 @@ test("repairs missing layout and stats pages without replacing the containers", 
   assert.equal(ids.shared, containers.ids.shared);
   assert.equal(ids.history, containers.ids.history);
   assert.equal(ids.secrets, containers.ids.secrets);
+  assert.equal(ids.private, containers.ids.private);
   assert.notEqual(ids.layoutPage, containers.ids.layoutPage);
   assert.notEqual(ids.statsPage, containers.ids.statsPage);
   assert.equal(containers.shared.pages.get(ids.layoutPage).type, "fvtt-journalinator.layout");

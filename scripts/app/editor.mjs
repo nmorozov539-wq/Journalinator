@@ -71,6 +71,14 @@ export default class NoteEditor {
     addEventListener("pagehide", this.onPageHide);
   }
 
+  /** Saves an in-progress block when the view changes without tearing down the editor hooks. */
+  suspend() {
+    this.#stopEditing({ save: true });
+    this.#clearDraftTimer();
+    this.#releasePendingLocks();
+    this.#stopHeartbeat();
+  }
+
   /**
    * Saves any in-progress block, releases every lock this editor may hold or still be
    * requesting, stops the heartbeat, and unregisters the hook. Called when the app closes.

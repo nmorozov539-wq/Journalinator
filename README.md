@@ -19,6 +19,9 @@ See [CHANGELOG.md](CHANGELOG.md) for recent changes.
 ## Features
 
 - **One shared canvas.** Notes are cards; there is no separate drawer or unplaced state.
+- **Private canvas.** Each player profile gets an isolated personal workspace with its own board,
+  notes, search, trash, and layout. Private notes can be published to the shared board as a new
+  copy (title and text only).
 - **Obsidian-ish editing.** Click a paragraph to edit it; blank line + Enter splits, Backspace at
   the start merges. Unsaved text survives reloads as a local draft.
 - **Markdown.** Headings, emphasis, lists, task checkboxes, tables, quotes, code, and links render
@@ -150,6 +153,8 @@ language file there and register it in `module.json` to extend it.
 
 - Pre-alpha. The GM tier is covered by Node tests against a fake Foundry but has not been run in
   a real session yet.
+- Private workspaces are isolated by the interface and document ownership, not encryption. The
+  host and anyone using browser developer tools can read the underlying world data.
 - The editor panel is fixed-width; a fullscreen reading mode is not implemented yet.
 - The module stores notes as its own `JournalEntryPage` sub-types. Deactivating the module hides
   those pages until it is enabled again; the data is not lost.
@@ -173,6 +178,8 @@ Layout:
 | Fullscreen app shell, top bar, switcher, trash, stats | `scripts/app/journal-app.mjs` |
 | Canvas, cards, labels, links | `scripts/app/canvas.mjs` |
 | Block editor, locks, drafts | `scripts/app/editor.mjs` |
+| Private canvas and per-profile editor | `scripts/app/private-workspace.mjs`, `private-editor.mjs` |
+| Private workspace store and admin panel | `scripts/store/private-store.mjs`, `scripts/app/private-admin.mjs` |
 | Markdown rendering and task toggles | `scripts/markdown.mjs` |
 | Markdown typing helpers | `scripts/markdown-edit.mjs` |
 | Socket protocol, GM write path | `scripts/socket.mjs` |
@@ -182,11 +189,12 @@ Layout:
 | Localization | `scripts/i18n.mjs`, `lang/` |
 | Tests | `tests/` |
 | Design spec | `Foundry VTT Collaborative Notes Canvas Module Spec.md` |
+| Private workspace design | `PRIVATE-WORKSPACES.md` |
 | Architecture and testing checklist | `HANDOFF.md` |
 
 ## Branches
 
-- **`main`** — Journalinator, the active module (`fvtt-journalinator`, v0.3.0).
+- **`main`** — Journalinator, the active module (`fvtt-journalinator`, v0.8.0).
 - **`investigation-board`** — an earlier, independent realization of the same design, originally
   built by Larkar. It is a separate Foundry module
   (`investigation-board`, 0.3.0-alpha.1), kept for reference. It does

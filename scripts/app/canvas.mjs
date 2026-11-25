@@ -38,6 +38,8 @@ export default class JournalCanvas {
     this.threadMaskId = "jn-thread-mask-" + ++threadMaskSequence;
     this.view = { x: 0, y: 0, k: 1 };
     this.hasCentered = false;
+    this.notes = [];
+    this.layout = { cards: {}, labels: {}, viewport: null };
     this.cardEls = new Map();
     this.labelEls = new Map();
     this.linksById = new Map();
@@ -56,6 +58,7 @@ export default class JournalCanvas {
     this.linkPlacement = null;
     this.dimMatch = () => true; // (note) => does it match the active search/filters?
     this.gmMode = false; // GM view with secrets merged in: shows hide/reveal/hint controls
+    this.simpleMode = false; // private workspace: no labels, stamps, or drawn links
     this.readOnly = false; // no active GM: allow selecting/reading but no writes
 
     this.root = document.createElement("div");
@@ -545,7 +548,7 @@ export default class JournalCanvas {
 
   #syncLinkToolbar() {
     const link = this.selectedLinkId ? this.linksById.get(this.selectedLinkId) : null;
-    if (!link || this.readOnly) { this.linkToolbar.style.display = "none"; return; }
+    if (!link || this.readOnly || this.simpleMode) { this.linkToolbar.style.display = "none"; return; }
 
     this.#positionLinkToolbar(link);
     this.linkToolbar.style.display = "flex";
@@ -714,6 +717,7 @@ export default class JournalCanvas {
   }
 
   toggleLinkTool() {
+    if (this.simpleMode) return;
     if (this.readOnly) return this.#warnReadOnly();
     if (this.linkPlacement) return this.cancelLinkTool();
     this.#closeContextMenu();
@@ -813,7 +817,15 @@ export default class JournalCanvas {
     const gmItems = this.gmMode ? `
       <button type="button" data-action="secret-note">${t("JN.Context.NewSecretNote")}</button>
       <button type="button" data-action="gm-label">${t("JN.Context.NewGMLabel")}</button>` : "";
-    if (editStamp && noteId) {
+    if (this.simpleMode) {
+      this.contextMenu.innerHTML = noteId ? `
+        <button type="button" data-action="publish-private">${t("JN.Private.Publish")}</button>
+        <button type="button" data-action="delete-private">${t("JN.Common.Delete")}</button>` : `
+        <button type="button" data-action="note">${t("JN.Context.NewNote")}</button>
+        <button type="button" data-action="memo">${t("JN.Style.Memo")}</button>
+        <button type="button" data-action="wanted">${t("JN.Style.Wanted")}</button>
+        <button type="button" data-action="location">${t("JN.Context.NewLocation")}</button>`;
+    } else if (editStamp && noteId) {
       this.contextMenu.innerHTML = `
         ${stampColors()}
         <div class="jn-stamp-corners" role="group" aria-label="${t("JN.Stamp.CornerPicker")}">
@@ -861,6 +873,16 @@ export default class JournalCanvas {
         if (action === "card-background") {
           this.#closeContextMenu();
           this.callbacks.onEditCardBackground?.(noteId);
+          return;
+        }
+        if (action === "publish-private") {
+          this.#closeContextMenu();
+          this.callbacks.onPublishNote?.(noteId);
+          return;
+        }
+        if (action === "delete-private") {
+          this.#closeContextMenu();
+          this.callbacks.onDeleteNote?.(noteId);
           return;
         }
         if (button.dataset.stampColor) {
@@ -1266,6 +1288,7 @@ export default class JournalCanvas {
   }
 
   addLabelButton() {
+    if (this.simpleMode) return;
     if (this.readOnly) return this.#warnReadOnly();
     const rect = this.root.getBoundingClientRect();
     const { x, y } = this.#toWorld(rect.left + rect.width / 2, rect.top + rect.height / 2);

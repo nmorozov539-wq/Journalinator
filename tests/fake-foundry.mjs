@@ -65,6 +65,8 @@ export class FakePage {
     this.name = data.name;
     this.type = data.type;
     this.parent = parent;
+    this.ownership = structuredClone(data.ownership ?? {});
+    this.flags = structuredClone(data.flags ?? {});
     const system = { ...(DEFAULTS[data.type]?.() ?? {}), ...structuredClone(data.system ?? {}) };
     if (data.type === "fvtt-journalinator.note") {
       system.links = (system.links ?? []).map(l => ({ label: "", direction: "none", color: "", lineStyle: "solid", origin: "drawn", edited: false, createdBy: "", hint: false, ...l }));
@@ -72,13 +74,20 @@ export class FakePage {
     this.system = withToObject(system);
   }
   async update(changes) {
-    const data = { name: this.name, system: this.system };
+    const data = { name: this.name, system: this.system, ownership: this.ownership, flags: this.flags };
     applyUpdate(data, changes);
     this.name = data.name;
+    this.ownership = data.ownership;
+    this.flags = data.flags;
     if (this.type === "fvtt-journalinator.note") {
       this.system.links = (this.system.links ?? []).map(l => ({ hint: false, ...l }));
     }
     Hooks.callAll("updateJournalEntryPage", this, expand(changes));
+    return this;
+  }
+  async delete() {
+    this.parent?.pages?.delete(this.id);
+    Hooks.callAll("deleteJournalEntryPage", this);
     return this;
   }
 }
@@ -208,11 +217,15 @@ export async function makeContainers(env) {
   const shared = new FakeEntry({ name: "Journalinator: Shared Journal" });
   const history = new FakeEntry({ name: "Journalinator: History" });
   const secrets = new FakeEntry({ name: "Journalinator: GM Secrets" });
-  for (const e of [shared, history, secrets]) env.journal.set(e.id, e);
+  const privateJournal = new FakeEntry({ name: "Journalinator: Private Journals" });
+  for (const e of [shared, history, secrets, privateJournal]) env.journal.set(e.id, e);
   const layoutPage = await JournalEntryPage.create({ name: "__layout__", type: "fvtt-journalinator.layout", system: {} }, { parent: shared });
   const statsPage = await JournalEntryPage.create({ name: "__stats__", type: "fvtt-journalinator.stats", system: {} }, { parent: shared });
   const historyPage = await JournalEntryPage.create({ name: "__history__", type: "fvtt-journalinator.history", system: {} }, { parent: history });
-  const ids = { shared: shared.id, history: history.id, secrets: secrets.id, layoutPage: layoutPage.id, statsPage: statsPage.id, historyPage: historyPage.id };
+  const ids = {
+    shared: shared.id, history: history.id, secrets: secrets.id, private: privateJournal.id,
+    layoutPage: layoutPage.id, statsPage: statsPage.id, historyPage: historyPage.id
+  };
   await game.settings.set("fvtt-journalinator", "containerIds", ids);
-  return { shared, history, secrets, ids };
+  return { shared, history, secrets, private: privateJournal, ids };
 }
