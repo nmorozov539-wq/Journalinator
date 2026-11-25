@@ -526,7 +526,8 @@ test("toolbar dropdowns filter cards and change the saved board theme", async ()
     style.click();
     assert.ok(!tavern.classList.contains("jn-dimmed"));
     const theme = host.querySelector(".journalinator-theme");
-    assert.equal(host.querySelector(".journalinator-stats").nextElementSibling, theme);
+    assert.equal(filters.nextElementSibling, theme);
+    assert.equal(theme.closest(".jn-toolbar-group").nextElementSibling.querySelector(".journalinator-trash") !== null, true);
     theme.querySelector("summary").dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
     assert.equal(filters.open, false);
     theme.querySelector("summary").click();

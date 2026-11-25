@@ -106,6 +106,22 @@
   flex: 1;
   position: relative;
   min-width: 0;
+  max-width: 480px;
+}
+.jn-toolbar-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+.jn-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.jn-toolbar-group + .jn-toolbar-group {
+  padding-left: 10px;
+  border-left: 1px solid var(--jn-line);
 }
 
 .journalinator-search {
@@ -436,7 +452,8 @@
 .jn-card[data-seal-corner$="-left"] .jn-card-stamps { left: -12px; right: auto; }
 .jn-card[data-seal-corner="top-right"] .jn-card-badge { right: 34px; }
 .jn-card[data-seal-corner="top-right"] .jn-card-title { padding-right: 42px; }
-.jn-card[data-seal-corner="top-left"] .jn-card-lock-pill { left: 32px; }
+.jn-card[data-seal-corner="top-right"] .jn-card-lock-pill { right: 56px; }
+.jn-card.jn-being-edited[data-seal-corner="top-right"] .jn-card-title { padding-right: 70px; }
 .jn-card[data-seal-corner="top-left"] .jn-card-title { padding-left: 20px; }
 .jn-stamp-corners {
   display: flex;
@@ -502,16 +519,22 @@
 .jn-card-lock-pill {
   display: none;
   position: absolute;
-  top: 6px; left: 6px;
-  font-size: 10px;
-  padding: 1px 5px;
-  border-radius: 9px;
+  top: 6px; right: 29px;
+  z-index: 5;
+  font: 10px/16px system-ui;
+  height: 16px;
+  padding: 0 6px;
+  box-sizing: border-box;
+  border-radius: 8px;
   background: var(--jn-acc);
   color: #17171a;
+  pointer-events: none;
 }
 .jn-card.jn-being-edited .jn-card-lock-pill {
   display: block;
 }
+/* Keep the title clear of the pill while someone is editing. */
+.jn-card.jn-being-edited .jn-card-title { padding-right: 46px; }
 
 .jn-card-title {
   margin: 0;
@@ -550,10 +573,14 @@
   margin-top: 8px;
   overflow: hidden;
 }
+.jn-card-image {
+  max-height: 200px;
+  border-radius: 4px;
+}
 .jn-card-image img {
   display: block;
   width: 100%;
-  max-height: 320px;
+  max-height: 200px;
   border: 0;
   object-fit: contain;
 }
@@ -603,7 +630,6 @@
   pointer-events: auto;
 }
 .jn-card .jn-card-image-button:hover { border-color: var(--jn-acc); }
-.jn-card:hover .jn-card-lock-pill { top: 32px; }
 .jn-card[data-seal-corner="top-left"] .jn-card-image-button { left: 31px; }
 .jn-card.jn-card-wanted {
   width: 250px;
@@ -1029,7 +1055,8 @@
   font-size: 11px;
   fill: var(--jn-muted);
   stroke: var(--jn-bg);
-  stroke-width: 4px;
+  stroke-width: 7px;
+  stroke-linejoin: round;
   paint-order: stroke;
   text-anchor: middle;
   pointer-events: none;

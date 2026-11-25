@@ -25,9 +25,14 @@ export function isTextEntryTarget(target) {
   return !!target?.closest?.("input, textarea, select, [contenteditable]:not([contenteditable='false'])");
 }
 
+/** Foundry's tooltip manager is instant and themed; fall back to the native title if it is missing. */
+function tooltipAttrs(label) {
+  const text = foundry.utils.escapeHTML(label.replace(/^\+\s*/, ""));
+  return `${game.tooltip ? `data-tooltip="${text}" data-tooltip-direction="DOWN"` : `title="${text}"`} aria-label="${text}"`;
+}
+
 function toolbarButton(className, icon, label) {
-  const text = foundry.utils.escapeHTML(label);
-  return `<button type="button" class="jn-toolbar-icon ${className}" title="${text}" aria-label="${text}">
+  return `<button type="button" class="jn-toolbar-icon ${className}" ${tooltipAttrs(label)}>
     <i class="fa-solid ${icon}" aria-hidden="true"></i></button>`;
 }
 
@@ -289,8 +294,15 @@ export default class JournalApp extends ApplicationV2 {
             aria-label="${t("JN.TopBar.Search")}" placeholder="${t("JN.TopBar.Search")}" value="${foundry.utils.escapeHTML(this.#query)}">
           <div class="jn-switcher"></div>
         </div>
+        <div class="jn-toolbar-tools">
+          <div class="jn-toolbar-group">
+        ${toolbarButton("journalinator-new", "fa-note-sticky", t("JN.TopBar.NewNote"))}
+        ${toolbarButton("journalinator-add-label", "fa-font", t("JN.TopBar.AddLabel"))}
+        ${toolbarButton("journalinator-add-link", "fa-link", t("JN.Link.Tool"))}
+          </div>
+          <div class="jn-toolbar-group">
         <details class="jn-toolbar-dropdown journalinator-filters${this.#filterAuthors.size || this.#filterStyles.size ? " on" : ""}">
-          <summary class="jn-toolbar-icon" title="${t("JN.Filter.Title")}" aria-label="${t("JN.Filter.Title")}"><i class="fa-solid fa-filter" aria-hidden="true"></i></summary>
+          <summary class="jn-toolbar-icon" ${tooltipAttrs(t("JN.Filter.Title"))}><i class="fa-solid fa-filter" aria-hidden="true"></i></summary>
           <div class="jn-toolbar-panel">
             ${context.authors.length ? `<div class="jn-menu-heading">${t("JN.Filter.Authors")}</div>
               ${filters(context.authors.map(([id, u]) => [id, u.name, u.color]), this.#filterAuthors, "author")}` : ""}
@@ -298,18 +310,19 @@ export default class JournalApp extends ApplicationV2 {
             ${filters(Object.entries(CARD_STYLES).map(([id, style]) => [id, t(style.labelKey)]), this.#filterStyles, "style")}
           </div>
         </details>
-        ${toolbarButton("journalinator-new", "fa-file", t("JN.TopBar.NewNote"))}
-        ${toolbarButton("journalinator-add-label", "fa-pencil", t("JN.TopBar.AddLabel"))}
-        ${toolbarButton("journalinator-add-link", "fa-link", t("JN.Link.Tool"))}
-        ${toolbarButton("journalinator-trash", "fa-trash", t("JN.TopBar.Trash"))}
-        ${toolbarButton("journalinator-stats", "fa-chart-column", t("JN.TopBar.Stats"))}
         <details class="jn-toolbar-dropdown journalinator-theme">
-          <summary class="jn-toolbar-icon" title="${t("JN.Theme.Picker")}" aria-label="${t("JN.Theme.Picker")}"><i class="fa-solid fa-palette" aria-hidden="true"></i></summary>
+          <summary class="jn-toolbar-icon" ${tooltipAttrs(t("JN.Theme.Picker"))}><i class="fa-solid fa-palette" aria-hidden="true"></i></summary>
           <div class="jn-toolbar-panel">
             <button type="button" data-theme-choice="classic" aria-pressed="${context.theme === "classic"}">${t("JN.Theme.Classic")}</button>
             <button type="button" data-theme-choice="fantasy" aria-pressed="${context.theme === "fantasy"}">${t("JN.Theme.Fantasy")}</button>
           </div>
         </details>
+          </div>
+          <div class="jn-toolbar-group">
+        ${toolbarButton("journalinator-trash", "fa-trash", t("JN.TopBar.Trash"))}
+        ${toolbarButton("journalinator-stats", "fa-chart-column", t("JN.TopBar.Stats"))}
+          </div>
+        </div>
         ${context.gmTier ? this.#gmControlsHTML(context) : ""}
       </header>
       ${!context.gmOnline ? `<div class="journalinator-offline-banner">${t("JN.TopBar.Offline")}</div>` : ""}
