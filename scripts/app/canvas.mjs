@@ -42,6 +42,9 @@ export default class JournalCanvas {
 
     this.root = document.createElement("div");
     this.root.className = "jn-canvas";
+    // Programmatic focus keeps canvas keyboard shortcuts scoped to an intentional canvas click
+    // without adding the canvas itself to Foundry's normal Tab order.
+    this.root.tabIndex = -1;
     this.root.innerHTML = `
       <div class="jn-world">
         <svg class="jn-links"></svg>
@@ -475,6 +478,7 @@ export default class JournalCanvas {
     this.root.addEventListener("pointerdown", ev => {
       if (ev.target.closest(".jn-link-toolbar")) return;
       if (ev.target.closest(".jn-context-menu")) return;
+      this.root.focus({ preventScroll: true });
       this.#closeContextMenu();
       if (ev.button === 2) return;
       try { this.root.setPointerCapture(ev.pointerId); } catch { /* no active pointer (e.g. synthetic event) */ }
@@ -673,6 +677,16 @@ export default class JournalCanvas {
       x: Math.round(center.x - width / 2),
       y: Math.round(center.y - height / 2)
     };
+  }
+
+  /** Snapshot of the current card selection for keyboard actions owned by JournalApp. */
+  getSelectedNoteIds() {
+    return [...this.selectedNoteIds];
+  }
+
+  /** Clears both the multi-selection and the primary card selection. */
+  clearSelection() {
+    this.#setSelection([], null);
   }
 
   /** Pans to and selects a note — used by backlink chips in the editor. */

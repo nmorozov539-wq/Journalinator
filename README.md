@@ -63,6 +63,7 @@ Open the journal from the sticky-note button in the scene controls.
 
 - **Add things:** right-click the canvas and choose a note, location or label.
 - **Select:** left-click a card, or drag a selection rectangle across several cards.
+- **Delete / undo:** focus the canvas, select one or more cards, and press `Delete` to move them to the trash. Press `Ctrl+Z` (`Cmd+Z` on macOS) to restore the most recent keyboard deletion.
 - **Move around:** hold the middle mouse button and drag; use the wheel to zoom.
 - **Edit:** double-click a card to start writing immediately, or click a paragraph in the editor.
   A blank line + Enter splits it; Backspace at the start merges it

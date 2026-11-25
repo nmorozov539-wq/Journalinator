@@ -21,6 +21,10 @@ const containers = await makeContainers(env);
 const answers = [];
 globalThis.foundry.applications = {
   api: {
+    ApplicationV2: class {
+      constructor() { this.element = null; }
+      render() { return this; }
+    },
     DialogV2: {
       confirm: async () => answers.shift() ?? true,
       prompt: async () => answers.shift() ?? null,
@@ -36,6 +40,7 @@ const secrets = await import(`${JN}/scripts/secrets/secret-actions.mjs`);
 const { registerSocket, requestWrite } = await import(`${JN}/scripts/socket.mjs`);
 const { default: NoteEditor } = await import(`${JN}/scripts/app/editor.mjs`);
 const { default: JournalCanvas } = await import(`${JN}/scripts/app/canvas.mjs`);
+const { default: JournalApp, isTextEntryTarget } = await import(`${JN}/scripts/app/journal-app.mjs`);
 const { getLock } = await import(`${JN}/scripts/locks.mjs`);
 registerSocket();
 
@@ -213,6 +218,41 @@ test("canvas renders secret cards, hidden links and GM toolbar buttons", async (
   assert.equal(canvas.root.querySelector(`.jn-card[data-id="${cultId}"]`), null);
   assert.equal(canvas.root.querySelector("g.jn-link-hidden"), null);
   notesStore.setGmView(true);
+});
+
+test("Delete moves the focused canvas selection to trash and Ctrl+Z restores it", async () => {
+  const app = new JournalApp();
+  const context = await app._prepareContext();
+  const root = await app._renderHTML(context);
+  app.element = root;
+  document.body.appendChild(root);
+  app._onFirstRender();
+
+  const card = root.querySelector(`.jn-card[data-id="${tavernId}"]`);
+  card.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+  root.querySelector(".jn-canvas").dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+  root.querySelector(".jn-canvas").dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Delete" }));
+  await settle();
+  assert.ok(sharedByName("Tavern").system.deleted, "Delete moves the selected note to trash");
+
+  document.body.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "z", ctrlKey: true }));
+  await settle();
+  assert.equal(sharedByName("Tavern").system.deleted, null, "Ctrl+Z restores the last keyboard deletion");
+
+  app._onClose();
+  root.remove();
+});
+
+test("keyboard deletion shortcuts ignore text inputs", () => {
+  const input = document.createElement("input");
+  const editable = document.createElement("div");
+  editable.contentEditable = "true";
+  document.body.append(input, editable);
+  assert.equal(isTextEntryTarget(input), true);
+  assert.equal(isTextEntryTarget(editable), true);
+  assert.equal(isTextEntryTarget(document.body), false);
+  input.remove();
+  editable.remove();
 });
 
 test("no unexpected errors were reported", () => {

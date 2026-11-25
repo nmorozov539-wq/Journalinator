@@ -18,6 +18,11 @@ function gm(job) {
   });
 }
 
+/** Keyboard shortcuts must never replace the browser/editor's native typing behaviour. */
+export function isTextEntryTarget(target) {
+  return target instanceof HTMLElement && !!target.closest("input, textarea, select, [contenteditable='true']");
+}
+
 const { ApplicationV2 } = foundry.applications.api;
 
 /**
@@ -50,6 +55,7 @@ export default class JournalApp extends ApplicationV2 {
   #switcherHighlight = 0;
   #hookIds = [];
   #onGlobalKeydown = null;
+  #deletionHistory = [];
   #searchBlurTimer = null;
   #editor = new NoteEditor({
     onFocusNote: id => this.#canvas.focusNote(id),
@@ -130,6 +136,32 @@ export default class JournalApp extends ApplicationV2 {
         const input = this.element.querySelector(".journalinator-search");
         input?.focus();
         input?.select();
+        return;
+      }
+
+      if (isTextEntryTarget(ev.target)) return;
+
+      if (ev.key === "Delete" && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+        // Delete is intentionally scoped to a focused canvas. Ctrl+Z remains available after
+        // the following document re-render has temporarily moved focus back to the page body.
+        if (ev.target !== this.#canvas.root && !this.#canvas.root.contains(ev.target)) return;
+        const selected = this.#canvas.getSelectedNoteIds();
+        const shared = selected.filter(id => !notesStore.isSecretNote(id) && !notesStore.getSharedPage(id)?.system.deleted);
+        if (!shared.length) return;
+        ev.preventDefault();
+        this.#deletionHistory.push(shared);
+        if (this.#deletionHistory.length > 20) this.#deletionHistory.shift();
+        this.#selectedNoteId = null;
+        this.#canvas.clearSelection();
+        for (const noteId of shared) requestWrite({ type: "deleteNote", noteId });
+        return;
+      }
+
+      if ((ev.ctrlKey || ev.metaKey) && !ev.shiftKey && ev.key.toLowerCase() === "z") {
+        const deleted = this.#deletionHistory.pop();
+        if (!deleted?.length) return;
+        ev.preventDefault();
+        for (const noteId of deleted) requestWrite({ type: "restoreNote", noteId });
       }
     };
     addEventListener("keydown", this.#onGlobalKeydown);
