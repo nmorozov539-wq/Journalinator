@@ -453,7 +453,14 @@ export default class NoteEditor {
       return;
     }
 
-    if (this.pendingMerge?.prevBlockId === blockId && mine) {
+    if (this.pendingMerge?.prevBlockId === blockId) {
+      if (!mine) {
+        // The previous block is held by someone else (or the request timed out): stop waiting,
+        // otherwise a later unrelated grant could trigger a merge the user no longer expects.
+        this.pendingMerge = null;
+        this.render();
+        return;
+      }
       const { blockId: currentBlockId, prevBlockId } = this.pendingMerge;
       this.pendingMerge = null;
       this.#performMerge(currentBlockId, prevBlockId);
@@ -699,12 +706,14 @@ export default class NoteEditor {
       const prevBlockId = blocks[index - 1].blockId;
       if (this.editingSecret) {
         const noteId = this.noteId;
+        // Capture the textarea first: a merge must use what is on screen, not the last save.
+        const text = textarea.value;
         this.#clearDraftTimer();
         this.#removeDraft(blockId);
         this.editingBlockId = null;
         this.editingSecret = false;
         this.#finishInlineInput();
-        gm(() => secrets.mergeSecretBlockUp(noteId, blockId));
+        gm(() => secrets.mergeSecretBlockUp(noteId, blockId, text));
         return;
       }
       if (isHeldByMe(this.noteId, prevBlockId)) {
@@ -718,12 +727,17 @@ export default class NoteEditor {
 
   #performMerge(blockId, prevBlockId) {
     const noteId = this.noteId;
+    // The active textarea may contain edits that were never saved. Pass them along so the
+    // merge does not resurrect the older stored text and silently discard the user's typing.
+    const text = this.#activeTextarea()?.value;
     this.#clearDraftTimer();
     this.#removeDraft(blockId);
     this.editingBlockId = null;
     this.#finishInlineInput();
     this.#stopHeartbeat();
-    const write = requestWrite({ type: "mergeBlockUp", noteId, blockId });
+    const write = requestWrite({
+      type: "mergeBlockUp", noteId, blockId, ...(typeof text === "string" ? { text } : {})
+    });
     this.#releaseAfterWrite(write, noteId, blockId, prevBlockId);
   }
 

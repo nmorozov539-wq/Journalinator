@@ -68,6 +68,7 @@ export default class JournalApp extends ApplicationV2 {
   #switcherHighlight = 0;
   #hookIds = [];
   #onGlobalKeydown = null;
+  #onToolbarPointerDown = null;
   #focusedCanvasRenders = new WeakSet();
   #deletionHistory = [];
   #replacingHTML = false;
@@ -244,6 +245,8 @@ export default class JournalApp extends ApplicationV2 {
     this.#hookIds = [];
     if (this.#onGlobalKeydown) removeEventListener("keydown", this.#onGlobalKeydown, true);
     this.#onGlobalKeydown = null;
+    if (this.#onToolbarPointerDown) this.element.removeEventListener("pointerdown", this.#onToolbarPointerDown);
+    this.#onToolbarPointerDown = null;
   }
 
   #matchesQuery(note, q) {
@@ -377,12 +380,17 @@ export default class JournalApp extends ApplicationV2 {
 
   _onRender() {
     const root = this.element;
+    // The window element survives re-renders, so install the delegated listener only once. It
+    // queries live dropdown nodes instead of closing over the ones from a particular render.
+    if (!this.#onToolbarPointerDown) {
+      this.#onToolbarPointerDown = ev => {
+        for (const dropdown of this.element.querySelectorAll(".jn-toolbar-dropdown")) {
+          if (!dropdown.contains(ev.target)) dropdown.open = false;
+        }
+      };
+      root.addEventListener("pointerdown", this.#onToolbarPointerDown);
+    }
     const dropdowns = [...root.querySelectorAll(".jn-toolbar-dropdown")];
-    root.addEventListener("pointerdown", event => {
-      for (const dropdown of dropdowns) {
-        if (!dropdown.contains(event.target)) dropdown.open = false;
-      }
-    });
     for (const dropdown of dropdowns) {
       dropdown.addEventListener("keydown", event => {
         if (event.key !== "Escape" || !dropdown.open) return;

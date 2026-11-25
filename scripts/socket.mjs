@@ -426,12 +426,14 @@ async function handleMessage(message, senderUserId) {
       const blocks = page.system.blocks ?? [];
       const index = blocks.findIndex(b => b.blockId === message.blockId);
       if (index <= 0) return; // no previous block to merge into
+      if (message.text !== undefined && (typeof message.text !== "string" || message.text.length > MAX_BLOCK_LENGTH)) return;
       const prevBlock = blocks[index - 1];
       if (!authoritativeHolds(message.noteId, message.blockId, senderUserId)) return;
       if (!authoritativeHolds(message.noteId, prevBlock.blockId, senderUserId)) return; // needs both locks (spec §6.4)
+      const currentText = message.text ?? blocks[index].text;
 
       const nextBlocks = blocks.filter((_, i) => i !== index);
-      nextBlocks[index - 1] = { ...prevBlock, text: prevBlock.text + blocks[index].text, authorId: senderUserId };
+      nextBlocks[index - 1] = { ...prevBlock, text: prevBlock.text + currentText, authorId: senderUserId };
       await reconcileAndSave(shared, page, nextBlocks, senderUserId, {
         "system.editCount": (page.system.editCount ?? 0) + 1
       });

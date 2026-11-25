@@ -794,6 +794,57 @@ test("left drag plucks one thread and keeps its anchors and the other thread fix
   }
 });
 
+test("merging a shared block keeps text typed but not yet saved", async () => {
+  const page = await JournalEntryPage.create({
+    name: "Merge Test",
+    type: "fvtt-journalinator.note",
+    system: {
+      kind: "note", style: "sticky", authorId: gmUser.id,
+      blocks: [
+        { blockId: foundry.utils.randomID(), text: "alpha", authorId: gmUser.id },
+        { blockId: foundry.utils.randomID(), text: "beta", authorId: gmUser.id }
+      ],
+      createdAt: Date.now(), updatedAt: Date.now()
+    }
+  }, { parent: containers.shared });
+  const secondId = page.system.blocks[1].blockId;
+
+  editor.open(page.id);
+  editor.render();
+  blockEl(secondId).click();
+  const textarea = editor.root.querySelector(".jn-block-input");
+  assert.ok(textarea, "second block is being edited");
+  textarea.value = "betaGAMMA";
+  textarea.selectionStart = textarea.selectionEnd = 0;
+  textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true }));
+  await settle();
+
+  const merged = containers.shared.pages.get(page.id);
+  assert.equal(merged.system.blocks.length, 1);
+  assert.equal(merged.system.blocks[0].text, "alphabetaGAMMA");
+});
+
+test("merging a hidden block keeps text typed but not yet saved", async () => {
+  const secretId = await secrets.createSecretNote({ title: "Merge Secret", x: 0, y: 0 });
+  const firstId = vaultStore.data.notes[secretId].blocks[0].blockId;
+  await secrets.saveSecretBlock(secretId, firstId, "alpha");
+  const secondId = await secrets.addHiddenBlock(secretId, firstId, "beta");
+
+  editor.open(secretId);
+  editor.render();
+  blockEl(secondId).click();
+  const textarea = editor.root.querySelector(".jn-block-input");
+  assert.ok(textarea, "hidden block is being edited");
+  textarea.value = "betaGAMMA";
+  textarea.selectionStart = textarea.selectionEnd = 0;
+  textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true }));
+  await settle();
+
+  const blocks = vaultStore.data.notes[secretId].blocks;
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].text, "alphabetaGAMMA");
+});
+
 test("no unexpected errors were reported", () => {
   const unexpected = errors().filter(([, m]) => !m.includes("links a secret note"));
   assert.deepEqual(unexpected, []);

@@ -339,12 +339,13 @@ export function splitSecretBlock(noteId, blockId, beforeText, afterText) {
 }
 
 /** Merges a secret block into the previous block, if that one is secret too. */
-export function mergeSecretBlockUp(noteId, blockId) {
+export function mergeSecretBlockUp(noteId, blockId, text) {
   return vaultStore.mutate(async vault => {
     const secret = vault.notes[noteId];
     if (secret) {
       const index = secret.blocks.findIndex(b => b.blockId === blockId);
       if (index <= 0) return null;
+      if (typeof text === "string") secret.blocks[index].text = text;
       const prev = secret.blocks[index - 1];
       prev.text += secret.blocks[index].text;
       secret.blocks.splice(index, 1);
@@ -354,6 +355,7 @@ export function mergeSecretBlockUp(noteId, blockId) {
     }
     const entry = vault.hiddenBlocks[noteId];
     if (!entry?.blocks?.[blockId]) return null;
+    if (typeof text === "string") entry.blocks[blockId].text = text;
     const merged = mergeBlocks(sharedBlocksOf(noteId), entry);
     const index = merged.findIndex(b => b.blockId === blockId);
     const prev = merged[index - 1];
