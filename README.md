@@ -11,7 +11,7 @@ connected with curvy links, edited paragraph by paragraph with live locks, and s
 quick switcher. The GM also gets an encrypted tier for secrets that players never receive in
 readable form.
 
-> **Status: pre-alpha (0.2.0).** The data paths and UI are covered by tests, but the GM tier has
+> **Status: pre-alpha (0.3.0).** The data paths and UI are covered by tests, but the GM tier has
 > not yet been exercised in a live Foundry session. Back up your world before trying it.
 
 ## Features
@@ -50,7 +50,7 @@ The module id is `fvtt-journalinator` and it targets Foundry VTT v14. There is n
 
 ### Manual install
 
-1. Download `fvtt-journalinator-v0.2.0.zip` from the latest GitHub release.
+1. Download `fvtt-journalinator-v0.3.0.zip` from the latest GitHub release.
 2. Copy the project into `<Foundry user data>/Data/modules/fvtt-journalinator` so that
    `module.json` is directly inside that folder.
 3. Restart Foundry and enable **Journalinator** in the world.
@@ -175,7 +175,7 @@ Layout:
 
 ## Branches
 
-- **`main`** — Journalinator, the active module (`fvtt-journalinator`, v0.2.0).
+- **`main`** — Journalinator, the active module (`fvtt-journalinator`, v0.3.0).
 - **`investigation-board`** — an earlier, independent realization of the same design, originally
   built by Larkar. It is a separate Foundry module
   (`investigation-board`, 0.3.0-alpha.1), kept for reference. It does
