@@ -1,0 +1,34 @@
+# Journalinator Patch Notes
+
+These notes start with the small board and toolbar polish patches and cover the follow-up fixes and features.
+
+## Board and toolbar
+
+- Card images are smaller and have rounded corners, so they take up less room on the board.
+- The little pencil badge that shows someone is editing a note now sits in the top-right corner and no longer jumps when you hover.
+- Link labels have a stronger outline, so they stay readable over busy backgrounds.
+- The toolbar is grouped into clearer sections. New note, label, link, filters, theme, trash, and stats are easier to scan and each button has a proper tooltip.
+- The search box no longer stretches across the whole toolbar on wide screens.
+
+## Writing notes
+
+- Note text now displays Markdown: headings, bold and italic text, lists, quotes, tables, code, links, images, and task checkboxes.
+- Task checkboxes work. Click one to mark it done or not done, and the note saves the change.
+- Typing an opening bracket, quote, or bold marker adds the matching closing character for you. Selected text can be wrapped the same way.
+- Joining two paragraphs no longer throws away text that was typed but not saved yet.
+- Before a hidden paragraph or secret note is made public, the confirmation now checks what is currently in the editor, including unsaved typing.
+
+## Finding things and moving around
+
+- The quick switcher now respects the author and note-style filters, not just the search text.
+- Links between notes stay curved all the way to the card. They no longer snap into a straight line when two cards are close together.
+- Session summaries in the statistics window now include every day up to the next session marker, not only the marker day itself.
+- Links created by typing `[[Note]]` now count toward “links drawn” in the statistics.
+
+## Reliability
+
+- If one of the journal’s helper pages or containers goes missing, it is restored automatically the next time the world loads.
+- When no GM is connected, the board clearly switches to read-only. Editing buttons are disabled, card and label changes are blocked, and anyone who tries a write gets a short warning instead of silence.
+- Two GMs editing the secrets vault at the same time no longer silently overwrite each other’s work. Recent changes are kept and re-applied.
+- The board re-checks itself when players connect or disconnect, so the read-only state and controls update without a reload.
+- Long sessions are less likely to build up stale background work after repeated board redraws.

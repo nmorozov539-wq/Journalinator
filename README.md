@@ -14,6 +14,8 @@ readable form.
 > **Status: pre-alpha.** The data paths and UI are covered by tests, but the GM tier has
 > not yet been exercised in a live Foundry session. Back up your world before trying it.
 
+See [CHANGELOG.md](CHANGELOG.md) for recent changes.
+
 ## Features
 
 - **One shared canvas.** Notes are cards; there is no separate drawer or unplaced state.
