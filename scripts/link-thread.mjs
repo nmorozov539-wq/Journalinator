@@ -63,7 +63,11 @@ export class ThreadMotion {
   }
 }
 
-/** Keep the end segments straight so each thread meets its socket and arrow cleanly. */
+/**
+ * Draws the whole thread as a continuous curve. The endpoint tangents still follow the socket
+ * normals (so arrows and pins meet their sides cleanly), but there is no straight lead-in segment
+ * that would make the link visibly snap straight as it approaches a nearby card.
+ */
 export function threadPath(start, end, motion) {
   const rest = motion?.rest ?? restPoint(start, end);
   start = aim(start, rest);
@@ -75,12 +79,12 @@ export function threadPath(start, end, motion) {
   const b = offset(end, end.nx * lead, end.ny * lead);
   const center = offset(rest, motion?.x ?? 0, motion?.y ?? 0);
   const tx = (b.x - a.x) * 0.18, ty = (b.y - a.y) * 0.18;
-  const c1 = offset(a, start.nx * reach, start.ny * reach);
+  const c1 = offset(start, start.nx * reach, start.ny * reach);
   const c2 = offset(center, -tx, -ty);
   const c3 = offset(center, tx, ty);
-  const c4 = offset(b, end.nx * reach, end.ny * reach);
-  const path = `M${coordinates(start)} L${coordinates(a)} C${coordinates(c1)} ${coordinates(c2)} ${coordinates(center)}`
-    + ` C${coordinates(c3)} ${coordinates(c4)} ${coordinates(b)} L${coordinates(end)}`;
+  const c4 = offset(end, end.nx * reach, end.ny * reach);
+  const path = `M${coordinates(start)} C${coordinates(c1)} ${coordinates(c2)} ${coordinates(center)}`
+    + ` C${coordinates(c3)} ${coordinates(c4)} ${coordinates(end)}`;
   return { path, center, lead, start, end };
 }
 

@@ -7,8 +7,9 @@ const end = { x: 490, y: 90, nx: -1, ny: 0 };
 
 test("thread sags between fixed sockets and leaves room for its arrow", () => {
   const thread = threadPath(start, end);
-  assert.match(thread.path, /^M150 90 L172 90 C/);
-  assert.match(thread.path, / L490 90$/);
+  assert.match(thread.path, /^M150 90 C/);
+  assert.match(thread.path, / 490 90$/);
+  assert.doesNotMatch(thread.path, /\sL/);
   assert.equal(thread.center.x, 320);
   assert.ok(thread.center.y > 90);
   const [tip, base] = arrowHead(end, thread.lead).split(" ");
@@ -30,7 +31,14 @@ test("moving a socket pulls the thread, which settles while its endpoints stay f
   assert.equal(motion.moving, false);
   assert.equal(threadPath(start, moved, motion).path, resting.path);
   assert.match(active.path, /^M150 90 /);
-  assert.match(active.path, / L550 135$/);
+  assert.match(active.path, / 550 135$/);
   motion.retarget(start, end, false);
   assert.equal(motion.moving, false);
+});
+
+test("short links stay curved instead of turning into a straight lead near the target", () => {
+  const near = threadPath(start, { x: 190, y: 90, nx: -1, ny: 0 });
+  assert.doesNotMatch(near.path, /\sL/);
+  assert.match(near.path, / C/);
+  assert.notEqual(near.center.y, 90);
 });

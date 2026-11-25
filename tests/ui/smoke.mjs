@@ -695,12 +695,12 @@ test("legacy attachments follow the board edge when a card resizes", async () =>
     canvas.refreshGeometry();
     const path = () => canvas.svg.querySelector(".jn-thread").getAttribute("d");
     assert.match(path(), /^M253 150 /);
-    assert.match(path(), / L580 247$/);
+    assert.match(path(), / 580 247$/);
     height = 400;
     resized();
     await settle();
     assert.match(path(), /^M253 200 /);
-    assert.match(path(), / L580 247$/);
+    assert.match(path(), / 580 247$/);
   } finally {
     canvas.disconnectGeometry();
     canvas.root.remove();
@@ -760,9 +760,9 @@ test("Alt-click connects edges through saved board pins and the toolbar can repl
     await redraw();
     const thread = host.querySelector(`g[data-id="${link.id}"]`);
     assert.equal(thread.querySelectorAll(".jn-thread-pin").length, 4);
-    assert.match(thread.querySelector(".jn-thread").getAttribute("d"), /L100 310 M100 310/);
+    assert.match(thread.querySelector(".jn-thread").getAttribute("d"), /100 310 M100 310/);
     assert.match(thread.parentElement.getAttribute("mask"), /^url\(#jn-thread-mask-/);
-    const lineEnd = thread.querySelector(".jn-thread").getAttribute("d").split(" L").at(-1);
+    const lineEnd = thread.querySelector(".jn-thread").getAttribute("d").match(/([-\d.]+) ([-\d.]+)$/).slice(1).join(",");
     assert.equal(thread.querySelector(".jn-link-arrow").getAttribute("points").split(" ")[0], lineEnd.replace(" ", ","));
     assert.equal(host.querySelector(".jn-link-preview"), null);
     const marker = thread.querySelector('[data-pin-index="0"]');
@@ -809,8 +809,8 @@ test("left drag plucks one thread and keeps its anchors and the other thread fix
     send(canvas.root, "pointermove", 110);
     const pulled = line("ab");
     assert.notEqual(pulled, original);
-    assert.equal(pulled.split(" L")[0], original.split(" L")[0]);
-    assert.equal(pulled.split(" L").at(-1), original.split(" L").at(-1));
+    const ends = value => [value.match(/^M([^ ]+ [^ ]+)/)[1], value.match(/([^ ]+ [^ ]+)$/)[1]];
+    assert.deepEqual(ends(pulled), ends(original));
     assert.equal(line("ac"), other);
     send(canvas.root, "pointerup", 110);
     await settle();
