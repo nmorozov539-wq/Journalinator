@@ -157,7 +157,9 @@ class NotesStore {
       system: {
         kind: note.kind === "location" ? "location" : "note",
         style: note.style ?? "sticky",
+        targetHeading: note.targetHeading ?? "",
         image: note.image ?? null,
+        backgroundImage: note.backgroundImage ?? null,
         blocks: (note.blocks ?? []).map(b => ({ ...b, hidden: true })),
         links: (note.links ?? []).map(l => ({ ...l, hidden: true })),
         authorId: note.authorId ?? "",

@@ -1,7 +1,8 @@
 import { notesStore } from "../store/notes-store.mjs";
 import { requestWrite } from "../socket.mjs";
 import { requestLock, releaseLock, sendHeartbeat, requestLockState, getLock, isHeldByMe } from "../locks.mjs";
-import { CARD_STYLES } from "../styles/registry.mjs";
+import { CARD_STYLES, cardStyleKey } from "../styles/registry.mjs";
+import { noteImageUrl } from "../image-url.mjs";
 import * as secrets from "../secrets/secret-actions.mjs";
 import { stripSecretPrefix } from "../secrets/model.mjs";
 import { t } from "../i18n.mjs";
@@ -43,9 +44,9 @@ export default class NoteEditor {
     this.editingBlockId = null;
     this.editingSecret = false; // editing a GM-only block: local, no lock, saved to the vault
     this.pendingBlockId = null;
+    this.inlineSlot = null;
     this.pendingMerge = null; // { blockId, prevBlockId }
     this.drafts = new Map();
-    this.showAuthors = false;
     this.heartbeatTimer = null;
     this.hookId = null;
     this.draftTimer = null;
@@ -98,27 +99,103 @@ export default class NoteEditor {
   }
 
   /** Opens a card and immediately starts editing its first text block. */
-  editFirstBlock(noteId) {
+  editFirstBlock(noteId, slot) {
     this.open(noteId);
     this.render();
     const note = notesStore.getNote(noteId);
     const block = note?.system.blocks?.[0];
-    if (block) this.#clickBlock(block.blockId);
+    if (block && slot) this.editBoardBlock(noteId, slot.dataset.blockId, slot);
+    else if (block) this.#clickBlock(block.blockId);
+  }
+
+  editBoardBlock(noteId, blockId, slot) {
+    this.open(noteId);
+    if (this.editingBlockId === blockId) {
+      this.inlineSlot = slot;
+      this.render();
+      return;
+    }
+    this.#stopEditing({ save: true });
+    this.#releasePendingLocks();
+    this.inlineSlot = slot;
+    if (!this.#clickBlock(blockId)) this.inlineSlot = null;
+  }
+
+  renameNote(noteId, title) {
+    const note = notesStore.getNote(noteId);
+    if (!note || note.system.deleted || !title) return;
+    const current = note.secret ? stripSecretPrefix(note.name) : note.name;
+    if (title === current) return;
+    return note.secret ? gm(() => secrets.renameSecretNote(noteId, title))
+      : requestWrite({ type: "renameNote", noteId, title });
+  }
+
+  setTargetHeading(noteId, heading) {
+    const note = notesStore.getNote(noteId);
+    if (!note || note.system.deleted || heading === (note.system.targetHeading ?? "")) return;
+    return note.secret ? gm(() => secrets.setSecretTargetHeading(noteId, heading))
+      : requestWrite({ type: "setTargetHeading", noteId, heading });
+  }
+
+  async editNoteImage(noteId, background = false) {
+    const note = notesStore.getNote(noteId);
+    if (!note || note.system.deleted) return;
+    const existing = note.system[background ? "backgroundImage" : "image"];
+    const value = await this.#promptText(t(background ? "JN.Editor.BackgroundURL" : "JN.Editor.ImageURL"), existing ?? "",
+      existing ? t(background ? "JN.Editor.ClearBackgroundHint" : "JN.Editor.ClearImageHint") : "");
+    if (value == null) return;
+    const image = value ? noteImageUrl(value) : null;
+    if (value && !image) return ui.notifications.warn(t("JN.Editor.InvalidImageURL"));
+    return note.secret ? gm(() => secrets.setSecretNoteImage(noteId, image, background))
+      : requestWrite({ type: "setNoteImage", noteId, image, background });
+  }
+
+  #activeTextarea() {
+    return this.inlineSlot?.querySelector(".jn-block-input") ?? this.root.querySelector(".jn-block-input");
+  }
+
+  suspendBlur() {
+    const textarea = this.#activeTextarea();
+    if (textarea) textarea.onblur = null;
+  }
+
+  #clearInlineInput() {
+    const textarea = this.inlineSlot?.querySelector(".jn-block-input");
+    if (!textarea) return;
+    textarea.onblur = null;
+    textarea.remove();
+  }
+
+  #finishInlineInput() {
+    const inline = !!this.inlineSlot;
+    this.#clearInlineInput();
+    this.inlineSlot = null;
+    if (inline) this.render();
+  }
+
+  mount(slot) {
+    this.suspendBlur();
+    slot.appendChild(this.root);
   }
 
   render() {
     this.#captureDraftBeforeRebuild();
+    this.suspendBlur();
+    this.#clearInlineInput();
     const note = this.noteId ? notesStore.getNote(this.noteId) : null;
     if (!note) {
-      this.root.innerHTML = `<p class="journalinator-empty">${t("JN.Editor.Empty")}</p>`;
+      this.root.replaceChildren();
       return;
     }
 
     if (note.system.deleted) {
+      const restore = t("JN.Common.Restore");
       this.root.innerHTML = `
-        <div class="journalinator-eh"><b>${foundry.utils.escapeHTML(note.name)}</b></div>
-        <p class="journalinator-meta">${t("JN.Editor.InTrash")}</p>
-        <button type="button" class="journalinator-restore">${t("JN.Common.Restore")}</button>
+        <div class="jn-note-tools">
+          <button type="button" class="journalinator-restore" title="${esc(restore)}" aria-label="${esc(restore)}">
+            <i class="fa-solid fa-trash-arrow-up" aria-hidden="true"></i>
+          </button>
+        </div>
       `;
       this.root.querySelector(".journalinator-restore").addEventListener("click", () => {
         requestWrite({ type: "restoreNote", noteId: this.noteId });
@@ -130,62 +207,57 @@ export default class NoteEditor {
 
     const allNotes = notesStore.getAllNotes();
     const authorColor = game.users.get(note.system.authorId)?.color ?? "#8d8d97";
-    const authorName = game.users.get(note.system.authorId)?.name ?? t("JN.Common.Unknown");
+    const currentType = note.system.kind === "location" ? "location" : cardStyleKey(note.system.style);
     const styleOptions = Object.entries(CARD_STYLES)
-      .map(([key, def]) => `<option value="${key}" ${note.system.style === key ? "selected" : ""}>${t(def.labelKey)}</option>`)
-      .join("");
-    const kindOptions = ["note", "location"]
-      .map(kind => `<option value="${kind}" ${note.system.kind === kind ? "selected" : ""}>${t(`JN.Kind.${kind === "note" ? "Note" : "Location"}`)}</option>`)
+      .map(([key, def]) => `<option value="${key}" ${currentType === key ? "selected" : ""}>${t(def.labelKey)}</option>`)
       .join("");
     const backlinks = allNotes
-      .map(n => [n, (n.system.links ?? []).find(l => l.targetId === note._id)])
+      .map(n => [n, (n.system.links ?? []).find(l => l.targetId === note._id)
+        ?? (note.system.links ?? []).find(l => l.targetId === n._id)])
       .filter(([, link]) => link)
       .map(([n, link]) => `<button type="button" class="journalinator-chip${link.hidden ? " jn-chip-hidden" : ""}" data-id="${n._id}"${link.hidden ? ` title="${t("JN.Editor.GMOnlyLink")}"` : ""}>${foundry.utils.escapeHTML(n.name)}</button>`)
       .join("") || `<small class="journalinator-meta">${t("JN.Common.NoneYet")}</small>`;
     const gmView = notesStore.merged;
-    const contributors = Object.entries(note.system.contributions ?? {})
-      .sort((a, b) => b[1] - a[1])
-      .map(([userId, chars]) => `${foundry.utils.escapeHTML(game.users.get(userId)?.name ?? t("JN.Common.Someone"))} (${chars})`)
-      .join(", ");
+    const tool = (icon, label, content) => `<details class="jn-note-tool">
+      <summary title="${esc(label)}" aria-label="${esc(label)}"><i class="fa-solid ${icon}" aria-hidden="true"></i></summary>
+      <div class="jn-note-tool-panel">${content}</div></details>`;
+    const type = `<select class="journalinator-kind" aria-label="${t("JN.Editor.Type")}">${styleOptions}
+      <option value="location" ${currentType === "location" ? "selected" : ""}>${t("JN.Kind.Location")}</option>
+    </select>`;
+    const gmTools = note.secret ? `
+      <div class="jn-gm-banner">
+        <button type="button" class="journalinator-declassify">${t("JN.Editor.Declassify")}</button>
+        <button type="button" class="journalinator-delete" title="${t("JN.Editor.DeletePermanentTitle")}">&#128465;</button>
+      </div>` : `
+      <div class="journalinator-row jn-gm-row">
+        <button type="button" class="journalinator-hint-toggle${note.system.hint ? " on" : ""}" title="${t("JN.Editor.HintTitle")}">&#10022; ${note.system.hint ? t("JN.Editor.GMHint") : t("JN.Editor.MarkHint")}</button>
+        <button type="button" class="journalinator-add-hidden">${t("JN.Editor.AddHiddenBlock")}</button>
+      </div>`;
 
     this.root.innerHTML = `
-      <div class="journalinator-eh">
-        <span class="jn-dot" style="background:${authorColor}"></span>
-        <b>${foundry.utils.escapeHTML(note.name)}</b>
-        <button type="button" class="journalinator-rename" title="${t("JN.Editor.RenameTitle")}">&#9998;</button>
-        <button type="button" class="journalinator-authors-toggle">${this.showAuthors ? t("JN.Editor.HideAuthors") : t("JN.Editor.Authors")}</button>
-        <button type="button" class="journalinator-delete" title="${note.secret ? t("JN.Editor.DeletePermanentTitle") : t("JN.Editor.MoveToTrashTitle")}">&#128465;</button>
+      <div class="jn-note-tools">
+        ${tool("fa-pencil", t("JN.Editor.RenameTitle"), `<div class="journalinator-eh">
+          <span class="jn-dot" style="background:${authorColor}"></span>
+          <b><button type="button" class="jn-inline-title" title="${t("JN.Editor.RenameTitle")}">${esc(note.name)}</button></b>
+        </div>`)}
+        ${tool("fa-link", t("JN.Editor.RelatedNotes"), `<div class="journalinator-chips">${backlinks}</div>`)}
+        ${tool("fa-layer-group", t("JN.Editor.Type"), type)}
+        ${cardStyleKey(note.system.style) === "wanted" ? tool("fa-bullseye", t("JN.Style.Wanted"), `
+          <input type="text" class="journalinator-target-heading" aria-label="${t("JN.Style.Wanted")}"
+            value="${esc(note.system.targetHeading)}" placeholder="${t("JN.Style.Wanted")}" maxlength="80">`) : ""}
+        ${gmView || note.secret ? tool("fa-lock", t("JN.Editor.GMOnly"), gmTools + (this.callbacks.boardOnly ? note.system.blocks.map((block, index) =>
+          `<div class="jn-note-block-tools" data-block-id="${esc(block.blockId)}"><span>${index + 1}</span>
+            ${this.#gmBlockActions(note, block, !block.hidden && !!getLock(note._id, block.blockId))}</div>`).join("") : "")) : ""}
       </div>
-      ${note.secret ? `
-        <div class="jn-gm-banner">
-          <span>${t("JN.Editor.GMOnly")}</span>
-          <button type="button" class="journalinator-declassify">${t("JN.Editor.Declassify")}</button>
-        </div>` : ""}
-      ${gmView && !note.secret ? `
-        <div class="journalinator-row jn-gm-row">
-          <button type="button" class="journalinator-hint-toggle${note.system.hint ? " on" : ""}" title="${t("JN.Editor.HintTitle")}">&#10022; ${note.system.hint ? t("JN.Editor.GMHint") : t("JN.Editor.MarkHint")}</button>
-          <button type="button" class="journalinator-add-hidden">${t("JN.Editor.AddHiddenBlock")}</button>
-        </div>` : ""}
-      <div class="journalinator-meta">${t("JN.Editor.LinkedFrom")}</div>
-      <div class="journalinator-chips">${backlinks}</div>
-      <div class="journalinator-row">
-        <label>${t("JN.Editor.Type")} <select class="journalinator-kind">${kindOptions}</select></label>
-        <label>${t("JN.Editor.Style")} <select class="journalinator-style">${styleOptions}</select></label>
-      </div>
-      <div class="journalinator-row">
-        <button type="button" class="journalinator-set-image">${note.system.image ? t("JN.Editor.ChangeImage") : t("JN.Editor.SetImage")}</button>
-        ${note.system.image ? `<button type="button" class="journalinator-clear-image">${t("JN.Editor.RemoveImage")}</button>` : ""}
-        <button type="button" class="journalinator-new-linked">${t("JN.Editor.NewLinkedNote")}</button>
-      </div>
-      <p class="journalinator-meta">${t("JN.Editor.By", { author: foundry.utils.escapeHTML(authorName) })}${note.secret ? "" : ` &middot; ${t("JN.Editor.Edits", { count: note.system.editCount ?? 0 })}`}</p>
-      ${contributors ? `<p class="journalinator-meta">${t("JN.Editor.CharactersAdded", { contributors })}</p>` : ""}
-      <div class="jn-doc ${this.showAuthors ? "jn-show-authors" : ""}">
-        ${note.system.blocks.map(b => this.#renderBlockHTML(note, b)).join("")}
+      <div class="jn-doc" ${this.callbacks.boardOnly ? "hidden" : ""}>
+        ${note.system.blocks.filter(block => !this.callbacks.boardOnly || block.blockId === this.editingBlockId)
+          .map(block => this.#renderBlockHTML(note, block)).join("")}
       </div>
     `;
 
+    const liveTextarea = this.root.querySelector(".jn-block-input");
+    if (liveTextarea && this.inlineSlot?.parentNode) this.inlineSlot.appendChild(liveTextarea);
     this.#bindHandlers(note);
-    const liveTextarea = this.root.querySelector(".jn-block.editing textarea");
     liveTextarea?.focus();
   }
 
@@ -238,15 +310,43 @@ export default class NoteEditor {
 
   #bindHandlers(note) {
     const noteId = this.noteId;
-    this.root.querySelector(".journalinator-rename")?.addEventListener("click", async () => {
-      if (note.secret) {
-        const base = await this.#promptText(t("JN.Editor.RenameSecretNote"), stripSecretPrefix(note.name));
-        if (base) gm(() => secrets.renameSecretNote(noteId, base));
-        return;
-      }
-      const title = await this.#promptText(t("JN.Editor.RenameNote"), note.name);
-      if (!title || title === note.name) return;
-      requestWrite({ type: "renameNote", noteId, title });
+    const tools = this.root.querySelectorAll(".jn-note-tool");
+    for (const tool of tools) tool.addEventListener("toggle", () => {
+      if (!tool.open) return;
+      for (const other of tools) if (other !== tool) other.open = false;
+    });
+    for (const tool of tools) tool.addEventListener("keydown", event => {
+      if (event.key !== "Escape" || !tool.open || event.defaultPrevented) return;
+      event.stopPropagation();
+      tool.open = false;
+      tool.querySelector("summary").focus();
+    });
+    const initialTitle = note.secret ? stripSecretPrefix(note.name) : note.name;
+    const rename = title => this.renameNote(noteId, title);
+    const titleButton = this.root.querySelector(".jn-inline-title");
+    titleButton.addEventListener("click", () => {
+      const input = document.createElement("input");
+      input.className = "jn-inline-title-input";
+      input.type = "text";
+      input.value = initialTitle;
+      input.setAttribute("aria-label", t("JN.Editor.RenameTitle"));
+      titleButton.replaceWith(input);
+      const finish = save => {
+        if (!input.isConnected) return;
+        const title = input.value.trim();
+        input.replaceWith(titleButton);
+        if (save) rename(title);
+      };
+      input.addEventListener("blur", () => finish(true));
+      input.addEventListener("keydown", event => {
+        if (event.isComposing || !["Enter", "Escape"].includes(event.key)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        finish(event.key === "Enter");
+        titleButton.focus();
+      });
+      input.focus();
+      input.select();
     });
 
     this.root.querySelector(".journalinator-declassify")?.addEventListener("click", () => this.#declassifyNote(note));
@@ -257,14 +357,9 @@ export default class NoteEditor {
     this.root.querySelectorAll(".jn-block-gm button").forEach(btn => {
       btn.addEventListener("click", ev => {
         ev.stopPropagation();
-        const blockId = btn.closest(".jn-block").dataset.blockId;
+        const blockId = btn.closest("[data-block-id]").dataset.blockId;
         this.#gmBlockAction(note, blockId, btn.dataset.act);
       });
-    });
-
-    this.root.querySelector(".journalinator-authors-toggle")?.addEventListener("click", () => {
-      this.showAuthors = !this.showAuthors;
-      this.render();
     });
 
     this.root.querySelector(".journalinator-delete")?.addEventListener("click", async () => {
@@ -287,52 +382,42 @@ export default class NoteEditor {
       el.addEventListener("click", () => this.callbacks.onFocusNote(el.dataset.id));
     });
 
-    this.root.querySelector(".journalinator-style")?.addEventListener("change", ev => {
-      if (note.secret) gm(() => secrets.setSecretNoteStyle(noteId, ev.target.value));
-      else requestWrite({ type: "setNoteStyle", noteId, style: ev.target.value });
-    });
-
     this.root.querySelector(".journalinator-kind")?.addEventListener("change", ev => {
-      if (note.secret) gm(() => secrets.setSecretNoteKind(noteId, ev.target.value));
-      else requestWrite({ type: "setNoteKind", noteId, kind: ev.target.value });
+      const type = ev.target.value;
+      const kind = type === "location" ? "location" : "note";
+      const style = kind === "location" ? "document" : type;
+      if (note.secret) gm(() => secrets.setSecretNoteStyle(noteId, style, kind));
+      else requestWrite({ type: "setNoteStyle", noteId, style, kind });
     });
 
-    const setImage = image => note.secret
-      ? gm(() => secrets.setSecretNoteImage(noteId, image))
-      : requestWrite({ type: "setNoteImage", noteId, image });
-
-    this.root.querySelector(".journalinator-set-image")?.addEventListener("click", () => {
-      new foundry.applications.apps.FilePicker({
-        type: "image",
-        current: note.system.image ?? "",
-        callback: path => setImage(path)
-      }).render(true);
+    const targetHeading = this.root.querySelector(".journalinator-target-heading");
+    targetHeading?.addEventListener("change", () => {
+      this.setTargetHeading(noteId, targetHeading.value.trim());
     });
-
-    this.root.querySelector(".journalinator-clear-image")?.addEventListener("click", () => setImage(null));
-
-    this.root.querySelector(".journalinator-new-linked")?.addEventListener("click", async () => {
-      const title = await this.#promptText(note.secret ? t("JN.Editor.NewLinkedSecretNote") : t("JN.Editor.NewLinkedNote"), "");
-      if (!title) return;
-      if (!note.secret) {
-        requestWrite({ type: "newLinkedNote", sourceId: noteId, title });
-        return;
-      }
-      const card = notesStore.getLayout()?.cards?.[noteId] ?? { x: 0, y: 0 };
-      gm(async () => {
-        const newId = await secrets.createSecretNote({ title, x: card.x + 220, y: card.y });
-        if (newId) await secrets.addHiddenLink(noteId, newId);
-      });
+    targetHeading?.addEventListener("keydown", event => {
+      if (event.isComposing || event.key !== "Enter") return;
+      event.preventDefault();
+      event.stopPropagation();
+      targetHeading.blur();
     });
 
     this.root.querySelectorAll(".jn-block:not(.editing)").forEach(el => {
       el.addEventListener("click", () => this.#clickBlock(el.dataset.blockId));
     });
 
-    const textarea = this.root.querySelector(".jn-block-input");
+    const textarea = this.#activeTextarea();
     if (textarea) {
       textarea.addEventListener("input", () => this.#queueDraftSave());
-      textarea.addEventListener("blur", () => this.#stopEditing({ save: true }));
+      textarea.onblur = () => this.#stopEditing({ save: true });
+      if (this.inlineSlot) {
+        textarea.setAttribute("aria-label", t("JN.Editor.EditCardText"));
+        textarea.addEventListener("keydown", ev => {
+          if (ev.isComposing || !(ev.key === "Escape" || (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)))) return;
+          ev.preventDefault();
+          ev.stopImmediatePropagation();
+          this.#stopEditing({ save: ev.key !== "Escape" });
+        });
+      }
       textarea.addEventListener("keydown", ev => this.#onTextareaKeydown(ev, note));
     }
   }
@@ -345,13 +430,14 @@ export default class NoteEditor {
       this.editingBlockId = blockId;
       this.editingSecret = true;
       this.render();
-      return;
+      return true;
     }
     const lock = getLock(this.noteId, blockId);
     if (lock && lock.userId !== game.user.id) return; // locked by someone else — not clickable
     this.pendingBlockId = blockId;
     this.render();
     requestLock(this.noteId, blockId);
+    return true;
   }
 
   #onLockChanged(blockId, lock) {
@@ -362,7 +448,7 @@ export default class NoteEditor {
       if (mine) {
         this.editingBlockId = blockId;
         this.#startHeartbeat(blockId);
-      }
+      } else this.inlineSlot = null;
       this.render();
       return;
     }
@@ -376,7 +462,7 @@ export default class NoteEditor {
 
     if (this.editingBlockId === blockId && !mine) {
       // lost the lock involuntarily (expired, or a conflicting grant elsewhere) — rescue the draft
-      const textarea = this.root.querySelector(".jn-block-input");
+      const textarea = this.#activeTextarea();
       if (textarea) {
         this.drafts.set(blockId, textarea.value);
         this.#persistDraft(blockId, textarea.value);
@@ -385,6 +471,7 @@ export default class NoteEditor {
       this.#stopHeartbeat();
       this.#clearDraftTimer();
       this.render();
+      this.inlineSlot = null;
       return;
     }
 
@@ -408,6 +495,7 @@ export default class NoteEditor {
     if (this.pendingMerge) releaseLock(this.noteId, this.pendingMerge.prevBlockId);
     this.pendingBlockId = null;
     this.pendingMerge = null;
+    if (!this.editingBlockId) this.inlineSlot = null;
   }
 
   #stopEditing({ save = false } = {}) {
@@ -415,7 +503,7 @@ export default class NoteEditor {
     const blockId = this.editingBlockId;
     const noteId = this.noteId;
     this.#clearDraftTimer();
-    const textarea = this.root.querySelector(".jn-block-input");
+    const textarea = this.#activeTextarea();
     const note = notesStore.getNote(noteId);
     const originalText = note?.system.blocks.find(b => b.blockId === blockId)?.text ?? "";
     let write = null;
@@ -435,16 +523,14 @@ export default class NoteEditor {
       this.#removeDraft(blockId);
     }
 
-    if (secret) {
-      this.editingBlockId = null;
-      return;
-    }
+    this.editingBlockId = null;
+    this.#finishInlineInput();
+    if (secret) return;
 
     // For the active GM, requestWrite is queued; releasing first would let the queued
     // saveBlock fail its lock check. Wait for the write before releasing in that case.
     if (write) this.#releaseAfterWrite(write, noteId, blockId);
     else releaseLock(noteId, blockId);
-    this.editingBlockId = null;
     this.#stopHeartbeat();
   }
 
@@ -463,7 +549,7 @@ export default class NoteEditor {
 
   #captureDraftBeforeRebuild() {
     if (!this.editingBlockId) return;
-    const textarea = this.root.querySelector(".jn-block-input");
+    const textarea = this.#activeTextarea();
     if (textarea) {
       this.drafts.set(this.editingBlockId, textarea.value);
       this.#persistDraft(this.editingBlockId, textarea.value);
@@ -486,7 +572,7 @@ export default class NoteEditor {
 
   #persistCurrentDraft() {
     if (!this.editingBlockId) return;
-    const textarea = this.root.querySelector(".jn-block-input");
+    const textarea = this.#activeTextarea();
     if (!textarea) return;
     this.drafts.set(this.editingBlockId, textarea.value);
     this.#persistDraft(this.editingBlockId, textarea.value);
@@ -574,6 +660,7 @@ export default class NoteEditor {
   }
 
   #onTextareaKeydown(ev, note) {
+    if (ev.isComposing) return;
     const textarea = ev.target;
     const blockId = this.editingBlockId;
 
@@ -587,6 +674,7 @@ export default class NoteEditor {
         this.#removeDraft(blockId);
         this.editingBlockId = null;
         this.editingSecret = false;
+        this.#finishInlineInput();
         gm(() => secrets.splitSecretBlock(noteId, blockId, beforeText, afterText));
         return;
       }
@@ -594,6 +682,7 @@ export default class NoteEditor {
       this.#clearDraftTimer();
       this.#removeDraft(blockId);
       this.editingBlockId = null;
+      this.#finishInlineInput();
       this.#stopHeartbeat();
       const write = requestWrite({ type: "splitBlock", noteId, blockId, beforeText, afterText });
       this.#releaseAfterWrite(write, noteId, blockId);
@@ -614,6 +703,7 @@ export default class NoteEditor {
         this.#removeDraft(blockId);
         this.editingBlockId = null;
         this.editingSecret = false;
+        this.#finishInlineInput();
         gm(() => secrets.mergeSecretBlockUp(noteId, blockId));
         return;
       }
@@ -631,6 +721,7 @@ export default class NoteEditor {
     this.#clearDraftTimer();
     this.#removeDraft(blockId);
     this.editingBlockId = null;
+    this.#finishInlineInput();
     this.#stopHeartbeat();
     const write = requestWrite({ type: "mergeBlockUp", noteId, blockId });
     this.#releaseAfterWrite(write, noteId, blockId, prevBlockId);
@@ -662,6 +753,7 @@ export default class NoteEditor {
     this.#stopEditing({ save: true });
     const newId = await gm(() => secrets.addHiddenBlock(noteId, afterBlockId));
     if (!newId || this.noteId !== noteId) return;
+    if (this.callbacks.onEditHiddenBlock) return this.callbacks.onEditHiddenBlock(noteId, newId);
     this.editingBlockId = newId;
     this.editingSecret = true;
     this.render();
@@ -708,10 +800,10 @@ export default class NoteEditor {
     gm(() => secrets.declassifyNote(note._id, title));
   }
 
-  async #promptText(title, initial) {
+  async #promptText(title, initial, hint = "") {
     return foundry.applications.api.DialogV2.prompt({
       window: { title },
-      content: `<input type="text" name="value" autofocus value="${foundry.utils.escapeHTML(initial)}">`,
+      content: `<input type="text" name="value" autofocus value="${esc(initial)}">${hint ? `<p>${esc(hint)}</p>` : ""}`,
       ok: { label: t("JN.Common.OK"), callback: (event, button) => button.form.elements.value.value.trim() },
       rejectClose: false
     });

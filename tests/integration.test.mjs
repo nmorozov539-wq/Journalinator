@@ -74,8 +74,89 @@ test("location creation keeps title separate from an empty body", async () => {
   assert.equal(location.system.blocks[0].text, "");
 });
 
+test("keyboard undo restores only the matching deletion", async () => {
+  const note = sharedByName("New Location");
+  const undoId = "DeletionToken001";
+  const oldCard = structuredClone(notesStore.getSharedLayout().cards[note.id]);
+  await fromPlayer({ type: "deleteNote", noteId: note.id, undoId });
+  assert.equal(note.system.deleted.undoId, undoId);
+  assert.equal(notesStore.getSharedLayout().cards[note.id], undefined);
+  await requestWrite({ type: "restoreNote", noteId: note.id, undoId });
+  assert.ok(note.system.deleted, "another client cannot undo this deletion via its keyboard");
+  await fromPlayer({ type: "restoreNote", noteId: note.id, undoId });
+  assert.equal(note.system.deleted, null);
+  const card = notesStore.getSharedLayout().cards[note.id];
+  assert.deepEqual([card.x, card.y], [oldCard.x, oldCard.y]);
+  await fromPlayer({ type: "deleteNote", noteId: note.id });
+  await fromPlayer({ type: "restoreNote", noteId: note.id, undoId });
+  assert.ok(note.system.deleted, "old keyboard undo cannot restore a newer deletion");
+  await fromPlayer({ type: "restoreNote", noteId: note.id });
+  assert.equal(note.system.deleted, null, "manual trash restore still works");
+});
+
+test("target cards retain image links and custom socket sides after restoration", async () => {
+  await fromPlayer({ type: "createNote", title: "Wanted fixture", style: "wanted" });
+  const note = sharedByName("Wanted fixture");
+  assert.equal(note.system.style, "wanted");
+  const image = "https://example.com/portraits/target.webp";
+  await fromPlayer({ type: "setNoteImage", noteId: note.id, image });
+  await fromPlayer({ type: "setNoteImage", noteId: note.id, image: "file:///portrait.webp" });
+  await fromPlayer({ type: "setCardPorts", noteId: note.id, ports: ["left", "top"] });
+  await fromPlayer({ type: "setCardPorts", noteId: note.id, ports: [] });
+  await fromPlayer({ type: "setCardPorts", noteId: note.id, ports: ["left", "left"] });
+  await requestWrite({ type: "deleteNote", noteId: note.id });
+  await requestWrite({ type: "restoreNote", noteId: note.id });
+  assert.deepEqual(notesStore.getSharedLayout().cards[note.id].ports, ["left", "top"]);
+  assert.equal(note.system.image, image);
+});
+
+test("shared stamps attach to a note or stay movable on the board", async () => {
+  await requestWrite({ type: "createNote", title: "Stamp fixture" });
+  const note = sharedByName("Stamp fixture");
+  await fromPlayer({ type: "addLabel", stamp: "skull", noteId: note.id });
+  await fromPlayer({ type: "addLabel", stamp: "paw", x: 15, y: 40 });
+  const labels = () => Object.entries(notesStore.getSharedLayout().labels);
+  const [attached] = labels().find(([, label]) => label.stamp === "skull");
+  const [loose] = labels().find(([, label]) => label.stamp === "paw");
+  assert.equal(notesStore.getSharedLayout().labels[attached].noteId, note.id);
+  assert.equal(notesStore.getSharedLayout().labels[attached].corner, "bottom-right");
+  await fromPlayer({ type: "updateLabel", labelId: attached, corner: "top-left" });
+  await fromPlayer({ type: "updateLabel", labelId: loose, corner: "top-left" });
+  assert.equal(notesStore.getSharedLayout().labels[loose].corner, undefined);
+  await fromPlayer({ type: "addLabel", stamp: "compass", noteId: note.id });
+  assert.deepEqual(labels().filter(([, label]) => label.noteId === note.id).map(([, label]) => label.stamp), ["compass"]);
+  assert.equal(notesStore.getSharedLayout().labels[attached].corner, "top-left");
+  await fromPlayer({ type: "updateLabel", labelId: attached, corner: "center" });
+  assert.equal(notesStore.getSharedLayout().labels[attached].corner, "top-left");
+  await fromPlayer({ type: "updateLabel", labelId: attached, color: "#5a83ad" });
+  assert.equal(notesStore.getSharedLayout().labels[attached].color, "#5a83ad");
+  await fromPlayer({ type: "updateLabel", labelId: loose, x: 250 });
+  assert.equal(notesStore.getSharedLayout().labels[loose].x, 250);
+  await fromPlayer({ type: "addLabel", stamp: "../outside" });
+  await fromPlayer({ type: "addLabel", stamp: "paw", noteId: "MissingNote00001" });
+  assert.equal(labels().length, 2);
+  await requestWrite({ type: "deleteNote", noteId: note.id });
+  await requestWrite({ type: "restoreNote", noteId: note.id });
+  assert.equal(notesStore.getSharedLayout().labels[attached].noteId, note.id);
+  await requestWrite({ type: "deleteNote", noteId: note.id });
+  await requestWrite({ type: "emptyTrash" });
+  assert.equal(notesStore.getSharedLayout().labels[attached], undefined);
+  await fromPlayer({ type: "removeLabel", labelId: loose });
+  assert.equal(notesStore.getSharedLayout().labels[loose], undefined);
+});
+
 test("GM writes a secret note with typed links into both namespaces", async () => {
   vexId = await secrets.createSecretNote({ title: "Lord Vex", x: 0, y: 0 });
+  await secrets.addSecretStamp(vexId, "crowned-helm");
+  await secrets.addSecretStamp(vexId, "sun-shield");
+  assert.equal(Object.values(notesStore.getLayout().labels).filter(label => label.noteId === vexId).length, 1);
+  assert.ok(Object.values(notesStore.getLayout().labels)
+    .some(label => label.noteId === vexId && label.stamp === "sun-shield" && label.hidden));
+  assert.ok(!Object.values(notesStore.getSharedLayout().labels).some(label => label.noteId === vexId));
+  const [sealId] = Object.entries(notesStore.getLayout().labels).find(([, label]) => label.noteId === vexId);
+  await secrets.updateHiddenLabel(sealId, { color: "#53936b", corner: "bottom-left" });
+  assert.equal(notesStore.getLayout().labels[sealId].color, "#53936b");
+  assert.equal(notesStore.getLayout().labels[sealId].corner, "bottom-left");
   const note = vaultStore.data.notes[vexId];
   assert.match(note.name, /^GM-[A-Z2-9]{4} Lord Vex$/);
   await secrets.saveSecretBlock(vexId, note.blocks[0].blockId, "He betrayed the [[Tavern]] keeper. See [[Hidden Cult]].");
@@ -129,12 +210,14 @@ test("a temporarily missing shared journal never prunes hidden content", async (
 test("a pre-existing hidden drawn link survives a hidden-block edit after the shared note links the same target", async () => {
   await fromPlayer({ type: "createNote", title: "Link Target", x: 420, y: 0 });
   const targetId = sharedByName("Link Target").id;
-  await secrets.addHiddenLink(tavernId, targetId);
+  await secrets.addHiddenLink(tavernId, targetId, { sourceSide: "bottom", targetSide: "top" });
   const hiddenLink = vaultStore.data.hiddenLinks[tavernId].find(l => l.targetId === targetId);
   assert.ok(hiddenLink, "GM-only drawn link exists before the edit");
 
-  await requestWrite({ type: "createLink", sourceId: tavernId, targetId });
-  assert.ok(sharedByName("Tavern").system.links.some(l => l.targetId === targetId));
+  await requestWrite({ type: "createLink", sourceId: tavernId, targetId, sourceSide: "right", targetSide: "left" });
+  const publicLink = sharedByName("Tavern").system.links.find(l => l.targetId === targetId);
+  assert.deepEqual([publicLink.sourceSide, publicLink.targetSide], ["right", "left"]);
+  assert.deepEqual([hiddenLink.sourceSide, hiddenLink.targetSide], ["bottom", "top"]);
 
   await secrets.saveSecretBlock(tavernId, hiddenBlockId, "The keeper is a cultist.");
   assert.ok(

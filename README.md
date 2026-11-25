@@ -11,7 +11,7 @@ connected with curvy links, edited paragraph by paragraph with live locks, and s
 quick switcher. The GM also gets an encrypted tier for secrets that players never receive in
 readable form.
 
-> **Status: pre-alpha (0.2.0).** The data paths and UI are covered by tests, but the GM tier has
+> **Status: pre-alpha.** The data paths and UI are covered by tests, but the GM tier has
 > not yet been exercised in a live Foundry session. Back up your world before trying it.
 
 ## Features
@@ -50,7 +50,7 @@ The module id is `fvtt-journalinator` and it targets Foundry VTT v14. There is n
 
 ### Manual install
 
-1. Download `fvtt-journalinator-v0.2.0.zip` from the latest GitHub release.
+1. Download the `Journalinator-v*.zip` release archive.
 2. Copy the project into `<Foundry user data>/Data/modules/fvtt-journalinator` so that
    `module.json` is directly inside that folder.
 3. Restart Foundry and enable **Journalinator** in the world.
@@ -63,6 +63,13 @@ Open the journal from the sticky-note button in the scene controls.
 
 - **Add things:** right-click the canvas and choose a note, location or label.
 - **Select:** left-click a card, or drag a selection rectangle across several cards.
+- **Stamps:** right-click a note to choose a color, corner, and seal. Choosing a new seal replaces the current one. Right-click an existing seal to move it to another corner, change its color, or remove it. For a movable stamp, right-click the board and choose **Place a stamp**. Stamps placed on secret notes stay private.
+- **Board theme:** choose Classic or Warm in the top bar. Both use flat colors, and your choice is saved for your client.
+- **Connection sockets:** right-click a card and open **Connection sockets** to pick a single side or toggle additional sides. Drag from a socket to another card's edge to snap a new link to that side. The destination socket appears automatically and is shared by links on that side.
+- **Target card:** create one from the board menu or change an existing card's style to Target. Paste a direct image URL for the portrait. The title is the name and the body is the description. Cards grow to fit the full text.
+- **Memo:** choose Memo in the board menu for the widest card. Only the body is shown on the board.
+- **Text labels:** click to select or drag a selection box around several. Double-click a label to edit it. Double-click empty board space to open the creation menu at the cursor.
+- **Delete / undo:** select notes, a label, or a stamp and press `Backspace`. Shared notes go to the trash and can be restored with `Ctrl+Z` (`Cmd+Z` on macOS).
 - **Move around:** hold the middle mouse button and drag; use the wheel to zoom.
 - **Edit:** double-click a card to start writing immediately, or click a paragraph in the editor.
   A blank line + Enter splits it; Backspace at the start merges it
@@ -174,7 +181,7 @@ Layout:
 
 ## Branches
 
-- **`main`** — Journalinator, the active module (`fvtt-journalinator`, v0.2.0).
+- **`main`** — Journalinator, the active module (`fvtt-journalinator`, v0.3.0).
 - **`investigation-board`** — an earlier, independent realization of the same design, originally
   built by Larkar. It is a separate Foundry module
   (`investigation-board`, 0.3.0-alpha.1), kept for reference. It does

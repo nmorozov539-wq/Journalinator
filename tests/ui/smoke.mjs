@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 
-const JN = new URL("../..", import.meta.url).pathname.replace(/\/$/, "");
+const JN = new URL("../../", import.meta.url).href.replace(/\/$/, "");
 const dom = new JSDOM("<!doctype html><body></body>", { pretendToBeVisual: true });
 for (const k of ["document", "HTMLElement", "Node", "Event", "KeyboardEvent", "MouseEvent"]) globalThis[k] = dom.window[k];
 globalThis.addEventListener = dom.window.addEventListener.bind(dom.window);
@@ -21,6 +21,10 @@ const containers = await makeContainers(env);
 const answers = [];
 globalThis.foundry.applications = {
   api: {
+    ApplicationV2: class {
+      constructor() { this.element = null; }
+      render() { return this; }
+    },
     DialogV2: {
       confirm: async () => answers.shift() ?? true,
       prompt: async () => answers.shift() ?? null,
@@ -36,6 +40,7 @@ const secrets = await import(`${JN}/scripts/secrets/secret-actions.mjs`);
 const { registerSocket, requestWrite } = await import(`${JN}/scripts/socket.mjs`);
 const { default: NoteEditor } = await import(`${JN}/scripts/app/editor.mjs`);
 const { default: JournalCanvas } = await import(`${JN}/scripts/app/canvas.mjs`);
+const { default: JournalApp, isTextEntryTarget } = await import(`${JN}/scripts/app/journal-app.mjs`);
 const { getLock } = await import(`${JN}/scripts/locks.mjs`);
 registerSocket();
 
@@ -144,8 +149,10 @@ test("secret note shows the GM banner, renames keep the prefix, declassify publi
   editor.render();
   assert.ok(editor.root.querySelector(".jn-gm-banner"));
   const prefix = vaultStore.data.notes[vexId].name.slice(0, 8);
-  answers.push("Lady Vex");
-  editor.root.querySelector(".journalinator-rename").click();
+  editor.root.querySelector(".jn-inline-title").click();
+  const titleInput = editor.root.querySelector(".jn-inline-title-input");
+  titleInput.value = "Lady Vex";
+  titleInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
   await settle();
   assert.equal(vaultStore.data.notes[vexId].name, `${prefix}Lady Vex`);
 
@@ -167,8 +174,8 @@ test("secret note shows the GM banner, renames keep the prefix, declassify publi
 });
 
 test("canvas renders secret cards, hidden links and GM toolbar buttons", async () => {
-  const cultId = await secrets.createSecretNote({ title: "Cult", x: 0, y: 300 });
-  await secrets.addHiddenLink(tavernId, cultId);
+  const cultId = await secrets.createSecretNote({ title: "Cult", x: 0, y: 300, style: "wanted" });
+  await secrets.addHiddenLink(tavernId, cultId, { sourceSide: "bottom", targetSide: "left" });
   const calls = [];
   const canvas = new JournalCanvas(new Proxy({}, { get: (_, name) => (...args) => calls.push([name, ...args]) }));
   document.body.appendChild(canvas.root);
@@ -176,7 +183,7 @@ test("canvas renders secret cards, hidden links and GM toolbar buttons", async (
   canvas.update(notesStore.getAllNotes(), notesStore.getLayout());
   const card = canvas.root.querySelector(`.jn-card[data-id="${cultId}"]`);
   assert.ok(card.classList.contains("jn-secret"));
-  assert.equal(card.querySelectorAll(".jn-card-link").length, 4, "all four connection handles stay visible");
+  assert.equal(card.querySelector(".jn-card-link"), null);
   assert.equal(canvas.root.querySelector(".jn-tooltip"), null, "hover tooltip was removed");
   const hiddenLink = canvas.root.querySelector("g.jn-link-hidden");
   assert.ok(hiddenLink, "hidden link drawn");
@@ -190,7 +197,10 @@ test("canvas renders secret cards, hidden links and GM toolbar buttons", async (
   canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 90, clientY: 45 }));
   assert.ok(calls.some(([name]) => name === "onMoveCard"), "card position is committed on release");
 
-  card.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, button: 0 }));
+  for (let click = 0; click < 2; click++) {
+    card.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0 }));
+  }
   assert.ok(calls.some(([name, id]) => name === "onEditNote" && id === cultId), "double-click starts editing");
 
   const linkHit = canvas.root.querySelector(".jn-link-hit");
@@ -213,6 +223,574 @@ test("canvas renders secret cards, hidden links and GM toolbar buttons", async (
   assert.equal(canvas.root.querySelector(`.jn-card[data-id="${cultId}"]`), null);
   assert.equal(canvas.root.querySelector("g.jn-link-hidden"), null);
   notesStore.setGmView(true);
+});
+
+test("Backspace removes labels and stamps or trashes notes, and Ctrl+Z restores notes", async () => {
+  const app = new JournalApp();
+  const context = await app._prepareContext();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  app._replaceHTML(await app._renderHTML(context), host);
+  app._onFirstRender();
+
+  const card = host.querySelector(`.jn-card[data-id="${tavernId}"]`);
+  const canvas = host.querySelector(".jn-canvas");
+  await requestWrite({ type: "addLabel", text: "Test label" });
+  await requestWrite({ type: "addLabel", stamp: "paw" });
+  await requestWrite({ type: "addLabel", stamp: "skull", noteId: tavernId });
+  for (const selector of [".jn-label:not(:has(.jn-stamp))", ".jn-label .jn-stamp", ".jn-card-stamps .jn-stamp"]) {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    const element = canvas.querySelector(selector);
+    assert.ok(element, selector);
+    element.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    canvas.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0 }));
+    assert.ok(canvas.querySelector(".jn-label-selected"));
+    document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Backspace" }));
+    await settle();
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    assert.equal(canvas.querySelector(selector), null);
+  }
+  card.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+  canvas.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+  app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+  assert.equal(document.activeElement, canvas, "selection re-render preserves keyboard focus");
+  document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Backspace" }));
+  await settle();
+  assert.ok(sharedByName("Tavern").system.deleted, "Backspace moves the selected note to trash");
+
+  app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+  document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, code: "KeyZ", key: "я", ctrlKey: true }));
+  await settle();
+  assert.equal(sharedByName("Tavern").system.deleted, null, "Ctrl+Z restores the last keyboard deletion");
+
+  app._onClose();
+  host.remove();
+});
+
+test("the selection box includes labels and an empty-board double click opens the creation menu", () => {
+  const calls = [];
+  const canvas = new JournalCanvas(new Proxy({}, { get: (_, name) => (...args) => calls.push([name, ...args]) }));
+  document.body.appendChild(canvas.root);
+  canvas.update([], { cards: {}, labels: {
+    one: { x: 20, y: 20, text: "One" },
+    two: { x: 40, y: 40, text: "Two" },
+    three: { x: 100, y: 100, text: "Three" }
+  } });
+  for (const [index, label] of [...canvas.root.querySelectorAll(".jn-label")].entries()) {
+    const origin = [20, 40, 100][index];
+    label.getBoundingClientRect = () => ({ left: origin, top: origin, right: origin + 10, bottom: origin + 10 });
+  }
+  const pointer = (type, x, y) => canvas.root.dispatchEvent(new MouseEvent(type, {
+    bubbles: true, button: 0, clientX: x, clientY: y
+  }));
+  pointer("pointerdown", 10, 10);
+  pointer("pointermove", 60, 60);
+  pointer("pointerup", 60, 60);
+  assert.deepEqual(canvas.getSelectedLabelIds(), ["one", "two"]);
+  assert.equal(canvas.root.querySelectorAll(".jn-label-selected").length, 2);
+  assert.equal(canvas.contextMenu.style.display, "none");
+
+  for (let click = 0; click < 2; click++) {
+    pointer("pointerdown", 70, 70);
+    pointer("pointerup", 70, 70);
+  }
+  assert.equal(canvas.contextMenu.style.display, "flex");
+  assert.ok(canvas.contextMenu.querySelector('[data-action="note"]'));
+  canvas.contextMenu.querySelector('[data-action="label"]').click();
+  assert.ok(calls.some(([name]) => name === "onAddLabelAt"));
+  canvas.root.remove();
+});
+
+test("keyboard deletion shortcuts ignore text inputs", () => {
+  const input = document.createElement("input");
+  const editable = document.createElement("div");
+  editable.setAttribute("contenteditable", "true");
+  document.body.append(input, editable);
+  assert.equal(isTextEntryTarget(input), true);
+  assert.equal(isTextEntryTarget(editable), true);
+  assert.equal(isTextEntryTarget(document.body), false);
+  input.remove();
+  editable.remove();
+});
+
+test("creation dialog offers five styles and keeps a custom title", async () => {
+  const { promptNewNote } = await import(`${JN}/scripts/app/note-dialog.mjs`);
+  const dialog = foundry.applications.api.DialogV2;
+  const prompt = dialog.prompt;
+  const form = document.createElement("form");
+  document.body.appendChild(form);
+  try {
+    dialog.prompt = async options => {
+      form.innerHTML = options.content;
+      options.render(null, { element: form });
+      const { style, noteTitle } = form.elements;
+      assert.deepEqual([...style.options].map(option => option.value), ["sticky", "document", "torn", "wanted", "memo"]);
+      assert.equal(document.activeElement, noteTitle);
+      assert.equal(noteTitle.selectionEnd, noteTitle.value.length);
+      noteTitle.value = "Missing Person";
+      style.value = "wanted";
+      style.dispatchEvent(new Event("change"));
+      return options.ok.callback(null, { form });
+    };
+    assert.deepEqual(await promptNewNote("New Note"), { title: "Missing Person", style: "wanted", autoTitle: false });
+  } finally {
+    dialog.prompt = prompt;
+    form.remove();
+  }
+});
+
+test("clicking a sidebar name renames the note independently of its target heading", async () => {
+  await requestWrite({ type: "createNote", title: "Person of Interest", style: "wanted", x: 2000, y: 0 });
+  await settle();
+  const noteId = sharedByName("Person of Interest").id;
+  editor.open(noteId);
+  editor.render();
+  editor.root.querySelector(".jn-inline-title").click();
+  const title = editor.root.querySelector(".jn-inline-title-input");
+  assert.equal(document.activeElement, title);
+  assert.equal(title.selectionEnd, title.value.length);
+  title.value = "Known Witness";
+  title.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await settle();
+  editor.render();
+  const heading = editor.root.querySelector(".journalinator-target-heading");
+  heading.value = "Witness";
+  heading.dispatchEvent(new Event("change"));
+  await settle();
+  assert.equal(sharedByName("Known Witness").system.targetHeading, "Witness");
+  const canvas = new JournalCanvas({});
+  canvas.update(notesStore.getAllNotes(), notesStore.getLayout());
+  const card = canvas.root.querySelector(`[data-id="${noteId}"]`);
+  assert.equal(card.querySelector(".jn-card-wanted-heading").textContent, "Witness");
+  assert.equal(card.querySelector(".jn-card-title").textContent, "Known Witness");
+});
+
+test("one click edits each target field on the board and saves through the existing writes", async () => {
+  const page = sharedByName("Known Witness");
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+  await redraw();
+  app._onFirstRender();
+  try {
+    const card = host.querySelector(`.jn-card[data-id="${page.id}"]`);
+    const canvas = card.closest(".jn-canvas");
+    const click = selector => {
+      card.querySelector(selector).dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+      canvas.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0 }));
+    };
+    const key = (input, value, options = {}) => {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: value, bubbles: true, ...options }));
+    };
+    click(".jn-card-wanted-heading");
+    let input = card.querySelector("input");
+    assert.equal(document.activeElement, input);
+    input.value = "Suspect";
+    await redraw();
+    assert.equal(document.activeElement, input);
+    key(input, "Enter");
+    await settle();
+    assert.equal(page.system.targetHeading, "Suspect");
+    await redraw();
+
+    click(".jn-card-title");
+    input = card.querySelector("input");
+    input.value = "New Name";
+    key(input, "Enter");
+    await settle();
+    assert.equal(page.name, "New Name");
+    await redraw();
+
+    click(".jn-card-block-empty");
+    await settle();
+    const textarea = card.querySelector("textarea");
+    assert.equal(document.activeElement, textarea);
+    assert.equal(textarea.value, "");
+    textarea.value = "A statement recorded on the board.";
+    key(textarea, "Enter", { ctrlKey: true });
+    await settle();
+    assert.equal(page.system.blocks[0].text, "A statement recorded on the board.");
+    await redraw();
+    assert.equal(card.querySelector(".jn-card-block").textContent, page.system.blocks[0].text);
+
+    click(".jn-card-block");
+    await settle();
+    const again = card.querySelector("textarea");
+    again.value = "Discard this revision.";
+    key(again, "Escape");
+    await settle();
+    assert.equal(card.querySelector("textarea"), null);
+    assert.equal(page.system.blocks[0].text, "A statement recorded on the board.");
+  } finally {
+    app._onClose();
+    host.remove();
+  }
+});
+
+test("right-clicking a note opens attached stamp settings", async () => {
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+  app._onRender();
+  try {
+    assert.equal(host.querySelector(".journalinator-add-stamp"), null);
+    assert.ok(host.querySelector(".journalinator-add-link"));
+    const canvas = host.querySelector(".jn-canvas");
+    const card = canvas.querySelector(".jn-card");
+    const menu = canvas.querySelector(".jn-context-menu");
+    const open = element => element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, button: 2 }));
+    open(canvas);
+    assert.ok(menu.querySelector('[data-action="note"]'));
+    assert.equal(menu.querySelector('[data-action="stamps"]'), null);
+    open(card);
+    assert.equal(menu.querySelector('[data-action="ports"]'), null);
+    menu.querySelector('[data-action="card-stamp"]').click();
+    menu.querySelector('[data-stamp-color="#53936b"]').click();
+    menu.querySelector('[data-stamp-corner="top-left"]').click();
+    menu.querySelector('[data-stamp="paw"]').click();
+    await settle();
+    const stamp = Object.values(notesStore.getLayout().labels).find(item => item.noteId === card.dataset.id && item.stamp === "paw");
+    assert.equal(stamp.corner, "top-left");
+    assert.equal(stamp.color, "#53936b");
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    open(card.querySelector(".jn-card-stamps .jn-stamp"));
+    menu.querySelector('[data-stamp-color="#5a83ad"]').click();
+    await settle();
+    assert.equal(Object.values(notesStore.getLayout().labels).find(item => item.noteId === card.dataset.id).color, "#5a83ad");
+    assert.equal(card.querySelector(".jn-card-link"), null);
+  } finally {
+    app._onClose();
+    host.remove();
+  }
+});
+
+test("the context menu creates the chosen card immediately and the toolbar opens the dialog", async () => {
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const dialog = foundry.applications.api.DialogV2;
+  const prompt = dialog.prompt;
+  let prompts = 0;
+  dialog.prompt = async () => { prompts++; return null; };
+  try {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+    const canvas = host.querySelector(".jn-canvas");
+    const existing = new Set(containers.shared.pages.keys());
+    for (const action of ["note", "memo", "wanted", "location", "note"]) {
+      canvas.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, button: 2 }));
+      canvas.querySelector(`[data-action="${action}"]`).click();
+    }
+    await settle();
+    const created = [...containers.shared.pages.values()].filter(page => !existing.has(page.id));
+    assert.deepEqual(created.map(page => [page.system.kind, page.system.style]), [
+      ["note", "sticky"], ["note", "memo"], ["note", "wanted"], ["location", "document"], ["note", "sticky"]
+    ]);
+    assert.notEqual(created[0].name, created[4].name);
+    assert.equal(prompts, 0);
+    host.querySelector(".journalinator-new").click();
+    assert.equal(prompts, 1);
+  } finally {
+    dialog.prompt = prompt;
+    app._onClose();
+    host.remove();
+  }
+});
+
+test("toolbar dropdowns filter cards and change the saved board theme", async () => {
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const initialTheme = game.settings.get("fvtt-journalinator", "boardTheme");
+  try {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+    assert.equal(host.querySelector(".jn-current-user").textContent, game.user.name);
+    assert.equal(host.querySelector(".journalinator-filterbar"), null);
+    const filters = host.querySelector(".journalinator-filters");
+    filters.querySelector("summary").click();
+    assert.equal(filters.open, true);
+    assert.ok(filters.querySelector(`[data-kind="author"][value="${game.user.id}"]`));
+    const style = filters.querySelector('[value="memo"]');
+    style.click();
+    const tavern = host.querySelector(`.jn-card[data-id="${tavernId}"]`);
+    assert.ok(tavern.classList.contains("jn-dimmed"));
+    assert.equal(filters.open, true);
+    style.click();
+    assert.ok(!tavern.classList.contains("jn-dimmed"));
+    const theme = host.querySelector(".journalinator-theme");
+    assert.equal(host.querySelector(".journalinator-stats").nextElementSibling, theme);
+    theme.querySelector("summary").dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    assert.equal(filters.open, false);
+    theme.querySelector("summary").click();
+    theme.querySelector('[data-theme-choice="fantasy"]').click();
+    await settle();
+    assert.equal(game.settings.get("fvtt-journalinator", "boardTheme"), "fantasy");
+    assert.equal(host.querySelector(".journalinator-root").dataset.theme, "fantasy");
+    assert.equal(theme.open, false);
+  } finally {
+    await game.settings.set("fvtt-journalinator", "boardTheme", initialTheme);
+    app._onClose();
+    host.remove();
+  }
+});
+
+test("cards place foreground images by type and change the background independently", async () => {
+  await requestWrite({ type: "createNote", title: "Camera test", style: "document", x: 0, y: 0 });
+  await settle();
+  const note = sharedByName("Camera test");
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  try {
+    await redraw();
+    const card = host.querySelector(`.jn-card[data-id="${note.id}"]`);
+    const camera = card.querySelector(".jn-card-image-button");
+    assert.equal(camera.hidden, false);
+    answers.push("https://example.com/content.png");
+    camera.click();
+    await settle();
+    await redraw();
+    assert.ok(card.querySelector(".jn-card-excerpt + .jn-card-image"));
+    assert.equal(card.querySelector(".jn-card-image img").getAttribute("src"), "https://example.com/content.png");
+    card.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, button: 2 }));
+    answers.push("https://example.com/background.png");
+    host.querySelector('[data-action="card-background"]').click();
+    await settle();
+    await redraw();
+    assert.equal(card.querySelector(".jn-card-background").getAttribute("src"), "https://example.com/background.png");
+    card.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    card.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0 }));
+    await redraw();
+    const sidebar = host.querySelector(".journalinator-editor");
+    assert.equal(sidebar.querySelector(".jn-doc").hidden, true);
+    assert.equal(sidebar.querySelector(".jn-doc .jn-block"), null);
+    assert.ok(sidebar.querySelector(".jn-note-tool summary"));
+    assert.equal(sidebar.querySelector(".journalinator-set-image, .journalinator-style, .journalinator-authors-toggle"), null);
+    const type = sidebar.querySelector(".journalinator-kind");
+    type.value = "wanted";
+    type.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    await redraw();
+    assert.equal(camera.hidden, false);
+    assert.ok(card.querySelector(".jn-card-wanted-heading + .jn-card-image"));
+    answers.push("https://example.com/target.png");
+    camera.click();
+    await settle();
+    await redraw();
+    assert.equal(card.querySelector(".jn-card-image img").getAttribute("src"), "https://example.com/target.png");
+    answers.push("");
+    camera.click();
+    await settle();
+    await redraw();
+    assert.equal(card.querySelector(".jn-card-image").hidden, true);
+    assert.equal(card.querySelector(".jn-card-background").getAttribute("src"), "https://example.com/background.png");
+  } finally {
+    app._onClose();
+    host.remove();
+  }
+});
+
+test("search holds focus and results through input and a background redraw", async () => {
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  await redraw();
+  try {
+    let input = host.querySelector(".journalinator-search");
+    input.focus();
+    assert.equal(host.querySelector(".jn-switcher").style.display, "block");
+    input.value = "Tavern";
+    input.setSelectionRange(1, 3);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    assert.equal(document.activeElement, input);
+    assert.ok(host.querySelector(`.jn-switcher-item[data-id="${tavernId}"]`));
+    await redraw();
+    input = host.querySelector(".journalinator-search");
+    assert.equal(document.activeElement, input);
+    assert.equal(input.selectionStart, 1);
+    assert.equal(input.selectionEnd, 3);
+    assert.equal(host.querySelector(".jn-switcher").style.display, "block");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    assert.equal(input.value, "");
+    assert.equal(host.querySelector(".jn-switcher").style.display, "none");
+    input.focus();
+    assert.equal(host.querySelector(".jn-switcher").style.display, "block");
+    host.querySelector(".journalinator-stats").focus();
+    assert.equal(host.querySelector(".jn-switcher").style.display, "none");
+  } finally {
+    app._onClose();
+    host.remove();
+  }
+});
+
+test("legacy attachments follow the board edge when a card resizes", async () => {
+  const canvas = new JournalCanvas({});
+  const fixture = (id, style, links = []) => ({ _id: id, name: id, system: { style, blocks: [], links } });
+  const link = { id: "wire", targetId: "memo", sourceSide: "right", targetSide: "top" };
+  const notes = [fixture("target", "wanted", [link]), fixture("memo", "memo")];
+  const cards = { target: { x: 0, y: 0, width: 250 }, memo: { x: 400, y: 250, width: 360 } };
+  canvas.update(notes, { cards, labels: {} }, { deferGeometry: true });
+
+  const source = canvas.cardEls.get("target");
+  let height = 300;
+  Object.defineProperty(source, "offsetHeight", { get: () => canvas.root.isConnected ? height : 0 });
+  document.body.appendChild(canvas.root);
+
+  const originalObserver = globalThis.ResizeObserver;
+  let resized;
+  globalThis.ResizeObserver = class {
+    constructor(callback) { resized = callback; }
+    observe() {}
+    disconnect() {}
+  };
+  try {
+    canvas.refreshGeometry();
+    const path = () => canvas.svg.querySelector(".jn-thread").getAttribute("d");
+    assert.match(path(), /^M253 150 /);
+    assert.match(path(), / L580 247$/);
+    height = 400;
+    resized();
+    await settle();
+    assert.match(path(), /^M253 200 /);
+    assert.match(path(), / L580 247$/);
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+    if (originalObserver) globalThis.ResizeObserver = originalObserver;
+    else delete globalThis.ResizeObserver;
+  }
+});
+
+test("Alt-click connects edges through saved board pins and the toolbar can replace the route", async () => {
+  const a = sharedByName("Tavern");
+  const b = sharedByName("New Name");
+  await requestWrite({ type: "resizeCard", noteId: a.id, width: 250, height: 120 });
+  await requestWrite({ type: "resizeCard", noteId: b.id, width: 250, height: 120 });
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  await redraw();
+  const card = id => host.querySelector(`.jn-card[data-id="${id}"]`);
+  const click = (page, x, y, altKey = false) => {
+    const data = notesStore.getLayout().cards[page.id];
+    const angle = data.rotation * Math.PI / 180;
+    const dx = (x - 0.5) * 250, dy = (y - 0.5) * 120;
+    card(page.id).querySelector(".jn-card-title").dispatchEvent(new MouseEvent("click", {
+      bubbles: true, button: 0, altKey,
+      clientX: data.x + 125 + dx * Math.cos(angle) - dy * Math.sin(angle),
+      clientY: data.y + 60 + dx * Math.sin(angle) + dy * Math.cos(angle)
+    }));
+  };
+  const selectTool = () => host.querySelector(".journalinator-add-link").click();
+  const match = (point, x, y) => {
+    assert.ok(Math.abs(point.x - x) < 1e-8);
+    assert.ok(Math.abs(point.y - y) < 1e-8);
+  };
+  try {
+    click(a, 0.5, 0.5, true);
+    assert.equal(host.querySelector(".jn-canvas").dataset.placingLink, "true");
+    assert.equal(host.querySelector(".jn-link-preview"), null);
+    click(a, 0.32, 0.96);
+    assert.ok(host.querySelector(".jn-link-preview"));
+    assert.equal(host.querySelector(".jn-card-text-input"), null);
+    assert.ok(!a.system.links.some(link => link.targetId === b.id));
+    for (const [clientX, clientY] of [[100, 310], [260, 350]]) {
+      host.querySelector(".jn-canvas").dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, clientX, clientY }));
+    }
+    assert.equal(host.querySelectorAll(".jn-board-pin").length, 2);
+    click(b, 0.98, 0.35);
+    await settle();
+    const link = a.system.links.find(link => link.targetId === b.id);
+    match(link.sourcePoint, 0.32, 1);
+    match(link.targetPoint, 1, 0.35);
+    assert.deepEqual(link.pins, [{ x: 100, y: 310 }, { x: 260, y: 350 }]);
+    await redraw();
+    const thread = host.querySelector(`g[data-id="${link.id}"]`);
+    assert.equal(thread.querySelectorAll(".jn-thread-pin").length, 4);
+    assert.match(thread.querySelector(".jn-thread").getAttribute("d"), /L100 310 M100 310/);
+    assert.match(thread.parentElement.getAttribute("mask"), /^url\(#jn-thread-mask-/);
+    const lineEnd = thread.querySelector(".jn-thread").getAttribute("d").split(" L").at(-1);
+    assert.equal(thread.querySelector(".jn-link-arrow").getAttribute("points").split(" ")[0], lineEnd.replace(" ", ","));
+    assert.equal(host.querySelector(".jn-link-preview"), null);
+    const marker = thread.querySelector('[data-pin-index="0"]');
+    const canvas = host.querySelector(".jn-canvas");
+    marker.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 100, clientY: 310 }));
+    canvas.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 130, clientY: 300 }));
+    assert.equal(marker.getAttribute("cx"), "130");
+    canvas.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 130, clientY: 300 }));
+    await settle();
+    assert.deepEqual(a.system.links.find(item => item.id === link.id).pins, [{ x: 130, y: 300 }, { x: 260, y: 350 }]);
+    selectTool();
+    click(a, 0.98, 0.68);
+    click(b, 0.26, 0.04);
+    await settle();
+    const links = a.system.links.filter(item => item.targetId === b.id);
+    assert.equal(links.length, 1);
+    assert.equal(links[0].id, link.id);
+    match(links[0].sourcePoint, 1, 0.68);
+    match(links[0].targetPoint, 0.26, 0);
+    assert.deepEqual(links[0].pins, []);
+  } finally {
+    app._onClose();
+    host.remove();
+  }
+});
+
+test("left drag plucks one thread and keeps its anchors and the other thread fixed", async () => {
+  const canvas = new JournalCanvas({});
+  document.body.appendChild(canvas.root);
+  const notes = ["a", "b", "c"].map(_id => ({ _id, name: _id, system: { style: "sticky", blocks: [], links: [] } }));
+  notes[0].system.links = [
+    { id: "ab", targetId: "b", sourceSide: "right", targetSide: "left" },
+    { id: "ac", targetId: "c", sourceSide: "right", targetSide: "left" }
+  ];
+  try {
+    canvas.update(notes, { cards: { a: { x: 0, y: 0 }, b: { x: 390, y: 0 }, c: { x: 390, y: 200 } } });
+    const line = id => canvas.svg.querySelector(`g[data-id="${id}"] .jn-thread`).getAttribute("d");
+    const original = line("ab"), other = line("ac");
+    const hit = canvas.root.querySelector('.jn-link-hit[data-id="ab"]');
+    const send = (target, type, y) => target.dispatchEvent(new MouseEvent(type, {
+      bubbles: true, button: 0, clientX: 285, clientY: y
+    }));
+    send(hit, "pointerdown", 50);
+    send(canvas.root, "pointermove", 110);
+    const pulled = line("ab");
+    assert.notEqual(pulled, original);
+    assert.equal(pulled.split(" L")[0], original.split(" L")[0]);
+    assert.equal(pulled.split(" L").at(-1), original.split(" L").at(-1));
+    assert.equal(line("ac"), other);
+    send(canvas.root, "pointerup", 110);
+    await settle();
+    assert.notEqual(line("ab"), pulled);
+    assert.equal(line("ac"), other);
+    assert.equal(canvas.selectedLinkId, null);
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
 });
 
 test("no unexpected errors were reported", () => {

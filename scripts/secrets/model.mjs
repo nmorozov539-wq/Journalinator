@@ -168,6 +168,12 @@ export function reconcileVault(vault, shared) {
       changed = true;
     }
   }
+  for (const [id, label] of Object.entries(vault.labels)) {
+    if (label.noteId && !vault.notes[label.noteId] && !shared.notes.has(label.noteId)) {
+      delete vault.labels[id];
+      changed = true;
+    }
+  }
   return changed;
 }
 

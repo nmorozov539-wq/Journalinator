@@ -167,7 +167,10 @@ export function installFoundry({ user, users, worldId = "test-world" }) {
     world: { id: worldId },
     i18n: {
       lang: "en",
-      localize: key => EN[key] ?? key,
+      localize: (key, data) => {
+        const text = EN[key] ?? key;
+        return data ? text.replace(/\{([^{}]+)\}/g, (_, name) => data[name]) : text;
+      },
       format: (text, data) => text.replace(/\{(\w+)\}/g, (whole, key) => (data[key] ?? whole)),
       has: key => Object.hasOwn(EN, key)
     },

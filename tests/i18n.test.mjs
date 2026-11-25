@@ -23,6 +23,18 @@ test("English and Russian define exactly the same keys", () => {
   assert.deepEqual(Object.keys(ru).sort(), Object.keys(en).sort());
 });
 
+test("Foundry can expand dotted localization keys without a string/object collision", () => {
+  for (const dictionary of [en, ru]) {
+    for (const key of Object.keys(dictionary)) {
+      const parts = key.split(".");
+      for (let i = 1; i < parts.length; i++) {
+        const parent = parts.slice(0, i).join(".");
+        assert.ok(!Object.hasOwn(dictionary, parent), `${parent} conflicts with ${key}`);
+      }
+    }
+  }
+});
+
 test("no language string is empty", () => {
   for (const [key, value] of Object.entries(en)) assert.ok(value.length, `en: ${key}`);
   for (const [key, value] of Object.entries(ru)) assert.ok(value.length, `ru: ${key}`);
