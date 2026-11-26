@@ -1,15 +1,21 @@
 import JournalCanvas from "./canvas.mjs";
 import PrivateNoteEditor from "./private-editor.mjs";
-import { privateStore } from "../store/private-store.mjs";
+import { privateStore, MAX_TITLE_LENGTH } from "../store/private-store.mjs";
 import { CARD_STYLES, cardStyleKey } from "../styles/registry.mjs";
 import { linkAnchors, moveThreadPin } from "../card-ports.mjs";
 import { isLinkColor, normalizeLinkColor } from "../link-colors.mjs";
+import {
+  LINK_ENDS, LINK_MATERIALS, LINK_PATTERNS, LINK_SLACK, LINK_THICKNESS,
+  defaultLinkCosmetics, isGeneratedTitle, legacyStylePresentation, resolveAttachment,
+  resolvePresentation, sanitizeCardAnchors, stripSecretPrefix
+} from "../presentation.mjs";
 import { attachedStampIds, DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, stampUrl } from "../stamps.mjs";
 import { toggleTaskListItem } from "../markdown.mjs";
 import { t } from "../i18n.mjs";
 
 const { DialogV2 } = foundry.applications.api;
 const esc = text => foundry.utils.escapeHTML(String(text ?? ""));
+const MAX_LINK_ANCHOR_ID_LENGTH = 64;
 
 /** The private tab's canvas, editor, selection, trash, and clipboard actions. */
 export default class PrivateWorkspace {
@@ -181,10 +187,39 @@ export default class PrivateWorkspace {
     return this.#save(data => {
       const note = data.notes[id];
       if (!note) return;
-      if (typeof patch.title === "string") note.title = patch.title.slice(0, 200);
-      if (typeof patch.targetHeading === "string") note.targetHeading = patch.targetHeading.slice(0, 80);
+      const oldTitle = String(note.title ?? "");
+      const oldBare = stripSecretPrefix(oldTitle).trim();
+      const resolved = resolvePresentation({ name: oldTitle, system: note });
+      const { label: resolvedLabel, ...presentationFields } = resolved;
+      let label = resolvedLabel;
+      let presentationTouched = false;
+      const presentation = { ...presentationFields };
+
+      if (typeof patch.title === "string") {
+        const title = patch.title.slice(0, 200);
+        note.title = title;
+        if (!isGeneratedTitle(title)) {
+          presentation.nameGenerated = false;
+          if (!label || label === oldBare) label = stripSecretPrefix(title).trim();
+          presentationTouched = true;
+        }
+      }
+      if (typeof patch.targetHeading === "string") {
+        note.targetHeading = patch.targetHeading.slice(0, 80);
+        presentation.heading = note.targetHeading.trim();
+        presentationTouched = true;
+      }
       if (patch.kind === "note" || patch.kind === "location") note.kind = patch.kind;
-      if (Object.hasOwn(CARD_STYLES, patch.style)) note.style = patch.style;
+      if (Object.hasOwn(CARD_STYLES, patch.style)) {
+        note.style = patch.style;
+        Object.assign(presentation, legacyStylePresentation(patch.style));
+        presentationTouched = true;
+      }
+      if (presentationTouched) {
+        note.presentation = presentation;
+        note.label = label.slice(0, MAX_TITLE_LENGTH);
+        note.schemaVersion = 1;
+      }
       if ("image" in patch) note.image = patch.image;
       if ("backgroundImage" in patch) note.backgroundImage = patch.backgroundImage;
       if (Array.isArray(patch.blocks) && patch.blocks.length) note.blocks = patch.blocks;
@@ -286,13 +321,14 @@ export default class PrivateWorkspace {
       }
       source.links.push({
         id: foundry.utils.randomID(), targetId, ...anchors,
+        ...defaultLinkCosmetics(), routeAnchors: [],
         label: "", direction: "one", color: "", lineStyle: "solid",
         origin: "drawn", edited: false, createdBy: this.page ? privateStore.ownerId(this.page) || "" : ""
       });
     });
   }
 
-  async updateLink(noteId, linkId, fields) {
+  async updateLink(noteId, linkId, fields = {}) {
     return this.#save(data => {
       const link = data.notes[noteId]?.links.find(item => item.id === linkId);
       if (!link) return;
@@ -300,6 +336,31 @@ export default class PrivateWorkspace {
       if (["none", "one", "two"].includes(fields.direction)) link.direction = fields.direction;
       if (isLinkColor(fields.color)) link.color = normalizeLinkColor(fields.color);
       if (fields.lineStyle === "solid" || fields.lineStyle === "dashed") link.lineStyle = fields.lineStyle;
+      if (LINK_MATERIALS.includes(fields.material)) link.material = fields.material;
+      if (Number.isFinite(fields.thickness)) {
+        link.thickness = Math.min(LINK_THICKNESS.max, Math.max(LINK_THICKNESS.min, fields.thickness));
+      }
+      if (Number.isFinite(fields.slack)) {
+        link.slack = Math.min(LINK_SLACK.max, Math.max(LINK_SLACK.min, fields.slack));
+      }
+      if (LINK_PATTERNS.includes(fields.pattern)) {
+        link.pattern = fields.pattern;
+        if (fields.lineStyle === undefined) {
+          link.lineStyle = fields.pattern === "interrupted" ? "dashed" : "solid";
+        }
+      }
+      if (LINK_ENDS.includes(fields.ends)) link.ends = fields.ends;
+      if (typeof fields.secondaryColor === "string") {
+        link.secondaryColor = isLinkColor(fields.secondaryColor)
+          ? normalizeLinkColor(fields.secondaryColor) : "";
+      }
+      // Anchor ids are cosmetic attachment points; link identity and target are never editable here.
+      if (typeof fields.sourceAnchorId === "string") {
+        link.sourceAnchorId = fields.sourceAnchorId.slice(0, MAX_LINK_ANCHOR_ID_LENGTH);
+      }
+      if (typeof fields.targetAnchorId === "string") {
+        link.targetAnchorId = fields.targetAnchorId.slice(0, MAX_LINK_ANCHOR_ID_LENGTH);
+      }
       const pins = moveThreadPin(link.pins, fields.pinMove);
       if (pins) link.pins = pins;
       link.edited = true;
@@ -493,6 +554,25 @@ export default class PrivateWorkspace {
         const texts = Array.isArray(entry?.blocks) && entry.blocks.length ? entry.blocks : [""];
         note.blocks = texts.map(text => ({ blockId: foundry.utils.randomID(), text: String(text ?? "") }));
         if (typeof entry?.targetHeading === "string") note.targetHeading = entry.targetHeading.slice(0, 80);
+        if (typeof entry?.label === "string") note.label = entry.label.slice(0, MAX_TITLE_LENGTH);
+        if (entry?.presentation && typeof entry.presentation === "object") {
+          const presentation = resolvePresentation({
+            name: entry?.title ?? note.title,
+            system: { ...note, presentation: { ...(note.presentation ?? {}), ...entry.presentation } }
+          });
+          const { label: _ignored, ...presentationFields } = presentation;
+          note.presentation = presentationFields;
+        }
+        if (entry?.attachment && typeof entry.attachment === "object") {
+          note.attachment = resolveAttachment({
+            system: { attachment: { ...(note.attachment ?? {}), ...entry.attachment } }
+          });
+        }
+        if (Number.isInteger(entry?.schemaVersion) && entry.schemaVersion > 0) {
+          note.schemaVersion = entry.schemaVersion;
+        }
+        const pastedAnchors = sanitizeCardAnchors(entry?.card?.anchors ?? entry?.anchors);
+        if (Object.keys(pastedAnchors).length) card.anchors = { ...card.anchors, ...pastedAnchors };
         data.notes[note.id] = note;
         data.layout.cards[note.id] = card;
         ids.push(note.id);

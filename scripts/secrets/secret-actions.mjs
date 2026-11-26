@@ -3,12 +3,19 @@ import { notesStore } from "../store/notes-store.mjs";
 import { requestWrite } from "../socket.mjs";
 import { reconcileTypedLinks, parseWikilinks } from "../wikilinks.mjs";
 import { CARD_STYLES, seedTilt } from "../styles/registry.mjs";
-import { linkAnchors, moveThreadPin, validCardPorts } from "../card-ports.mjs";
+import { DEFAULT_CARD_PORTS, linkAnchors, moveThreadPin, validCardPorts } from "../card-ports.mjs";
 import { isLinkColor, normalizeLinkColor } from "../link-colors.mjs";
 import { noteImagePath } from "../image-url.mjs";
 import {
+  LINK_ENDS, LINK_MATERIALS, LINK_PATTERNS, LINK_SLACK, LINK_THICKNESS, MAIN_PIN,
+  NOTE_FONT_KEYS, PICTURE_LAYOUTS, PIN_STYLES, PRESENTATION_STYLES,
+  defaultLinkCosmetics, isGeneratedTitle, legacyStylePresentation, resolveAttachment, resolvePresentation
+} from "../presentation.mjs";
+import { canUseGmTier } from "./access.mjs";
+import {
   makeSecretTitle, stripSecretPrefix, hasSecretPrefix, mergeBlocks, orderOf, declassifyAnchor,
-  resolveSecretTitle, findFreeSpot
+  resolveSecretTitle, findFreeSpot, normalizeRouteAnchors, normalizeVaultCard, normalizeVaultLink,
+  randomVaultId
 } from "./model.mjs";
 import { t } from "../i18n.mjs";
 import { attachedStampIds, DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, stampUrl } from "../stamps.mjs";
@@ -34,7 +41,36 @@ const randomID = () => foundry.utils.randomID();
 const warn = text => ui.notifications?.warn(`Journalinator: ${text}`);
 
 function noteLike(note) {
-  return note ? { id: note.id, name: note.name, system: { formerNames: note.formerNames ?? note.system?.formerNames ?? [] } } : null;
+  if (!note) return null;
+  const system = note.system && typeof note.system === "object" ? note.system : note;
+  const presentation = resolvePresentation({ name: note.name, system });
+  const { label: resolvedLabel, ...presentationFields } = presentation;
+  return {
+    id: note.id,
+    name: note.name,
+    system: {
+      formerNames: note.formerNames ?? system.formerNames ?? [],
+      schemaVersion: Number.isInteger(system.schemaVersion) ? system.schemaVersion : 1,
+      label: typeof system.label === "string" ? system.label : resolvedLabel,
+      presentation: presentationFields,
+      attachment: resolveAttachment({ system })
+    }
+  };
+}
+
+/** Resolves everything a freshly created note stores outside its content blocks. */
+function newNoteSchema(name, style, label) {
+  const presentation = resolvePresentation({
+    name,
+    system: { style, label, targetHeading: "" }
+  });
+  const { label: _ignored, ...presentationFields } = presentation;
+  return {
+    schemaVersion: 1,
+    label,
+    presentation: presentationFields,
+    attachment: resolveAttachment({})
+  };
 }
 
 /** Resolves when `predicate()` is true after shared documents change, or false on timeout. */
@@ -113,18 +149,34 @@ function createSecretNoteIn(vault, { title, kind = "note", x = 0, y = 0, style =
   const id = randomID();
   const width = CARD_STYLES[style]?.defaultWidth ?? 190;
   const spot = findFreeSpot(mergedCards(vault), width, CARD_STYLES[style]?.defaultHeight ?? 90, x, y);
+  const name = makeSecretTitle(title).slice(0, MAX_TITLE_LENGTH);
+  const humanTitle = stripSecretPrefix(name).trim();
+  const label = isGeneratedTitle(name) || !humanTitle ? "" : humanTitle.slice(0, MAX_TITLE_LENGTH);
   vault.notes[id] = {
     id,
-    name: makeSecretTitle(title).slice(0, MAX_TITLE_LENGTH),
+    name,
     kind,
     style,
+    targetHeading: "",
+    ...newNoteSchema(name, style, label),
     image: null,
+    backgroundImage: null,
     blocks: [{ blockId: randomID(), text: "", authorId: game.user.id }],
     links: [],
     authorId: game.user.id,
     createdAt: now(),
     updatedAt: now(),
-    card: { x: spot.x, y: spot.y, width: null, height: null, rotation: seedTilt(style) }
+    card: {
+      x: spot.x,
+      y: spot.y,
+      width: null,
+      height: null,
+      rotation: seedTilt(style),
+      ports: [...DEFAULT_CARD_PORTS],
+      anchors: {
+        main: { kind: "main", x: MAIN_PIN.x, y: MAIN_PIN.y, createdBy: game.user.id }
+      }
+    }
   };
   return id;
 }
@@ -189,8 +241,18 @@ export function renameSecretNote(noteId, base) {
     if (Object.values(vault.notes).some(n => n.id !== noteId && n.name.toLowerCase() === title.toLowerCase())) {
       return warn(t("JN.Secret.TitleExists", { title }));
     }
+    const oldBare = stripSecretPrefix(note.name).trim();
+    const resolved = resolvePresentation(note);
     note.formerNames = [...new Set([...(note.formerNames ?? []), note.name])].filter(n => n !== title).slice(-20);
     note.name = title;
+    if (!isGeneratedTitle(title)) {
+      const { label, ...presentationFields } = resolved;
+      note.presentation = { ...presentationFields, nameGenerated: false };
+      note.schemaVersion = 1;
+      if (!label || label === oldBare) {
+        note.label = stripSecretPrefix(title).trim().slice(0, MAX_TITLE_LENGTH);
+      }
+    }
     note.updatedAt = now();
   });
 }
@@ -201,8 +263,15 @@ export function setSecretNoteStyle(noteId, style, kind) {
   return vaultStore.mutate(vault => {
     const note = vault.notes[noteId];
     if (!note) return;
+    const resolved = resolvePresentation(note);
+    const { label: _ignored, ...presentationFields } = resolved;
     note.style = style;
     if (kind) note.kind = kind;
+    // Keep stored presentation in sync with the legacy style key without dropping a chosen
+    // font, picture layout or heading.
+    note.presentation = { ...presentationFields, ...legacyStylePresentation(style) };
+    note.schemaVersion = 1;
+    note.updatedAt = now();
   });
 }
 
@@ -219,7 +288,71 @@ export function setSecretNoteKind(noteId, kind) {
 export function setSecretTargetHeading(noteId, heading) {
   if (typeof heading !== "string" || heading.length > 80) return;
   return vaultStore.mutate(vault => {
-    if (vault.notes[noteId]) vault.notes[noteId].targetHeading = heading.trim();
+    const note = vault.notes[noteId];
+    if (!note) return;
+    const value = heading.trim();
+    const resolved = resolvePresentation(note);
+    const { label: _ignored, ...presentationFields } = resolved;
+    note.targetHeading = value;
+    note.presentation = { ...presentationFields, heading: value };
+    note.schemaVersion = 1;
+    note.updatedAt = now();
+  });
+}
+
+/** GM-only presentation update. Unknown values are ignored rather than written through. */
+export function setSecretNotePresentation(noteId, fields = {}) {
+  if (!canUseGmTier() || !fields || typeof fields !== "object") return;
+  return vaultStore.mutate(vault => {
+    const note = vault.notes[noteId];
+    if (!note) return;
+    const stored = note.presentation && typeof note.presentation === "object"
+      ? { ...note.presentation } : {};
+    if (PRESENTATION_STYLES.includes(fields.extendedStyle)) stored.extendedStyle = fields.extendedStyle;
+    if (NOTE_FONT_KEYS.includes(fields.font)) stored.font = fields.font;
+    if (PICTURE_LAYOUTS.includes(fields.pictureLayout)) stored.pictureLayout = fields.pictureLayout;
+    if (typeof fields.forceExtended === "boolean") stored.forceExtended = fields.forceExtended;
+    if (typeof fields.torn === "boolean") stored.torn = fields.torn;
+    if (typeof fields.nameGenerated === "boolean") stored.nameGenerated = fields.nameGenerated;
+    if (typeof fields.heading === "string") {
+      stored.heading = fields.heading.slice(0, MAX_TITLE_LENGTH);
+      // An explicitly empty heading clears the legacy fallback too; an absent heading leaves it.
+      if (stored.heading === "") note.targetHeading = "";
+    }
+    const presentation = resolvePresentation({ name: note.name, system: { ...note, presentation: stored } });
+    const { label: _ignored, ...presentationFields } = presentation;
+    note.presentation = presentationFields;
+    note.schemaVersion = 1;
+    note.updatedAt = now();
+  });
+}
+
+/** GM-only attachment-pin update; radii are clamped by resolveAttachment. */
+export function setSecretNoteAttachment(noteId, fields = {}) {
+  if (!canUseGmTier() || !fields || typeof fields !== "object") return;
+  return vaultStore.mutate(vault => {
+    const note = vault.notes[noteId];
+    if (!note) return;
+    const stored = note.attachment && typeof note.attachment === "object"
+      ? { ...note.attachment } : {};
+    if (typeof fields.mainPinEnabled === "boolean") stored.mainPinEnabled = fields.mainPinEnabled;
+    if (Number.isFinite(fields.mainSnapRadius)) stored.mainSnapRadius = fields.mainSnapRadius;
+    if (Number.isFinite(fields.minorSnapRadius)) stored.minorSnapRadius = fields.minorSnapRadius;
+    if (PIN_STYLES.includes(fields.pinStyle)) stored.pinStyle = fields.pinStyle;
+    note.attachment = resolveAttachment({ system: { attachment: stored } });
+    note.schemaVersion = 1;
+    note.updatedAt = now();
+  });
+}
+
+export function setSecretNoteLabel(noteId, label) {
+  if (!canUseGmTier() || typeof label !== "string") return;
+  return vaultStore.mutate(vault => {
+    const note = vault.notes[noteId];
+    if (!note) return;
+    note.label = label.slice(0, MAX_TITLE_LENGTH);
+    note.schemaVersion = 1;
+    note.updatedAt = now();
   });
 }
 
@@ -445,6 +578,55 @@ export async function declassifyBlock(noteId, blockId) {
   return true;
 }
 
+/**
+ * Builds the public payload for a declassified note. Pure so it can be tested without a vault:
+ * `sharedIds` is the set of live shared note ids this GM can see. Link ids are kept; only a
+ * duplicate id within the outgoing link list is regenerated.
+ */
+export function buildDeclassifiedNote(note, title, sharedIds = new Set()) {
+  note = note && typeof note === "object" ? note : {};
+  const presentation = resolvePresentation(note);
+  const attachment = resolveAttachment(note);
+  const { label: resolvedLabel, ...presentationFields } = presentation;
+  const seen = new Set();
+  const links = [];
+  for (const link of Array.isArray(note.links) ? note.links : []) {
+    if (link?.origin === "typed" || !sharedIds.has(link?.targetId)) continue;
+    if (link.targetId === note.id) continue;
+    const clean = normalizeVaultLink(link);
+    // Never publish a waypoint that names a still-secret note: the id alone would reveal that
+    // hidden content exists. Self waypoints and live shared notes are safe.
+    clean.routeAnchors = (clean.routeAnchors ?? [])
+      .filter(anchor => anchor.noteId === note.id || sharedIds.has(anchor.noteId));
+    if (seen.has(clean.id)) clean.id = randomVaultId();
+    seen.add(clean.id);
+    links.push(clean);
+  }
+  return {
+    noteId: note.id,
+    title: String(title ?? "").trim().slice(0, MAX_TITLE_LENGTH),
+    kind: note.kind === "location" ? "location" : "note",
+    style: Object.hasOwn(CARD_STYLES, note.style) ? note.style : "sticky",
+    targetHeading: typeof note.targetHeading === "string" ? note.targetHeading.trim().slice(0, 80) : "",
+    schemaVersion: 1,
+    label: (typeof note.label === "string" ? note.label : resolvedLabel).slice(0, MAX_TITLE_LENGTH),
+    presentation: presentationFields,
+    attachment,
+    image: typeof note.image === "string" ? note.image : null,
+    backgroundImage: typeof note.backgroundImage === "string" ? note.backgroundImage : null,
+    blocks: (Array.isArray(note.blocks) ? note.blocks : []).map(block => ({
+      blockId: typeof block?.blockId === "string" && block.blockId ? block.blockId : randomVaultId(),
+      text: typeof block?.text === "string" ? block.text : ""
+    })),
+    links,
+    formerNames: (Array.isArray(note.formerNames) ? note.formerNames : [])
+      .filter(name => typeof name === "string")
+      .slice(-20)
+      .map(name => name.slice(0, MAX_TITLE_LENGTH)),
+    card: normalizeVaultCard(note.card, attachment.mainPinEnabled, note.authorId)
+  };
+}
+
 /** Publishes a whole secret note under `title` (no GM prefix), keeping its id, card, and links. */
 export async function declassifyNote(noteId, title) {
   const note = vaultStore.data?.notes[noteId];
@@ -462,26 +644,9 @@ export async function declassifyNote(noteId, title) {
   }
 
   const sharedIds = new Set(liveSharedNotes().map(p => p.id));
-  const publicLinks = (note.links ?? [])
-    .filter(l => l.origin !== "typed" && sharedIds.has(l.targetId))
-    .map(link => {
-      const { targetId, label, direction, color, lineStyle } = link;
-      return { targetId, label, direction, color: normalizeLinkColor(color), lineStyle, ...linkAnchors(link) };
-    });
+  const payload = buildDeclassifiedNote(note, title, sharedIds);
 
-  const ok = await sendAndConfirm({
-    type: "gmCreateNote",
-    noteId,
-    title,
-    kind: note.kind,
-    style: note.style,
-    targetHeading: note.targetHeading,
-    image: note.image,
-    backgroundImage: note.backgroundImage,
-    blocks: note.blocks.map(({ blockId, text }) => ({ blockId, text })),
-    links: publicLinks,
-    card: note.card
-  }, () => !!notesStore.getSharedPage(noteId));
+  const ok = await sendAndConfirm({ type: "gmCreateNote", ...payload }, () => !!notesStore.getSharedPage(noteId));
   if (!ok) {
     warn(t("JN.Secret.NoteTimeout"));
     return false;
@@ -489,7 +654,9 @@ export async function declassifyNote(noteId, title) {
 
   // Links to notes that are still secret stay GM-only, now hanging off the shared note.
   await vaultStore.mutate(vault => {
-    const stillSecret = (note.links ?? []).filter(l => l.origin !== "typed" && !sharedIds.has(l.targetId) && vault.notes[l.targetId]);
+    const stillSecret = (note.links ?? [])
+      .filter(l => l.origin !== "typed" && !sharedIds.has(l.targetId) && vault.notes[l.targetId])
+      .map(normalizeVaultLink);
     if (stillSecret.length) vault.hiddenLinks[noteId] = [...(vault.hiddenLinks[noteId] ?? []), ...stillSecret];
     delete vault.notes[noteId];
   });
@@ -501,6 +668,8 @@ export async function declassifyNote(noteId, title) {
 function newLink(targetId, extra = {}) {
   return {
     id: randomID(), targetId, label: "", direction: "one", color: "", lineStyle: "solid",
+    ...defaultLinkCosmetics(),
+    sourceAnchorId: "", targetAnchorId: "", routeAnchors: [],
     origin: "drawn", edited: false, createdBy: game.user.id, hint: false, ...extra
   };
 }
@@ -516,31 +685,70 @@ export function addHiddenLink(sourceId, targetId, ports) {
     const anchors = linkAnchors(ports);
     const previous = existing.find(l => l.targetId === targetId);
     if (previous && (!anchors.sourcePoint || !anchors.targetPoint)) return;
-    const links = previous ? existing.map(link => link === previous ? { ...link, ...anchors, origin: "drawn", edited: true } : link)
-      : [...existing, newLink(targetId, anchors)];
+    const links = previous
+      ? existing.map(link => link === previous
+        ? { ...link, ...anchors, ...anchorFields(ports), origin: "drawn", edited: true }
+        : link)
+      : [...existing, newLink(targetId, { ...anchors, ...anchorFields(ports) })];
     if (secret) secret.links = links;
     else if (notesStore.getSharedPage(sourceId)) vault.hiddenLinks[sourceId] = links;
   });
 }
 
-const LINK_FIELDS = ["label", "direction", "color", "lineStyle"];
+function anchorFields(fields) {
+  const clean = {};
+  if (typeof fields?.sourceAnchorId === "string") clean.sourceAnchorId = fields.sourceAnchorId.slice(0, 64);
+  if (typeof fields?.targetAnchorId === "string") clean.targetAnchorId = fields.targetAnchorId.slice(0, 64);
+  if (Array.isArray(fields?.routeAnchors)) clean.routeAnchors = normalizeRouteAnchors(fields.routeAnchors);
+  return clean;
+}
+
+/**
+ * Validates the fields a hidden-link editor may change. Deliberately mirrors the shared link
+ * rules; `id`, `targetId`, `origin` and other identity/semantic fields are never accepted.
+ */
+export function sanitizeHiddenLinkFields(fields) {
+  if (!fields || typeof fields !== "object") return {};
+  const clean = {};
+  if (typeof fields.label === "string") clean.label = fields.label.slice(0, 200);
+  if (["none", "one", "two"].includes(fields.direction)) clean.direction = fields.direction;
+  if (isLinkColor(fields.color)) clean.color = normalizeLinkColor(fields.color);
+  if (fields.lineStyle === "solid" || fields.lineStyle === "dashed") clean.lineStyle = fields.lineStyle;
+  if (LINK_MATERIALS.includes(fields.material)) clean.material = fields.material;
+  if (Number.isFinite(fields.thickness)) {
+    clean.thickness = Math.min(LINK_THICKNESS.max, Math.max(LINK_THICKNESS.min, fields.thickness));
+  }
+  if (Number.isFinite(fields.slack)) {
+    clean.slack = Math.min(LINK_SLACK.max, Math.max(LINK_SLACK.min, fields.slack));
+  }
+  if (LINK_PATTERNS.includes(fields.pattern)) clean.pattern = fields.pattern;
+  if (LINK_ENDS.includes(fields.ends)) clean.ends = fields.ends;
+  if (typeof fields.secondaryColor === "string") {
+    // Match the shared rule: a bad secondary dye degrades to none, not a rejected edit.
+    clean.secondaryColor = isLinkColor(fields.secondaryColor)
+      ? normalizeLinkColor(fields.secondaryColor) : "";
+  }
+  Object.assign(clean, anchorFields(fields));
+  // Keep the legacy dashed flag and the new pattern vocabulary in sync when only one is sent.
+  if ("pattern" in clean && !("lineStyle" in clean)) {
+    clean.lineStyle = clean.pattern === "interrupted" ? "dashed" : "solid";
+  }
+  if ("lineStyle" in clean && !("pattern" in clean)) {
+    clean.pattern = clean.lineStyle === "dashed" ? "interrupted" : "continuous";
+  }
+  return clean;
+}
 
 export function updateHiddenLink(sourceId, linkId, fields) {
   return vaultStore.mutate(vault => {
     const list = vault.notes[sourceId]?.links ?? vault.hiddenLinks[sourceId];
     const link = list?.find(l => l.id === linkId);
     if (!link) return;
-    for (const key of LINK_FIELDS) {
-      if (!(key in fields)) continue;
-      if (key === "color") {
-        if (isLinkColor(fields.color)) link.color = normalizeLinkColor(fields.color);
-      } else {
-        link[key] = fields[key];
-      }
-    }
-    const pins = moveThreadPin(link.pins, fields.pinMove);
+    const clean = sanitizeHiddenLinkFields(fields);
+    for (const [key, value] of Object.entries(clean)) link[key] = value;
+    const pins = moveThreadPin(link.pins, fields?.pinMove);
     if (pins) link.pins = pins;
-    link.edited = true;
+    if (Object.keys(clean).length || pins) link.edited = true;
   });
 }
 
@@ -583,7 +791,16 @@ export async function hideSharedLink(sourceId, linkId) {
   await vaultStore.mutate(vault => {
     const list = vault.hiddenLinks[sourceId] ?? [];
     if (!list.some(l => l.targetId === link.targetId)) {
-      vault.hiddenLinks[sourceId] = [...list, { ...newLink(link.targetId, linkAnchors(link)), label: link.label, direction: link.direction, color: normalizeLinkColor(link.color), lineStyle: link.lineStyle, edited: true }];
+      vault.hiddenLinks[sourceId] = [
+        ...list,
+        {
+          ...normalizeVaultLink(link),
+          id: randomID(),
+          origin: "drawn",
+          edited: true,
+          hint: false
+        }
+      ];
     }
   });
   await requestWrite({ type: "deleteLink", noteId: sourceId, linkId });

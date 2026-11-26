@@ -1,4 +1,5 @@
 import { t } from "./i18n.mjs";
+import { defaultLinkCosmetics } from "./presentation.mjs";
 
 const WIKILINK_RE = /\[\[([^\]|]+?)(?:\|([^\]]+))?\]\]/g;
 
@@ -71,6 +72,8 @@ export async function reconcileTypedLinks(sourceNote, blocks, { findNoteByTitle,
     nextLinks.push({
       id: foundry.utils.randomID(),
       targetId: targetNote.id,
+      ...defaultLinkCosmetics(),
+      routeAnchors: [],
       label,
       direction: "one",
       color: "",

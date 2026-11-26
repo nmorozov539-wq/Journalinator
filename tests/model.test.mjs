@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   mergeBlocks, orderOf, declassifyAnchor, makeSecretTitle, stripSecretPrefix, hasSecretPrefix,
-  resolveSecretTitle, reconcileVault, emptyVault, randomPrefixCode
+  resolveSecretTitle, reconcileVault, emptyVault, randomPrefixCode, normalizeVault,
+  normalizeVaultCard, VAULT_DATA_FORMAT
 } from "../scripts/secrets/model.mjs";
 
 const b = id => ({ blockId: id, text: id });
@@ -93,4 +94,185 @@ test("reconcile touches nothing when the shared journal is unavailable", () => {
   assert.deepEqual(Object.keys(vault.hiddenBlocks.p1.blocks), ["h1"]);
   assert.deepEqual(Object.keys(vault.hiddenLinks), ["p1"]);
   assert.deepEqual(vault.hiddenLinks.p1.map(l => l.id), ["l1"]);
+});
+
+test("format 1 vaults deep-normalize to format 2 and drop unknown fields", () => {
+  const vault = normalizeVault({
+    format: 1,
+    rev: 7,
+    unknownTopLevel: "discard",
+    notes: {
+      n1: {
+        id: "n1",
+        name: "GM-ABCD Lord Vex",
+        kind: "location",
+        style: "wanted",
+        targetHeading: "Wanted",
+        image: null,
+        blocks: [{ blockId: "b1", text: "secret" }],
+        links: [{ id: "l1", targetId: "n2", lineStyle: "dashed", color: "#a393f2", secondaryColor: "url(javascript:alert(1))" }],
+        authorId: "gm",
+        createdAt: 5,
+        updatedAt: 6,
+        card: {
+          x: 10, y: 20, width: 0, height: 100, rotation: 3,
+          ports: ["left", "left"],
+          anchors: {
+            main: { kind: "main", x: 0.5, y: 0, createdBy: "gm" },
+            bad: { kind: "minor", x: 2, y: -1, createdBy: 3 }
+          }
+        },
+        unknownNoteField: "discard"
+      }
+    },
+    hiddenBlocks: {
+      p1: { order: ["h1", "h1", 5], blocks: { h1: { text: "hidden" } } }
+    },
+    hiddenLinks: { p1: [{ id: "hl1", targetId: "n1", lineStyle: "dashed" }] },
+    labels: {
+      lb: { text: "GM label", x: 1, y: 2, size: 14, color: "#b85347", stamp: "skull", noteId: "n1", corner: "center" },
+      bad: { text: "Malicious", x: 0, y: 0, size: 14, color: "url(javascript:alert(1))" }
+    }
+  });
+
+  assert.equal(vault.format, VAULT_DATA_FORMAT);
+  assert.equal(VAULT_DATA_FORMAT, 2);
+  assert.equal(vault.rev, 7);
+  assert.ok(!Object.hasOwn(vault, "unknownTopLevel"));
+  assert.deepEqual(Object.keys(vault), ["format", "rev", "notes", "hiddenBlocks", "hiddenLinks", "labels"]);
+
+  const note = vault.notes.n1;
+  assert.equal(note.id, "n1");
+  assert.ok(!Object.hasOwn(note, "unknownNoteField"));
+  assert.equal(note.label, "Lord Vex", "the GM prefix is not part of the human label");
+  assert.equal(note.presentation.nameGenerated, false);
+  assert.equal(note.schemaVersion, 1);
+  assert.equal(note.presentation.extendedStyle, "target");
+  assert.equal(note.presentation.forceExtended, true);
+  assert.deepEqual(note.attachment, {
+    mainPinEnabled: true, mainSnapRadius: 24, minorSnapRadius: 6, pinStyle: "default"
+  });
+  assert.deepEqual(note.blocks, [{ blockId: "b1", text: "secret", authorId: "" }]);
+
+  const link = note.links[0];
+  assert.equal(link.id, "l1");
+  assert.equal(link.color, "link1");
+  assert.equal(link.lineStyle, "dashed");
+  assert.equal(link.pattern, "interrupted", "old dashed links become interrupted threads");
+  assert.equal(link.material, "linen");
+  assert.equal(link.thickness, 2.6);
+  assert.equal(link.slack, 0.09);
+  assert.equal(link.ends, "standard");
+  assert.equal(link.secondaryColor, "", "unsafe secondary colors degrade to none");
+  assert.equal(link.sourceAnchorId, "");
+  assert.deepEqual(link.routeAnchors, []);
+
+  assert.deepEqual(vault.hiddenBlocks.p1.order, ["h1"]);
+  assert.deepEqual(vault.hiddenBlocks.p1.blocks.h1, { blockId: "h1", text: "hidden", authorId: "" });
+  assert.equal(vault.hiddenLinks.p1[0].pattern, "interrupted");
+  assert.deepEqual(vault.hiddenLinks.p1[0].routeAnchors, []);
+  assert.equal(vault.hiddenLinks.p1[0].material, "linen");
+
+  assert.equal(vault.labels.lb.stamp, "skull");
+  assert.equal(vault.labels.lb.color, "#b85347");
+  assert.equal(vault.labels.lb.corner, "bottom-right", "invalid corners fall back");
+  assert.equal(vault.labels.bad.color, "", "vault label colors use the bounded stamp palette");
+
+  const card = note.card;
+  assert.equal(card.width, null);
+  assert.equal(card.height, 100);
+  assert.deepEqual(card.ports, ["right"], "invalid port lists fall back to the default");
+  assert.deepEqual(card.anchors.main, { kind: "main", x: 0.5, y: 0, createdBy: "gm" });
+  assert.equal(card.anchors.bad, undefined, "anchors outside 0..1 are dropped");
+});
+
+test("vault notes receive label, presentation and attachment defaults", () => {
+  const vault = normalizeVault({
+    format: 1,
+    notes: {
+      a: { id: "a", name: "GM-ABCD Untitled", style: "sticky" },
+      b: { id: "b", name: "GM-EFGH Tavern", style: "torn" }
+    }
+  });
+  assert.equal(vault.notes.a.label, "");
+  assert.equal(vault.notes.a.presentation.nameGenerated, true);
+  assert.equal(vault.notes.a.presentation.extendedStyle, "memo");
+  assert.equal(vault.notes.a.presentation.forceExtended, false);
+  assert.equal(vault.notes.a.attachment.mainPinEnabled, true);
+  assert.deepEqual(vault.notes.a.blocks, []);
+  assert.equal(vault.notes.a.card, null);
+
+  assert.equal(vault.notes.b.label, "Tavern");
+  assert.equal(vault.notes.b.presentation.extendedStyle, "memo");
+  assert.equal(vault.notes.b.presentation.forceExtended, true);
+  assert.equal(vault.notes.b.presentation.torn, true);
+  assert.equal(vault.notes.b.attachment.pinStyle, "default");
+  assert.equal(emptyVault().format, 2);
+});
+
+test("legacy vault cards gain a canonical main anchor from their note attachment", () => {
+  const vault = normalizeVault({
+    format: 1,
+    notes: {
+      enabled: {
+        id: "enabled", name: "GM-ABCD Enabled", style: "sticky", authorId: "gm",
+        card: {
+          x: 0, y: 0,
+          anchors: { minor: { kind: "minor", x: 0.2, y: 0.3, createdBy: "gm" } }
+        }
+      },
+      disabled: {
+        id: "disabled", name: "GM-EFGH Disabled", style: "sticky",
+        attachment: { mainPinEnabled: false }, card: { x: 10, y: 0 }
+      },
+      existing: {
+        id: "existing", name: "GM-IJKL Existing", style: "sticky", authorId: "gm",
+        card: {
+          x: 20, y: 0,
+          anchors: {
+            main: { kind: "main", x: 0.9, y: 0.9, createdBy: "gm" },
+            minor: { kind: "minor", x: 0.1, y: 0.2, createdBy: "gm" }
+          }
+        }
+      }
+    }
+  });
+
+  assert.deepEqual(vault.notes.enabled.card.anchors, {
+    minor: { kind: "minor", x: 0.2, y: 0.3, createdBy: "gm" },
+    main: { kind: "main", x: 0.5, y: 0, createdBy: "gm" }
+  });
+  assert.deepEqual(vault.notes.disabled.card.anchors, {},
+    "a disabled main pin does not gain an anchor");
+  assert.deepEqual(vault.notes.existing.card.anchors, {
+    main: { kind: "main", x: 0.5, y: 0, createdBy: "gm" },
+    minor: { kind: "minor", x: 0.1, y: 0.2, createdBy: "gm" }
+  }, "an existing main is canonicalized and valid minors survive");
+
+  // The standalone card normalizer defaults to the conventional main anchor.
+  assert.deepEqual(normalizeVaultCard({ x: 0, y: 0 }).anchors, {
+    main: { kind: "main", x: 0.5, y: 0, createdBy: "" }
+  });
+});
+
+test("vault normalization is idempotent", () => {
+  const once = normalizeVault({
+    format: 1,
+    rev: 2,
+    notes: {
+      n1: {
+        id: "n1", name: "GM-ABCD Dossier", style: "document",
+        blocks: [{ text: "no id yet" }],
+        links: [{ targetId: "n2", label: "thread" }],
+        card: { x: 1, y: 2, ports: ["top"], anchors: { main: { x: 0.5, y: 0 } } }
+      }
+    },
+    hiddenBlocks: { p1: { order: [], blocks: { h1: { text: "hidden" } } } },
+    hiddenLinks: { p1: [{ targetId: "n1" }] },
+    labels: { lb: { text: "label" } }
+  });
+  assert.equal(once.format, 2);
+  assert.ok(once.notes.n1.blocks[0].blockId);
+  assert.ok(once.notes.n1.links[0].id);
+  assert.deepEqual(normalizeVault(structuredClone(once)), once);
 });

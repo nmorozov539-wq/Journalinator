@@ -42,6 +42,7 @@ const { notesStore } = await import(`${JN}/scripts/store/notes-store.mjs`);
 const secrets = await import(`${JN}/scripts/secrets/secret-actions.mjs`);
 const { registerSocket, requestWrite } = await import(`${JN}/scripts/socket.mjs`);
 const { privateStore } = await import(`${JN}/scripts/store/private-store.mjs`);
+const { resolvePresentation } = await import(`${JN}/scripts/presentation.mjs`);
 const { default: NoteEditor } = await import(`${JN}/scripts/app/editor.mjs`);
 const { default: JournalCanvas } = await import(`${JN}/scripts/app/canvas.mjs`);
 const { default: JournalApp, isTextEntryTarget } = await import(`${JN}/scripts/app/journal-app.mjs`);
@@ -1142,6 +1143,19 @@ test("private canvas is separate and copies notes through the clipboard", async 
     data.notes[privateNote.id].title = "Clipboard private";
     data.notes[privateNote.id].style = "wanted";
     data.notes[privateNote.id].targetHeading = "Type preserved";
+    data.notes[privateNote.id].label = "Clipboard label";
+    data.notes[privateNote.id].schemaVersion = 1;
+    data.notes[privateNote.id].presentation = {
+      ...(data.notes[privateNote.id].presentation ?? {}),
+      extendedStyle: "target", forceExtended: true, font: "hand", pictureLayout: "left",
+      torn: false, heading: "Type preserved", nameGenerated: false
+    };
+    data.notes[privateNote.id].attachment = {
+      mainPinEnabled: false, mainSnapRadius: 18, minorSnapRadius: 3, pinStyle: "wax"
+    };
+    data.layout.cards[privateNote.id].anchors.minor = {
+      kind: "minor", x: 0.2, y: 0.3, createdBy: gmUser.id
+    };
     await privateStore.save(page, data, privateStore.flags(page).rev);
     await redraw();
 
@@ -1165,6 +1179,18 @@ test("private canvas is separate and copies notes through the clipboard", async 
     assert.equal(copied.system.style, "wanted", "clipboard preserves the note type");
     assert.equal(copied.system.targetHeading, "Type preserved");
     assert.equal(copied.system.links.length, 0, "clipboard copies no links");
+    assert.equal(copied.system.label, "Clipboard label", "clipboard preserves the label");
+    assert.equal(copied.system.schemaVersion, 1);
+    assert.equal(copied.system.presentation.font, "hand", "clipboard preserves presentation");
+    assert.equal(copied.system.presentation.pictureLayout, "left");
+    assert.equal(copied.system.presentation.extendedStyle, "target");
+    assert.deepEqual(copied.system.attachment, {
+      mainPinEnabled: false, mainSnapRadius: 18, minorSnapRadius: 3, pinStyle: "wax"
+    }, "clipboard preserves attachment settings");
+    const copiedCardLayout = notesStore.getSharedLayout().cards[copied.id];
+    assert.deepEqual(copiedCardLayout.anchors.minor, {
+      kind: "minor", x: 0.2, y: 0.3, createdBy: gmUser.id
+    }, "clipboard preserves card anchors");
     assert.ok(privateStore.findActive(gmUser.id), "private copy remains");
 
     // Shared -> private copy/paste.
@@ -1190,6 +1216,12 @@ test("private canvas is separate and copies notes through the clipboard", async 
     assert.ok(copiedPrivate.every(note => note.blocks[0].text === "- [x] Private task"));
     assert.ok(copiedPrivate.every(note => note.style === "wanted"), "shared-to-private paste preserves the type");
     assert.ok(copiedPrivate.every(note => note.targetHeading === "Type preserved"));
+    assert.ok(copiedPrivate.every(note => note.label === "Clipboard label"), "shared-to-private paste preserves the label");
+    assert.ok(copiedPrivate.every(note => note.presentation.font === "hand"), "shared-to-private paste preserves presentation");
+    assert.ok(copiedPrivate.every(note => note.attachment.mainPinEnabled === false
+      && note.attachment.pinStyle === "wax"), "shared-to-private paste preserves attachment settings");
+    assert.ok(copiedPrivate.every(note => workspaceAfterCopy.layout.cards[note.id].anchors.minor?.x === 0.2),
+      "shared-to-private paste preserves card anchors");
 
     const beforeDelete = Object.keys(privateStore.read(privateStore.findActive(gmUser.id)).notes).length;
     privateCanvasAgain.focus();
@@ -1241,6 +1273,104 @@ test("private workspace uses the same link slots and state classes", async () =>
     workspace.canvas.disconnectGeometry();
     canvasSlot.remove();
     editorSlot.remove();
+  }
+});
+
+test("private link edits accept cosmetics and anchors but never identity or target", async () => {
+  const user = makeUser("Player000000010", { name: "Private Links" });
+  const page = await privateStore.createFor(user);
+  const workspace = new PrivateWorkspace({ onChange() {} });
+  workspace.setPage(page);
+  try {
+    const sourceId = await workspace.createNoteAt({ title: "Link Source", x: 0, y: 0 });
+    const targetId = await workspace.createNoteAt({ title: "Link Target", x: 400, y: 0 });
+    await workspace.createLink(sourceId, targetId, { sourceSide: "right", targetSide: "left" });
+    const linkId = workspace.workspace.notes[sourceId].links[0].id;
+    workspace.workspace.notes[sourceId].links[0].pins = [{ x: 1, y: 2 }];
+
+    await workspace.updateLink(sourceId, linkId, {
+      id: "hijacked-id",
+      targetId: "hijacked-target",
+      origin: "typed",
+      label: "edited",
+      direction: "two",
+      color: "link1",
+      lineStyle: "dashed",
+      material: "double",
+      thickness: 99,
+      slack: -1,
+      pattern: "alternating",
+      ends: "loose",
+      secondaryColor: "link3",
+      sourceAnchorId: "main",
+      targetAnchorId: "minor-1",
+      pinMove: { index: 0, x: 5, y: 6 }
+    });
+
+    const link = workspace.workspace.notes[sourceId].links[0];
+    assert.equal(link.id, linkId, "identity is never editable");
+    assert.equal(link.targetId, targetId, "target is never editable");
+    assert.equal(link.origin, "drawn", "origin is never editable");
+    assert.equal(link.label, "edited");
+    assert.equal(link.direction, "two");
+    assert.equal(link.color, "link1");
+    assert.equal(link.lineStyle, "dashed");
+    assert.equal(link.material, "double");
+    assert.equal(link.thickness, 5, "thickness is clamped");
+    assert.equal(link.slack, 0, "slack is clamped");
+    assert.equal(link.pattern, "alternating");
+    assert.equal(link.ends, "loose");
+    assert.equal(link.secondaryColor, "link3");
+    assert.equal(link.sourceAnchorId, "main");
+    assert.equal(link.targetAnchorId, "minor-1");
+    assert.deepEqual(link.pins, [{ x: 5, y: 6 }], "pinMove still works alongside cosmetics");
+    assert.equal(link.edited, true);
+
+    await workspace.updateLink(sourceId, linkId, {
+      material: "rope", thickness: "wide", slack: "loose", pattern: "zigzag",
+      ends: "tight", sourceAnchorId: 42, secondaryColor: "url(javascript:alert(1))"
+    });
+    const rejected = workspace.workspace.notes[sourceId].links[0];
+    assert.equal(rejected.material, "double", "unknown materials do not overwrite the valid value");
+    assert.equal(rejected.thickness, 5);
+    assert.equal(rejected.slack, 0);
+    assert.equal(rejected.pattern, "alternating");
+    assert.equal(rejected.ends, "loose");
+    assert.equal(rejected.sourceAnchorId, "main");
+    assert.equal(rejected.secondaryColor, "", "a bad secondary dye degrades to none");
+  } finally {
+    workspace.destroy();
+    await privateStore.remove(page);
+  }
+});
+
+test("private legacy note edits keep presentation and label in sync", async () => {
+  const user = makeUser("Player000000009", { name: "Private Setter" });
+  const page = await privateStore.createFor(user);
+  const workspace = new PrivateWorkspace({ onChange() {} });
+  workspace.setPage(page);
+  try {
+    const id = await workspace.createNoteAt({ title: "New Note", style: "sticky" });
+    await workspace.updateNote(id, { targetHeading: "  Private heading  " });
+    await workspace.updateNote(id, { style: "torn" });
+
+    let note = workspace.workspace.notes[id];
+    let presentation = resolvePresentation({ name: note.title, system: note });
+    assert.equal(presentation.extendedStyle, "memo");
+    assert.equal(presentation.forceExtended, true);
+    assert.equal(presentation.torn, true);
+    assert.equal(presentation.heading, "Private heading");
+    assert.equal(note.schemaVersion, 1);
+
+    await workspace.updateNote(id, { title: "Private Captain" });
+    note = workspace.workspace.notes[id];
+    presentation = resolvePresentation({ name: note.title, system: note });
+    assert.equal(presentation.nameGenerated, false);
+    assert.equal(note.label, "Private Captain", "a meaningful rename fills an empty label");
+    assert.equal(note.schemaVersion, 1);
+  } finally {
+    workspace.destroy();
+    await privateStore.remove(page);
   }
 });
 

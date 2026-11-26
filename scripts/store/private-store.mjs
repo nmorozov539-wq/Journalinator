@@ -1,8 +1,13 @@
 import { getContainerIds } from "./containers.mjs";
 import { CARD_STYLES, seedTilt } from "../styles/registry.mjs";
-import { CARD_SIDES, MAX_THREAD_PINS, validLinkPoint, validThreadPin } from "../card-ports.mjs";
+import {
+  CARD_SIDES, DEFAULT_CARD_PORTS, MAX_THREAD_PINS, validCardPorts, validLinkPoint, validThreadPin
+} from "../card-ports.mjs";
 import { normalizeLinkColor } from "../link-colors.mjs";
 import { DEFAULT_STAMP_CORNER, STAMP_COLORS, isStampCorner, stampUrl } from "../stamps.mjs";
+import {
+  resolveAttachment, resolveLinkCosmetics, resolvePresentation, sanitizeCardAnchorsWithMain
+} from "../presentation.mjs";
 import { t } from "../i18n.mjs";
 
 const MODULE_ID = "fvtt-journalinator";
@@ -10,6 +15,10 @@ const PRIVATE_TYPE = "text";
 const FLAG = "private";
 const MAX_NAME_LENGTH = 100;
 const MAX_TITLE_LENGTH = 200;
+const MAX_ROUTE_ANCHORS = 24;
+const MAX_ANCHOR_ID_LENGTH = 64;
+const WORKSPACE_FORMAT = 2;
+const NOTE_SCHEMA_VERSION = 1;
 
 const randomID = () => foundry.utils.randomID();
 const NONE = () => CONST.DOCUMENT_OWNERSHIP_LEVELS.NONE;
@@ -17,7 +26,7 @@ const OWNER = () => CONST.DOCUMENT_OWNERSHIP_LEVELS.OWNER;
 
 export function emptyWorkspace() {
   return {
-    format: 1,
+    format: WORKSPACE_FORMAT,
     notes: {},
     layout: { cards: {}, labels: {}, viewport: null },
     trash: []
@@ -25,24 +34,61 @@ export function emptyWorkspace() {
 }
 
 function normalizeBlock(block) {
-  const blockId = typeof block?.blockId === "string" && block.blockId ? block.blockId : randomID();
-  return { blockId, text: typeof block?.text === "string" ? block.text : "" };
+  const clean = {
+    blockId: typeof block?.blockId === "string" && block.blockId ? block.blockId : randomID(),
+    text: typeof block?.text === "string" ? block.text : ""
+  };
+  if (typeof block?.authorId === "string") clean.authorId = block.authorId;
+  return clean;
+}
+
+function anchorId(value) {
+  return typeof value === "string" ? value.slice(0, MAX_ANCHOR_ID_LENGTH) : "";
+}
+
+function normalizeRouteAnchors(list) {
+  if (!Array.isArray(list)) return [];
+  const seen = new Set();
+  const anchors = [];
+  for (const anchor of list) {
+    if (typeof anchor?.noteId !== "string" || !anchor.noteId) continue;
+    if (typeof anchor?.anchorId !== "string" || !anchor.anchorId) continue;
+    const key = `${anchor.noteId}:${anchor.anchorId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    anchors.push({
+      noteId: anchor.noteId.slice(0, MAX_ANCHOR_ID_LENGTH),
+      anchorId: anchor.anchorId.slice(0, MAX_ANCHOR_ID_LENGTH)
+    });
+    if (anchors.length >= MAX_ROUTE_ANCHORS) break;
+  }
+  return anchors;
 }
 
 function normalizeLink(link) {
   const direction = ["none", "one", "two"].includes(link?.direction) ? link.direction : "none";
   const lineStyle = link?.lineStyle === "dashed" ? "dashed" : "solid";
+  const cosmetics = resolveLinkCosmetics(link);
   const clean = {
     id: typeof link?.id === "string" && link.id ? link.id : randomID(),
     targetId: typeof link?.targetId === "string" ? link.targetId : "",
-    label: typeof link?.label === "string" ? link.label.slice(0, 200) : "",
+    label: typeof link?.label === "string" ? link.label.slice(0, MAX_TITLE_LENGTH) : "",
     direction,
     color: normalizeLinkColor(link?.color),
     lineStyle,
     origin: link?.origin === "typed" ? "typed" : "drawn",
     edited: link?.edited === true,
     createdBy: typeof link?.createdBy === "string" ? link.createdBy : "",
-    hint: false
+    hint: false,
+    sourceAnchorId: anchorId(link?.sourceAnchorId),
+    targetAnchorId: anchorId(link?.targetAnchorId),
+    routeAnchors: normalizeRouteAnchors(link?.routeAnchors),
+    material: cosmetics.material,
+    thickness: cosmetics.thickness,
+    slack: cosmetics.slack,
+    pattern: cosmetics.pattern,
+    ends: cosmetics.ends,
+    secondaryColor: cosmetics.secondaryColor
   };
   for (const key of ["sourceSide", "targetSide"]) {
     if (CARD_SIDES.includes(link?.[key])) clean[key] = link[key];
@@ -54,6 +100,23 @@ function normalizeLink(link) {
     clean.pins = link.pins.slice(0, MAX_THREAD_PINS).filter(validThreadPin).map(({ x, y }) => ({ x, y }));
   }
   return clean;
+}
+
+function normalizeAnchors(anchors, mainPinEnabled = true) {
+  return sanitizeCardAnchorsWithMain(anchors, mainPinEnabled);
+}
+
+function normalizeCard(card, mainPinEnabled = true) {
+  if (!Number.isFinite(card?.x) || !Number.isFinite(card?.y)) return null;
+  return {
+    x: card.x,
+    y: card.y,
+    width: Number.isFinite(card.width) && card.width > 0 ? card.width : null,
+    height: Number.isFinite(card.height) && card.height > 0 ? card.height : null,
+    rotation: Number.isFinite(card.rotation) ? card.rotation : 0,
+    ports: validCardPorts(card.ports) ? [...card.ports] : [...DEFAULT_CARD_PORTS],
+    anchors: normalizeAnchors(card.anchors, mainPinEnabled)
+  };
 }
 
 function normalizeLabel(label) {
@@ -71,15 +134,41 @@ function normalizeLabel(label) {
   };
 }
 
+function noteSchema(note, title) {
+  const stored = note?.presentation && typeof note.presentation === "object" ? note.presentation : {};
+  const presentation = resolvePresentation({
+    name: title,
+    system: {
+      style: note?.style,
+      targetHeading: note?.targetHeading,
+      label: note?.label,
+      presentation: stored
+    }
+  });
+  const hasLabel = typeof note?.label === "string";
+  const { label: _ignored, ...presentationFields } = presentation;
+  return {
+    schemaVersion: Number.isInteger(note?.schemaVersion) && note.schemaVersion > 0
+      ? note.schemaVersion : NOTE_SCHEMA_VERSION,
+    label: hasLabel
+      ? note.label.slice(0, MAX_TITLE_LENGTH)
+      : (presentation.nameGenerated ? "" : title.slice(0, MAX_TITLE_LENGTH)),
+    presentation: presentationFields,
+    attachment: resolveAttachment({ system: { attachment: note?.attachment } })
+  };
+}
+
 function normalizeNote(note) {
   const style = Object.hasOwn(CARD_STYLES, note?.style) ? note.style : "sticky";
   const kind = note?.kind === "location" ? "location" : "note";
+  const title = typeof note?.title === "string" ? note.title.slice(0, MAX_TITLE_LENGTH) : "";
   return {
     id: typeof note?.id === "string" && note.id ? note.id : randomID(),
-    title: typeof note?.title === "string" ? note.title.slice(0, MAX_TITLE_LENGTH) : "",
+    title,
     kind,
     style,
     targetHeading: typeof note?.targetHeading === "string" ? note.targetHeading.slice(0, 80) : "",
+    ...noteSchema(note, title),
     image: typeof note?.image === "string" ? note.image : null,
     backgroundImage: typeof note?.backgroundImage === "string" ? note.backgroundImage : null,
     blocks: Array.isArray(note?.blocks) && note.blocks.length
@@ -91,8 +180,18 @@ function normalizeNote(note) {
   };
 }
 
+function normalizeViewport(viewport) {
+  if (!viewport || typeof viewport !== "object") return null;
+  return {
+    x: Number.isFinite(viewport.x) ? viewport.x : 0,
+    y: Number.isFinite(viewport.y) ? viewport.y : 0,
+    zoom: Number.isFinite(viewport.zoom) && viewport.zoom > 0 ? viewport.zoom : 1
+  };
+}
+
 export function normalizeWorkspace(input) {
   const source = input && typeof input === "object" ? input : {};
+  // Formats 1 and 2 share this reader; the normalized result is always format 2.
   const notes = {};
   for (const [id, note] of Object.entries(source.notes && typeof source.notes === "object" ? source.notes : {})) {
     const clean = normalizeNote({ ...note, id });
@@ -100,31 +199,33 @@ export function normalizeWorkspace(input) {
   }
   const cards = {};
   for (const [id, card] of Object.entries(source.layout?.cards ?? {})) {
-    if (!Number.isFinite(card?.x) || !Number.isFinite(card?.y)) continue;
-    cards[id] = {
-      x: card.x, y: card.y,
-      width: Number.isFinite(card.width) && card.width > 0 ? card.width : null,
-      height: Number.isFinite(card.height) && card.height > 0 ? card.height : null,
-      rotation: Number.isFinite(card.rotation) ? card.rotation : 0
-    };
+    const note = notes[id];
+    const clean = normalizeCard(card, note ? resolveAttachment(note).mainPinEnabled : false);
+    if (clean) cards[id] = clean;
   }
   const labels = {};
   for (const [id, label] of Object.entries(source.layout?.labels ?? {})) {
     labels[id] = normalizeLabel(label);
   }
-  const trash = (Array.isArray(source.trash) ? source.trash : []).map(entry => ({
-    note: normalizeNote(entry?.note),
-    card: entry?.card && Number.isFinite(entry.card.x) && Number.isFinite(entry.card.y) ? entry.card : null,
-    deletedAt: Number.isFinite(entry?.deletedAt) ? entry.deletedAt : Date.now(),
-    undoId: typeof entry?.undoId === "string" ? entry.undoId : null
-  }));
+  const trash = (Array.isArray(source.trash) ? source.trash : []).map(entry => {
+    // A trash card without its note must not invent a main anchor: there is no attachment block
+    // to tell us whether the note wanted one.
+    const hasNote = !!entry?.note && typeof entry.note === "object" && !Array.isArray(entry.note);
+    const note = normalizeNote(entry?.note);
+    return {
+      note,
+      card: normalizeCard(entry?.card, hasNote ? resolveAttachment(note).mainPinEnabled : false),
+      deletedAt: Number.isFinite(entry?.deletedAt) ? entry.deletedAt : Date.now(),
+      undoId: typeof entry?.undoId === "string" ? entry.undoId : null
+    };
+  });
   return {
-    format: 1,
+    format: WORKSPACE_FORMAT,
     notes,
     layout: {
       cards,
       labels,
-      viewport: source.layout?.viewport ?? null
+      viewport: normalizeViewport(source.layout?.viewport)
     },
     trash
   };
@@ -327,6 +428,10 @@ class PrivateStore {
         kind: note.kind,
         style: note.style,
         targetHeading: note.targetHeading,
+        schemaVersion: note.schemaVersion,
+        label: note.label,
+        presentation: note.presentation,
+        attachment: note.attachment,
         image: note.image,
         backgroundImage: note.backgroundImage,
         blocks: note.blocks,
@@ -368,13 +473,18 @@ class PrivateStore {
     const width = CARD_STYLES[resolvedStyle]?.defaultWidth ?? 190;
     const height = CARD_STYLES[resolvedStyle]?.defaultHeight ?? 90;
     const spot = this.findFreeSpot(cards, width, height, x, y);
+    const cleanTitle = String(title ?? "").trim().slice(0, MAX_TITLE_LENGTH);
+    const storedTitle = cleanTitle || t("JN.Private.NewNoteTitle");
+    const schema = noteSchema({ style: resolvedStyle }, storedTitle);
+    const ownerId = game.user?.id ?? "";
     return {
       note: {
         id: randomID(),
-        title: String(title ?? "").trim().slice(0, MAX_TITLE_LENGTH) || t("JN.Private.NewNoteTitle"),
+        title: storedTitle,
         kind: resolvedKind,
         style: resolvedStyle,
         targetHeading: "",
+        ...schema,
         image: null,
         backgroundImage: null,
         blocks: [{ blockId: randomID(), text: "" }],
@@ -382,7 +492,17 @@ class PrivateStore {
         createdAt: Date.now(),
         updatedAt: Date.now()
       },
-      card: { x: spot.x, y: spot.y, width: null, height: null, rotation: seedTilt(resolvedStyle) }
+      card: {
+        x: spot.x,
+        y: spot.y,
+        width: null,
+        height: null,
+        rotation: seedTilt(resolvedStyle),
+        ports: [...DEFAULT_CARD_PORTS],
+        anchors: {
+          main: { kind: "main", x: 0.5, y: 0, createdBy: ownerId }
+        }
+      }
     };
   }
 }

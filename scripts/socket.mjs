@@ -14,6 +14,14 @@ import {
 import { t } from "./i18n.mjs";
 import { attachedStampIds, DEFAULT_STAMP_CORNER, isStampCorner, stampUrl } from "./stamps.mjs";
 import { normalizeActorRef } from "./actor-status.mjs";
+import {
+  LINK_ENDS, LINK_MATERIALS, LINK_PATTERNS, LINK_SLACK, LINK_THICKNESS,
+  MAIN_PIN, NOTE_FONT_KEYS, PICTURE_LAYOUTS, PIN_STYLES, PRESENTATION_STYLES,
+  defaultLinkCosmetics, isGeneratedTitle, legacyPresentation, legacyStylePresentation,
+  resolveAttachment, resolvePresentation, sanitizeCardAnchors, stripSecretPrefix
+} from "./presentation.mjs";
+
+export { sanitizeCardAnchors };
 
 const MODULE_ID = "fvtt-journalinator";
 const CHANNEL = `module.${MODULE_ID}`;
@@ -27,9 +35,27 @@ const MIN_LABEL_SIZE = 8;
 const MAX_LABEL_SIZE = 96;
 const LINK_DIRECTIONS = new Set(["none", "one", "two"]);
 const LINK_LINE_STYLES = new Set(["solid", "dashed"]);
+const LINK_MATERIAL_SET = new Set(LINK_MATERIALS);
+const LINK_PATTERN_SET = new Set(LINK_PATTERNS);
+const LINK_END_SET = new Set(LINK_ENDS);
+const PRESENTATION_STYLE_SET = new Set(PRESENTATION_STYLES);
+const PICTURE_LAYOUT_SET = new Set(PICTURE_LAYOUTS);
+const NOTE_FONT_SET = new Set(NOTE_FONT_KEYS);
+const PIN_STYLE_SET = new Set(PIN_STYLES);
+const PRESENTATION_KEYS = new Set([
+  "extendedStyle", "forceExtended", "font", "pictureLayout", "torn", "heading", "nameGenerated"
+]);
+const ATTACHMENT_KEYS = new Set([
+  "mainPinEnabled", "mainSnapRadius", "minorSnapRadius", "pinStyle"
+]);
 const DOCUMENT_ID_RE = /^[a-zA-Z0-9]{16}$/;
 const MAX_DECLASSIFIED_BLOCKS = 500;
 const MAX_DECLASSIFIED_LINKS = 200;
+const MAX_NOTE_BATCH = 50;
+const MAX_ANCHOR_ID_LENGTH = 100;
+const MAX_ROUTE_ANCHORS = 24;
+const MAX_HEADING_LENGTH = 80;
+const MAX_FORMER_NAMES = 20;
 
 function senderIsGM(senderUserId) {
   return !!game.users.get(senderUserId)?.isGM;
@@ -106,9 +132,11 @@ function notifyUser(userId, reason) {
 }
 
 /**
- * Keeps only the fields a link toolbar is allowed to change, with validated values.
- * Colors accept "" (default), the three slot keys, or the three legacy hexes. In every
+ * Keeps only the cosmetic/endpoint fields a link editor is allowed to change, with validated
+ * values. Colors accept "" (default), the three slot keys, or the three legacy hexes. In every
  * accepted case the stored value is a slot key, so newly written data never carries a hex.
+ * Route waypoints are deliberately not here: `updateLink` must not accept client route changes
+ * until the phase-6 transactional operation exists.
  */
 export function sanitizeLinkFields(fields) {
   if (!fields || typeof fields !== "object") return null;
@@ -117,7 +145,159 @@ export function sanitizeLinkFields(fields) {
   if (LINK_DIRECTIONS.has(fields.direction)) clean.direction = fields.direction;
   if (isLinkColor(fields.color)) clean.color = normalizeLinkColor(fields.color);
   if (LINK_LINE_STYLES.has(fields.lineStyle)) clean.lineStyle = fields.lineStyle;
+  if (LINK_MATERIAL_SET.has(fields.material)) clean.material = fields.material;
+  if (Number.isFinite(fields.thickness)) {
+    clean.thickness = Math.min(LINK_THICKNESS.max, Math.max(LINK_THICKNESS.min, fields.thickness));
+  }
+  if (Number.isFinite(fields.slack)) {
+    clean.slack = Math.min(LINK_SLACK.max, Math.max(LINK_SLACK.min, fields.slack));
+  }
+  if (LINK_PATTERN_SET.has(fields.pattern)) clean.pattern = fields.pattern;
+  if (LINK_END_SET.has(fields.ends)) clean.ends = fields.ends;
+  if (typeof fields.secondaryColor === "string") {
+    // A bad secondary color degrades to "no secondary dye", while a bad primary color is rejected.
+    clean.secondaryColor = isLinkColor(fields.secondaryColor)
+      ? normalizeLinkColor(fields.secondaryColor) : "";
+  }
+  if (typeof fields.sourceAnchorId === "string") {
+    clean.sourceAnchorId = fields.sourceAnchorId.slice(0, MAX_ANCHOR_ID_LENGTH);
+  }
+  if (typeof fields.targetAnchorId === "string") {
+    clean.targetAnchorId = fields.targetAnchorId.slice(0, MAX_ANCHOR_ID_LENGTH);
+  }
   return Object.keys(clean).length ? clean : null;
+}
+
+/**
+ * Presentation patches are strict: an unknown or malformed key rejects the whole patch instead of
+ * silently storing a partially applied style change. Content, label and permissions are untouched.
+ */
+export function sanitizePresentationFields(fields) {
+  if (!fields || typeof fields !== "object" || Array.isArray(fields)) return null;
+  if (Object.keys(fields).some(key => !PRESENTATION_KEYS.has(key))) return null;
+  const clean = {};
+  if ("extendedStyle" in fields) {
+    if (!PRESENTATION_STYLE_SET.has(fields.extendedStyle)) return null;
+    clean.extendedStyle = fields.extendedStyle;
+  }
+  if ("forceExtended" in fields) {
+    if (typeof fields.forceExtended !== "boolean") return null;
+    clean.forceExtended = fields.forceExtended;
+  }
+  if ("font" in fields) {
+    if (!NOTE_FONT_SET.has(fields.font)) return null;
+    clean.font = fields.font;
+  }
+  if ("pictureLayout" in fields) {
+    if (!PICTURE_LAYOUT_SET.has(fields.pictureLayout)) return null;
+    clean.pictureLayout = fields.pictureLayout;
+  }
+  if ("torn" in fields) {
+    if (typeof fields.torn !== "boolean") return null;
+    clean.torn = fields.torn;
+  }
+  if ("heading" in fields) {
+    if (typeof fields.heading !== "string" || fields.heading.length > MAX_HEADING_LENGTH) return null;
+    clean.heading = fields.heading.trim();
+  }
+  if ("nameGenerated" in fields) {
+    if (typeof fields.nameGenerated !== "boolean") return null;
+    clean.nameGenerated = fields.nameGenerated;
+  }
+  return Object.keys(clean).length ? clean : null;
+}
+
+/** Attachment patches use the same reject-unknown rule; radii are clamped to their bounds. */
+export function sanitizeAttachmentFields(fields) {
+  if (!fields || typeof fields !== "object" || Array.isArray(fields)) return null;
+  if (Object.keys(fields).some(key => !ATTACHMENT_KEYS.has(key))) return null;
+  const clean = {};
+  if ("mainPinEnabled" in fields) {
+    if (typeof fields.mainPinEnabled !== "boolean") return null;
+    clean.mainPinEnabled = fields.mainPinEnabled;
+  }
+  if ("mainSnapRadius" in fields) {
+    if (!Number.isFinite(fields.mainSnapRadius)) return null;
+    clean.mainSnapRadius = Math.min(64, Math.max(0, fields.mainSnapRadius));
+  }
+  if ("minorSnapRadius" in fields) {
+    if (!Number.isFinite(fields.minorSnapRadius)) return null;
+    clean.minorSnapRadius = Math.min(32, Math.max(0, fields.minorSnapRadius));
+  }
+  if ("pinStyle" in fields) {
+    if (!PIN_STYLE_SET.has(fields.pinStyle)) return null;
+    clean.pinStyle = fields.pinStyle;
+  }
+  return Object.keys(clean).length ? clean : null;
+}
+
+/**
+ * Validates the note-local anchor waypoints of a routed thread. Route changes are not accepted by
+ * `updateLink` yet; phase 6 adds the dedicated transactional operation. Creation paths still
+ * schema-validate the array so no unvalidated route data can enter a new link.
+ */
+export function sanitizeRouteAnchors(value) {
+  if (!Array.isArray(value) || value.length > MAX_ROUTE_ANCHORS) return null;
+  const anchors = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+    if (typeof entry.noteId !== "string" || !DOCUMENT_ID_RE.test(entry.noteId)) return null;
+    if (typeof entry.anchorId !== "string" || !entry.anchorId
+        || entry.anchorId.length > MAX_ANCHOR_ID_LENGTH) return null;
+    anchors.push({ noteId: entry.noteId, anchorId: entry.anchorId });
+  }
+  return anchors;
+}
+
+/** Returns `{ routeAnchors }` only when the field is present and valid. */
+export function sanitizeLinkRouteFields(fields) {
+  if (!fields || typeof fields !== "object" || !("routeAnchors" in fields)) return null;
+  const routeAnchors = sanitizeRouteAnchors(fields.routeAnchors);
+  return routeAnchors ? { routeAnchors } : null;
+}
+
+/**
+ * Route waypoints are safe to publish only when they point at the note itself or another live
+ * shared note. A waypoint that names a still-secret note is dropped: publishing its id would let
+ * players learn that a hidden note exists even though the note's content stays in the vault.
+ */
+export function sanitizeSharedRouteAnchors(shared, value, selfId) {
+  if (!Array.isArray(value)) return [];
+  const anchors = [];
+  for (const entry of value) {
+    if (anchors.length >= MAX_ROUTE_ANCHORS) break;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    if (typeof entry.noteId !== "string" || !entry.noteId) continue;
+    if (typeof entry.anchorId !== "string" || !entry.anchorId
+        || entry.anchorId.length > MAX_ANCHOR_ID_LENGTH) continue;
+    if (entry.noteId !== selfId) {
+      const page = shared?.pages?.get?.(entry.noteId);
+      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) continue;
+    }
+    anchors.push({ noteId: entry.noteId, anchorId: entry.anchorId });
+  }
+  return anchors;
+}
+
+function addMainAnchor(anchors, authorId) {
+  if (Object.values(anchors).some(anchor => anchor.kind === "main")) return anchors;
+  return {
+    ...anchors,
+    main: { kind: "main", x: MAIN_PIN.x, y: MAIN_PIN.y, createdBy: authorId ?? "" }
+  };
+}
+
+/** All requested ids must be live shared notes; nothing is written if one is missing/secret. */
+function liveSharedNotePages(shared, noteIds) {
+  if (!Array.isArray(noteIds) || !noteIds.length || noteIds.length > MAX_NOTE_BATCH) return null;
+  const pages = [];
+  for (const noteId of noteIds) {
+    if (typeof noteId !== "string") return null;
+    const page = shared.pages.get(noteId);
+    if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return null;
+    pages.push(page);
+  }
+  return pages;
 }
 
 /** Accepts empty, a hex color, or a simple CSS color name; rejects anything else. */
@@ -193,12 +373,15 @@ function findFreeSpot(cards, w, h, nearX, nearY) {
   return { x: nearX, y: nearY };
 }
 
-async function createNotePage(shared, { title, kind, style, x, y, authorId, autoTitle = false }) {
+async function createNotePage(shared, {
+  title, kind, style, x, y, authorId, autoTitle = false, presentation, label, attachment, targetHeading
+}) {
   kind = kind === "location" ? "location" : "note";
   const defaultStyle = kind === "location" ? "document" : "sticky";
   style = typeof style === "string" && Object.hasOwn(CARD_STYLES, style) ? style : defaultStyle;
   const defaultTitle = kind === "location" ? t("JN.Note.NewLocationTitle") : t("JN.Note.NewNoteTitle");
-  const requestedTitle = (title ?? "").trim() || defaultTitle;
+  const typedTitle = (title ?? "").trim();
+  const requestedTitle = typedTitle || defaultTitle;
   const finalTitle = autoTitle ? uniqueTitle(shared, requestedTitle) : requestedTitle;
 
   if (finalTitle.length > MAX_TITLE_LENGTH) {
@@ -217,12 +400,29 @@ async function createNotePage(shared, { title, kind, style, x, y, authorId, auto
   const nearY = Number.isFinite(y) ? y : 0;
   const spot = findFreeSpot(existingCards, cardWidth, CARD_STYLES[style]?.defaultHeight ?? 90, nearX, nearY);
 
+  // New records start at schema 1, but keep legacy `style`/`targetHeading` so old editor calls and
+  // wikilink/rename logic keep working. The optional presentation patch can only use known keys.
+  const presentationPatch = sanitizePresentationFields(presentation) ?? {};
+  const nextPresentation = {
+    ...legacyPresentation({ style, targetHeading }),
+    ...presentationPatch,
+    nameGenerated: "nameGenerated" in presentationPatch
+      ? presentationPatch.nameGenerated
+      : (autoTitle || !typedTitle)
+  };
+  const nextLabel = typeof label === "string" ? label.trim().slice(0, MAX_LABEL_LENGTH) : "";
+  const nextAttachment = resolveAttachment({ system: { attachment } });
+
   const page = await JournalEntryPage.create({
     name: finalTitle,
     type: `${MODULE_ID}.note`,
     system: {
       kind,
       style,
+      schemaVersion: 1,
+      label: nextLabel,
+      presentation: nextPresentation,
+      attachment: nextAttachment,
       blocks: [{ blockId: foundry.utils.randomID(), text: "", authorId }],
       authorId,
       createdAt: Date.now(),
@@ -232,7 +432,14 @@ async function createNotePage(shared, { title, kind, style, x, y, authorId, auto
 
   if (layout) {
     await layout.update({
-      [`system.cards.${page.id}`]: { x: spot.x, y: spot.y, rotation: seedTilt(style) }
+      [`system.cards.${page.id}`]: {
+        x: spot.x,
+        y: spot.y,
+        rotation: seedTilt(style),
+        anchors: {
+          main: { kind: "main", x: MAIN_PIN.x, y: MAIN_PIN.y, createdBy: authorId }
+        }
+      }
     });
   }
   await recordActivity(authorId, { notes: 1 });
@@ -295,6 +502,20 @@ function cleanDeclassifiedNote(shared, message) {
   const style = typeof message.style === "string" && Object.hasOwn(CARD_STYLES, message.style) ? message.style : "sticky";
   const image = noteImagePath(message.image);
   const backgroundImage = noteImagePath(message.backgroundImage);
+  const targetHeading = typeof message.targetHeading === "string"
+    ? message.targetHeading.trim().slice(0, MAX_HEADING_LENGTH) : "";
+  const label = typeof message.label === "string"
+    ? message.label.trim().slice(0, MAX_LABEL_LENGTH) : "";
+  const presentation = {
+    ...legacyPresentation({ style, targetHeading }),
+    ...(sanitizePresentationFields(message.presentation) ?? {})
+  };
+  const attachment = resolveAttachment({ system: { attachment: message.attachment } });
+  const formerNames = (Array.isArray(message.formerNames) ? message.formerNames : [])
+    .filter(name => typeof name === "string")
+    .slice(-MAX_FORMER_NAMES)
+    .map(name => name.trim().slice(0, MAX_TITLE_LENGTH))
+    .filter(Boolean);
 
   if (!Array.isArray(message.blocks) || !message.blocks.length || message.blocks.length > MAX_DECLASSIFIED_BLOCKS) return null;
   const blocks = [];
@@ -307,21 +528,36 @@ function cleanDeclassifiedNote(shared, message) {
     blocks.push({ blockId, text: block.text });
   }
 
+  // Link ids are stable data, so keep a declassified link's id when it does not collide with an
+  // id already present anywhere in the shared journal. Collisions regenerate rather than
+  // overwriting another link's identity; declassification is otherwise additive.
+  const existingLinkIds = new Set();
+  for (const page of shared.pages) {
+    if (page.type !== `${MODULE_ID}.note`) continue;
+    for (const link of page.system.links ?? []) existingLinkIds.add(link.id);
+  }
+
   const links = [];
   for (const link of (Array.isArray(message.links) ? message.links : []).slice(0, MAX_DECLASSIFIED_LINKS)) {
     const target = shared.pages.get(link?.targetId);
     if (!target || target.type !== `${MODULE_ID}.note` || target.system.deleted) continue;
     if (link.targetId === message.noteId || links.some(l => l.targetId === link.targetId)) continue;
+    const preservedId = typeof link.id === "string" && DOCUMENT_ID_RE.test(link.id)
+      && !existingLinkIds.has(link.id) ? link.id : foundry.utils.randomID();
+    existingLinkIds.add(preservedId);
+    const routeAnchors = sanitizeSharedRouteAnchors(shared, link.routeAnchors, message.noteId);
     links.push({
-      id: foundry.utils.randomID(),
+      id: preservedId,
       targetId: link.targetId,
       label: "", direction: "one", color: "", lineStyle: "solid",
+      ...defaultLinkCosmetics(),
       ...sanitizeLinkFields(link),
       ...linkAnchors(link),
+      routeAnchors,
       origin: "drawn",
-      edited: false,
+      edited: link.edited === true,
       createdBy: "",
-      hint: false
+      hint: link.hint === true
     });
   }
 
@@ -330,12 +566,13 @@ function cleanDeclassifiedNote(shared, message) {
   const size = value => Number.isFinite(value) && value > 0 ? value : null;
   return {
     noteId: message.noteId, title, kind, style, image, backgroundImage, blocks, links,
-    targetHeading: typeof message.targetHeading === "string" ? message.targetHeading.trim().slice(0, 80) : "",
+    targetHeading, label, presentation, attachment, formerNames,
     card: {
       x: clampCoordinate(num(card.x, 0)), y: clampCoordinate(num(card.y, 0)),
       width: size(card.width), height: size(card.height),
       rotation: Math.max(-10, Math.min(10, num(card.rotation, 0))),
-      ports: cardPorts(card)
+      ports: cardPorts(card),
+      anchors: sanitizeCardAnchors(card.anchors)
     }
   };
 }
@@ -350,7 +587,8 @@ async function handleMessage(message, senderUserId) {
     case "createNote": {
       await createNotePage(shared, {
         title: message.title, kind: message.kind, style: message.style, x: message.x, y: message.y,
-        authorId: senderUserId, autoTitle: message.autoTitle === true
+        authorId: senderUserId, autoTitle: message.autoTitle === true,
+        presentation: message.presentation, label: message.label
       });
       return;
     }
@@ -403,7 +641,9 @@ async function handleMessage(message, senderUserId) {
         ? message.targetHeading.trim().slice(0, 80) : "";
       const page = await createNotePage(shared, {
         title, kind, style, x: message.x, y: message.y,
-        authorId: senderUserId, autoTitle: message.autoTitle !== false
+        authorId: senderUserId, autoTitle: message.autoTitle !== false,
+        presentation: message.presentation, label: message.label,
+        attachment: message.attachment, targetHeading
       });
       if (!page) return;
       const blocks = texts.length
@@ -414,6 +654,17 @@ async function handleMessage(message, senderUserId) {
         "system.updatedAt": Date.now(),
         ...(targetHeading ? { "system.targetHeading": targetHeading } : {})
       });
+      // A future clipboard may carry the source card's anchor registry; keep it rather than
+      // silently replacing every pasted card with only the generated main anchor.
+      const pastedAnchors = sanitizeCardAnchors(message.card?.anchors ?? message.anchors);
+      if (Object.keys(pastedAnchors).length) {
+        const layout = layoutPage(shared);
+        if (layout) {
+          await layout.update({
+            [`system.cards.${page.id}.anchors`]: addMainAnchor(pastedAnchors, senderUserId)
+          });
+        }
+      }
       return;
     }
 
@@ -435,6 +686,7 @@ async function handleMessage(message, senderUserId) {
       }
 
       const oldTitle = (page.name ?? "").trim();
+      const resolved = resolvePresentation(page);
       const formerNames = [...(page.system.formerNames ?? [])];
       if (oldTitle && !formerNames.some(name => name.trim().toLowerCase() === oldTitle.toLowerCase())) {
         formerNames.push(oldTitle);
@@ -443,7 +695,19 @@ async function handleMessage(message, senderUserId) {
       const nextFormerNames = formerNames
         .filter(name => name.trim().toLowerCase() !== title.toLowerCase())
         .slice(-20);
-      await page.update({ name: title, "system.formerNames": nextFormerNames, "system.updatedAt": Date.now() });
+      const updates = { name: title, "system.formerNames": nextFormerNames, "system.updatedAt": Date.now() };
+      if (!isGeneratedTitle(title)) {
+        const oldBare = stripSecretPrefix(oldTitle).trim();
+        const { label: resolvedLabel, ...presentationFields } = resolved;
+        updates["system.presentation"] = { ...presentationFields, nameGenerated: false };
+        // A meaningful rename also migrates the record. NoteModel defaults schemaVersion to 0,
+        // so reading `page.system.schemaVersion` here would write 0 back on a legacy page.
+        updates["system.schemaVersion"] = 1;
+        if (!resolvedLabel || resolvedLabel === oldBare) {
+          updates["system.label"] = stripSecretPrefix(title).trim();
+        }
+      }
+      await page.update(updates);
       return;
     }
 
@@ -531,9 +795,67 @@ async function handleMessage(message, senderUserId) {
       if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
       if (typeof message.style !== "string" || !Object.hasOwn(CARD_STYLES, message.style)) return;
       if (message.kind !== undefined && !["note", "location"].includes(message.kind)) return;
+      const resolved = resolvePresentation(page);
+      const { label: _ignored, ...presentationFields } = resolved;
+      // Legacy editor calls still store `style`; mirror it into the explicit presentation block so
+      // the new canvas does not have to infer the renderer, and mark the record as migrated.
       await page.update({
         "system.style": message.style,
+        "system.schemaVersion": 1,
+        "system.presentation": {
+          ...presentationFields,
+          ...legacyStylePresentation(message.style)
+        },
         ...(message.kind ? { "system.kind": message.kind } : {})
+      });
+      return;
+    }
+
+    case "setNotePresentation": {
+      const pages = liveSharedNotePages(shared, message.noteIds);
+      const fields = sanitizePresentationFields(message.fields);
+      if (!pages || !fields) return;
+      for (const page of pages) {
+        // Base on the resolved record, not just the stored block: a partial patch on a legacy
+        // note must keep its legacy style/force/torn instead of dropping them.
+        const resolved = resolvePresentation(page);
+        const { label: _ignored, ...existing } = resolved;
+        const updates = {
+          "system.presentation": { ...existing, ...fields },
+          "system.schemaVersion": 1
+        };
+        // An explicitly empty heading clears the legacy key too; an absent heading leaves it alone.
+        if (fields.heading === "") updates["system.targetHeading"] = "";
+        await page.update(updates);
+      }
+      return;
+    }
+
+    case "setNoteAttachment": {
+      // Phase 5 owns destructive main-pin redistribution and its undo. Until then this handler
+      // must not be used by bulk UI operations; it only stores the validated attachment fields.
+      const pages = liveSharedNotePages(shared, message.noteIds);
+      const fields = sanitizeAttachmentFields(message.fields);
+      if (!pages || !fields) return;
+      for (const page of pages) {
+        const existing = page.system.attachment && typeof page.system.attachment === "object"
+          ? page.system.attachment : {};
+        await page.update({
+          "system.attachment": { ...existing, ...fields },
+          "system.schemaVersion": 1
+        });
+      }
+      return;
+    }
+
+    case "setNoteLabel": {
+      const page = shared.pages.get(message.noteId);
+      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
+      if (typeof message.label !== "string") return;
+      // The optional label is separate from the internal Foundry name; never rename the page here.
+      await page.update({
+        "system.label": message.label.trim().slice(0, MAX_LABEL_LENGTH),
+        "system.schemaVersion": 1
       });
       return;
     }
@@ -542,7 +864,14 @@ async function handleMessage(message, senderUserId) {
       const page = shared.pages.get(message.noteId);
       if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
       if (typeof message.heading !== "string" || message.heading.length > 80) return;
-      await page.update({ "system.targetHeading": message.heading.trim() });
+      const heading = message.heading.trim();
+      const resolved = resolvePresentation(page);
+      const { label: _ignored, ...presentationFields } = resolved;
+      await page.update({
+        "system.targetHeading": heading,
+        "system.presentation": { ...presentationFields, heading },
+        "system.schemaVersion": 1
+      });
       return;
     }
 
@@ -737,6 +1066,10 @@ async function handleMessage(message, senderUserId) {
         id: foundry.utils.randomID(),
         targetId: message.targetId,
         ...anchors,
+        ...defaultLinkCosmetics(),
+        // Route authoring is a Phase 6 transactional operation; a client-created link never
+        // carries route waypoints until then.
+        routeAnchors: [],
         label: "",
         direction: "one",
         color: "",
@@ -787,6 +1120,8 @@ async function handleMessage(message, senderUserId) {
       const links = [...(sourcePage.system.links ?? []), {
         id: foundry.utils.randomID(),
         targetId: newPage.id,
+        ...defaultLinkCosmetics(),
+        routeAnchors: [],
         label: "",
         direction: "one",
         color: "",
@@ -841,9 +1176,15 @@ async function handleMessage(message, senderUserId) {
       if (restoredTitle !== page.name) restoreUpdate.name = restoredTitle;
       await page.update(restoreUpdate);
       if (layout) {
-        await layout.update({
-          [`system.cards.${message.noteId}`]: { x: spot.x, y: spot.y, width: lastCard?.width ?? null, height: lastCard?.height ?? null, rotation: lastCard?.rotation ?? 0, ports: cardPorts(lastCard) }
-        });
+        // Copy the whole stored card back instead of hand-picking geometry, so anchor registries
+        // (and any future card fields) survive a trash/restore roundtrip.
+        const restoredCard = lastCard
+          ? { ...foundry.utils.deepClone(lastCard), x: spot.x, y: spot.y, ports: cardPorts(lastCard) }
+          : { x: spot.x, y: spot.y, width: null, height: null, rotation: 0, ports: cardPorts(lastCard) };
+        restoredCard.anchors = addMainAnchor(
+          sanitizeCardAnchors(restoredCard.anchors), page.system.authorId ?? ""
+        );
+        await layout.update({ [`system.cards.${message.noteId}`]: restoredCard });
       }
       return;
     }
@@ -927,10 +1268,15 @@ async function handleMessage(message, senderUserId) {
           kind: note.kind === "location" ? "location" : "note",
           style: note.style,
           targetHeading: note.targetHeading,
+          schemaVersion: 1,
+          label: note.label,
+          presentation: note.presentation,
+          attachment: note.attachment,
           image: note.image,
           backgroundImage: note.backgroundImage,
           blocks: note.blocks.map(b => ({ ...b, authorId: senderUserId })),
           links: note.links,
+          formerNames: note.formerNames ?? [],
           authorId: senderUserId,
           createdAt: Date.now(),
           updatedAt: Date.now()
@@ -938,7 +1284,14 @@ async function handleMessage(message, senderUserId) {
       }, { parent: shared, keepId: true });
       if (!page) return;
       const layout = layoutPage(shared);
-      if (layout) await layout.update({ [`system.cards.${page.id}`]: note.card });
+      if (layout) {
+        await layout.update({
+          [`system.cards.${page.id}`]: {
+            ...note.card,
+            anchors: addMainAnchor(note.card.anchors ?? {}, senderUserId)
+          }
+        });
+      }
       // Typed [[links]] in the now-public text resolve in the shared namespace only.
       await reconcileAndSave(shared, page, page.system.blocks, senderUserId);
       return;
@@ -957,8 +1310,10 @@ async function handleMessage(message, senderUserId) {
         id: foundry.utils.randomID(),
         targetId: target.id,
         label: "", direction: "one", color: "", lineStyle: "solid",
+        ...defaultLinkCosmetics(),
         ...sanitizeLinkFields(message.link),
         ...linkAnchors(message.link),
+        routeAnchors: sanitizeSharedRouteAnchors(shared, message.link?.routeAnchors, page.id),
         origin: "drawn",
         edited: true,
         createdBy: senderUserId,

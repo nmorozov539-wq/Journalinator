@@ -2,6 +2,7 @@ import { getContainerIds } from "./containers.mjs";
 import { vaultStore } from "../secrets/vault-store.mjs";
 import { canUseGmTier } from "../secrets/access.mjs";
 import { mergeBlocks } from "../secrets/model.mjs";
+import { resolveAttachment, resolvePresentation } from "../presentation.mjs";
 
 const MODULE_ID = "fvtt-journalinator";
 const NOTE_TYPE = `${MODULE_ID}.note`;
@@ -149,6 +150,19 @@ class NotesStore {
   }
 
   #secretNote(note) {
+    // The vault stores its own plain note shape; resolve presentation/attachment with the same
+    // fallbacks as shared records so a merged GM view never drops label/style/pin data.
+    const presentation = resolvePresentation({
+      name: note.name,
+      system: {
+        style: note.style,
+        targetHeading: note.targetHeading,
+        schemaVersion: note.schemaVersion,
+        label: note.label,
+        presentation: note.presentation
+      }
+    });
+    const { label, ...presentationFields } = presentation;
     return {
       _id: note.id,
       id: note.id,
@@ -158,6 +172,10 @@ class NotesStore {
         kind: note.kind === "location" ? "location" : "note",
         style: note.style ?? "sticky",
         targetHeading: note.targetHeading ?? "",
+        schemaVersion: note.schemaVersion === 1 ? 1 : 0,
+        label,
+        presentation: presentationFields,
+        attachment: resolveAttachment({ system: { attachment: note.attachment } }),
         image: note.image ?? null,
         backgroundImage: note.backgroundImage ?? null,
         actorRef: null,

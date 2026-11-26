@@ -297,12 +297,22 @@ export default class JournalApp extends ApplicationV2 {
       // Never let a GM-only note or hidden paragraph leak into a shared paste.
       .filter(note => this.#view !== "shared" || !note.secret);
     if (!notes.length) return false;
+    const layout = this.#view === "private" ? this.#private.layout() : notesStore.getLayout();
+    const cards = layout?.cards ?? {};
     this.#clipboard = notes.map(note => ({
       title: note.name?.trim() || t("JN.Private.NewNoteTitle"),
       blocks: (note.system.blocks ?? []).filter(block => !block.hidden).map(block => block.text),
       style: cardStyleKey(note.system.style),
       kind: note.system.kind === "location" ? "location" : "note",
-      targetHeading: typeof note.system.targetHeading === "string" ? note.system.targetHeading : ""
+      targetHeading: typeof note.system.targetHeading === "string" ? note.system.targetHeading : "",
+      label: typeof note.system.label === "string" ? note.system.label : "",
+      presentation: note.system.presentation && typeof note.system.presentation === "object"
+        ? note.system.presentation : undefined,
+      attachment: note.system.attachment && typeof note.system.attachment === "object"
+        ? note.system.attachment : undefined,
+      schemaVersion: note.system.schemaVersion,
+      // The note model has no card, so read the selected card's anchors from the layout.
+      card: { anchors: cards[note.id]?.anchors ?? {} }
     }));
     ui.notifications?.info(t("JN.Clipboard.Copied", { count: this.#clipboard.length }));
     return true;
@@ -327,6 +337,8 @@ export default class JournalApp extends ApplicationV2 {
       await requestWrite({
         type: "pasteNote", title: entry.title, blocks: entry.blocks,
         style: entry.style, kind: entry.kind, targetHeading: entry.targetHeading,
+        label: entry.label, presentation: entry.presentation, attachment: entry.attachment,
+        schemaVersion: entry.schemaVersion, card: entry.card,
         x: position.x, y: position.y
       });
     }

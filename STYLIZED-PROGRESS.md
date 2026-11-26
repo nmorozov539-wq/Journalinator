@@ -1,0 +1,98 @@
+# Stylized Canvas — progress log
+
+Branch: `stylized-canvas` (local only; no push/merge/publish).
+Baseline: `54eee06` (`StateHookUp`, local checkout) → branch created at Phase 0.
+Spec package: `handoff/` (README, IMPLEMENTATION, DECISIONS, ACCEPTANCE, VISUAL-REFERENCE, THREAD-CONFIGURATOR).
+Module: 0.8.4 · Foundry v14.367 · local Foundry available (isolated test root plan below).
+
+## Phase 0 — repository audit and baseline
+
+### Git / baseline
+- Working tree before start: only untracked `handoff/`; no tracked modifications. Preserved.
+- Created `stylized-canvas` from local `StateHookUp` HEAD `54eee06`. Rationale: local checkout is the actual delivery baseline; GitHub `main` `dd452db` is its parent. No commits, pushes or merges to other branches.
+- `npm test` (baseline): **165 tests, 165 pass, 0 fail, 0 skipped** (~9.0 s), jsdom/showdown present.
+- `npm run check`: **All module scripts passed syntax checks.**
+- `dist/` is stale (0.7.25). Testing uses the repo root manifest (0.8.4), not `dist/`.
+
+### Environment
+- Foundry **14.367 Stable** at `/home/Riv/foundry-v14/foundryvtt`; data root `/home/Riv/foundry-v14-data`.
+- Module is symlinked at `Data/modules/fvtt-journalinator → /home/Riv/Projects/fvtt-journalinator`.
+- **Live production world `pf2e-setup-world` is module-enabled and must not be launched with WIP code.** All testing must use an isolated data root `/home/Riv/foundry-test-data` and test world `journalinator-test` on port 30199. Headless server works under system Node `resources/app/main.mjs`; Chromium + Playwright available externally for screenshots.
+- No Foundry process was started in Phase 0.
+
+### Audit reports (subagent sessions)
+- Data/security/migration: `ses_de83107eaffdNeVP9bKlMs00HQ`
+- Rendering/UI/theme/tests: `ses_de83107e7ffemU11DubD4kT5Vf`
+- Visual reference extraction: `ses_de83107c8ffedOj0nvK5VZ8RLa`
+- Environment/verification: `ses_de83107c6ffeE6deXPVK74WsdX`
+
+Key findings:
+- No schema version or migration exists anywhere; styles are five legacy keys (`sticky/document/torn/wanted/memo`).
+- Private workspace and secret vault have **allowlist normalizers** that silently drop unknown fields. Any new field must be added there or data is lost.
+- Secret declassification and `notes-store.#secretNote` reconstruct fixed field sets; new fields must be added in both.
+- Link `pins` are free world-space board waypoints, not note anchors. Stable link IDs, points/sides, direction, color slot, lineStyle all exist.
+- Current canvas has one permanent SVG mask that cuts threads under **all** cards; hover local fade is not implemented. No rotation gesture. Context/link toolbars are already screen-space.
+- Theme API: `game.journalinator.themes.register/list/get`, hooks `journalinatorThemeRegistered/Changed`, client settings `boardTheme`/`customThemes`, normalized token schema, CSS vars. Selector is currently active.
+- Tests: `tests/ui/smoke.mjs`, `theme.test.mjs`, `i18n.test.mjs`, `integration.test.mjs` are the high-impact suites; exact DOM/geometry/theme assertions must be updated deliberately, not deleted.
+- Visual reference: approved cork/paper/torn/thread values extracted; pin library and exact widths are candidates, not approved. Two HTML bugs to avoid: demo sticky max-width override and DOM-index torn seed.
+
+### Phase 0 decisions (reversible unless noted)
+
+| Topic | Decision | Rationale |
+|---|---|---|
+| Baseline | Branch from local `StateHookUp` | Latest real work; preserves actor-status commit. Can be rebased onto `main` later. |
+| Rendering model | One note primitive; `presentation.extendedStyle` (`memo/document/target`) + derived compact/extended. Keep legacy `system.style` read-only for old records. | R04/R05/R06. |
+| Schema | Additive, versioned with `system.schemaVersion` (0 legacy, 1 current). Read-time resolver means unmigrated records render. GM-only idempotent migration pass. | Avoid destructive rewrite; supports rollback by branch. |
+| Labels | `system.label` optional; empty renders nothing. Internal `name`/ID remains wikilink/identity key. Legacy meaningful names copied to label; generated placeholders detected by localized heuristic + `nameGenerated`. Never use labels for link lookup. | R09, DECISIONS open item. |
+| Unlabelled wikilinks | Keep existing title/`formerNames` resolution unchanged. Search indexes label + visible text with excerpt fallback; excerpts are not lookup keys. | No silent new syntax; preserves typed links. |
+| Hidden content | Classifier uses only viewer-visible blocks. No viewer-specific size writes. Hidden-block count may style a GM-only state but never changes geometry for players. | A11/A09. |
+| Private schema | Read-time normalization accepts format 1 or 2 and writes format 2 on next save; new fields deep-normalized. | No migration key required; reversible. |
+| Secret schema | Vault data format 2 with deep normalization; migrate lazily inside `vaultStore.mutate` while unlocked. Crypto blob format stays 1. Declassification allowlists extended explicitly. | Never log/export plaintext; old blobs keep working. |
+| Pin redistribution | GM-authoritative serialized batch with pre-state capture; local undo stack in app sends exact restore. Routes referencing a removed main pin drop the waypoint, preserving original link. | A20/E03. Atomic within the existing single-GM write queue. |
+| Route A/B | A keeps original link ID/endpoints and adds `routeAnchors[].noteId/anchorId`; main pin required. B is disallowed for `origin:"typed"` links; copies material/style/label to first segment only; local undo restores the exact original link. | E04/§6 safety. |
+| Thread sag | Rest sag = `min(100, |dx| * slack)` with default 0.09 matching current 42-cap at typical spans; spring solver preserved. | Resolves configurator/spec mismatch. |
+| Pin art | Ship brass/iron/enamel/wood/decorative/wax candidates; default enamel provisional; main 20px, minor 9px, board 12px. | E05, no concept approval needed. |
+| Fonts | Bundle SIL-OFL WOFF2 locally; IM Fell English is Latin-only, so RU formal headings use a bundled Cyrillic old-style serif (Old Standard TT if obtainable) and document the substitution. No runtime CDN. | Offline EN/RU requirement. |
+| Theme API | Keep register/list/get/hooks/settings and existing CSS var contract. Add allowlisted material/pin/thread tokens with safe defaults. New built-in default `stylized`; old theme ids still resolve but render new materials. Selector visible but inert. | R02. |
+| Floating tools | Screen-space `.jn-canvas-toolbar` child of `.jn-canvas` (like link toolbar), not layout flow. Cosmetic-only bulk. | R14/A25/A26. |
+
+### Known limitations / risks to watch
+- Real Foundry/multiplayer validation is pending; Node/jsdom tests are not a substitute.
+- "Private" workspaces are UI-private plaintext; vault "open" mode is trust-based. Migration must never surface them in shared data.
+- Existing app undo only covers trash. Pin redistribute and route-B undo will use a small explicit local undo stack; document that it is session-local.
+- Torn silhouettes use stable note-ID-seeded polygons; the demo's DOM-index seed must not be copied.
+- Performance at 50–100 notes / 100–200 links must be measured, not assumed.
+
+### Phase plan
+| Phase | Scope | Gate |
+|---|---|---|
+| 1 | Universal note schema, presentation resolver, migration, private/secret/socket compatibility, tests | roundtrip, IDs, permissions, old fixtures |
+| 2 | Classifier/adaptive sizing, Markdown + picture layout, label editor, creation menu, search | A02–A06, A09 |
+| 3 | Cork, four renderers + torn, theme tokens/API, fonts, selector inert | A07, A08, A12, A13 |
+| 4 | L3/L6 threads, presets, patterns/ends, slack/sag, local fade | A14–A16 |
+| 5 | Anchors, optional pins, snapping, lifecycle, redistribution, pin art | A17–A21 |
+| 6 | Route A/B note-on-thread, transactional ops + undo | A22–A23 |
+| 7 | Floating contextual toolbar, popovers, bulk cosmetics, i18n/a11y | A25–A26 |
+| 8 | Integration/build, isolated Foundry smoke, package, manual matrix | A27–A28 |
+
+### Phase gates / test commands
+`npm test` and `npm run check` after every phase. Add tests per phase.
+Manual Foundry checks are recorded as **not run / pending** until an isolated world is actually exercised.
+
+## Change log (fills in as phases land)
+
+### Phase 1 — universal note + migration (commit pending at time of writing)
+
+Implementation agents: `ses_de825bb89ffeGaWs7MOR769FGN` (shared), `ses_de825bb88ffeb5a5vIVaxXhcUu` (private/secret), fix agent `ses_de80e58b2ffeSsBtCUPYNvpQfw`, residual fix `ses_de7f78cf9ffelWPyVaAIxrPRfa`.
+Validation: `ses_de81a8f87ffeikgtbB6fY8c7Fm` (found F1–F8), `ses_de8035d95ffeh25CbGi1p1DR8u` (found N1–N6).
+
+Delivered:
+- `scripts/presentation.mjs`: renderer/typography/link constants, legacy mapping, `resolvePresentation`, `resolveAttachment`, `resolveLinkCosmetics`, generated-title heuristic, `migrateNoteSystem`, shared anchor sanitizers.
+- Note schema: `label`, `schemaVersion`, `presentation`, `attachment`; link cosmetics + anchor IDs + route anchors; layout card anchor registry.
+- Shared socket: new `setNotePresentation` / `setNoteAttachment` / `setNoteLabel`; legacy setters synchronise presentation; creation/paste/restore keep new fields and anchors; declassify preserves fields/IDs/formerNames and filters secret route waypoints; client route authoring forced empty until Phase 6.
+- Private workspace format 2 (read 1/2, write 2), deep normalisation, anchors/ports preserved, main anchor seeded.
+- Vault data format 2 with deep normalisation; crypto blob format unchanged; secret setters synchronised; hidden-link cosmetics validated; declassify preserves new fields.
+- GM-only idempotent `migrateSharedWorld()` plus world `schemaVersion` setting; per-card anchor migration preserves minors and skips bad cards.
+- Tests: 200 pass / 0 fail; `npm run check` pass.
+
+Known deferred: destructive main-pin disable/redistribution is Phase 5; route A/B authoring is Phase 6. Vault migration is lazy (persists on next vault write).

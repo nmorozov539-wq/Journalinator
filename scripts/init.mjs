@@ -10,6 +10,7 @@ import JournalApp from "./app/journal-app.mjs";
 import { registerGmTierSettings } from "./secrets/access.mjs";
 import { vaultStore } from "./secrets/vault-store.mjs";
 import { privateStore } from "./store/private-store.mjs";
+import { migrateSharedWorld } from "./migrate.mjs";
 import { t } from "./i18n.mjs";
 import {
   BUILTIN_THEME_IDS, getTheme, isThemeId, listThemes, loadSavedThemes, registerTheme, savedThemes
@@ -27,6 +28,10 @@ Hooks.once("init", () => {
   });
   registerContainerSettings();
   registerGmTierSettings();
+  // World-scoped schema marker: 0 = legacy records may still exist, 1 = shared migration finished.
+  game.settings.register(MODULE_ID, "schemaVersion", {
+    scope: "world", config: false, type: Number, default: 0
+  });
   game.settings.register(MODULE_ID, "boardTheme", {
     scope: "client", config: false, type: String, default: "classic"
   });
@@ -70,7 +75,17 @@ function exposeThemeApi() {
 
 Hooks.once("ready", async () => {
   await ensureContainers();
-  if (game.user.isGM) await privateStore.orphanMissingUsers();
+  if (game.user.isGM) {
+    if ((game.settings.get(MODULE_ID, "schemaVersion") ?? 0) < 1) {
+      try {
+        const result = await migrateSharedWorld();
+        if (result.failed === 0) await game.settings.set(MODULE_ID, "schemaVersion", 1);
+      } catch (err) {
+        console.error("Journalinator: shared-world migration failed", err);
+      }
+    }
+    await privateStore.orphanMissingUsers();
+  }
   registerSocket();
   startExpirySweep();
   startLockResync();

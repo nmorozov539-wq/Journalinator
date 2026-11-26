@@ -4,35 +4,252 @@
  *
  * Vault shape (the decrypted plaintext):
  * {
- *   format: 1, rev: <int>,
+ *   format: 2, rev: <int>,
  *   notes:        { [noteId]: SecretNote }             GM-only notes, card included
  *   hiddenBlocks: { [sharedNoteId]: { order: [blockId...], blocks: { [blockId]: Block } } }
  *   hiddenLinks:  { [sourceNoteId]: Link[] }           GM-only links whose source is a shared note
  *   labels:       { [labelId]: Label }                  GM-only canvas labels
  * }
- * SecretNote = { id, name, kind, style, image, blocks: Block[], links: Link[], authorId,
- *                createdAt, updatedAt, card: { x, y, width, height, rotation } }
+ * SecretNote = { id, name, kind, style, targetHeading, schemaVersion, label, presentation, attachment,
+ *                image, backgroundImage, blocks: Block[], links: Link[], authorId, createdAt,
+ *                updatedAt, card: { x, y, width, height, rotation, ports, anchors }, formerNames }
  */
 
-export const VAULT_DATA_FORMAT = 1;
+import { CARD_STYLES } from "../styles/registry.mjs";
+import {
+  CARD_SIDES, DEFAULT_CARD_PORTS, MAX_THREAD_PINS, validCardPorts, validLinkPoint, validThreadPin
+} from "../card-ports.mjs";
+import { normalizeLinkColor } from "../link-colors.mjs";
+import { DEFAULT_STAMP_CORNER, STAMP_COLORS, isStampCorner, stampUrl } from "../stamps.mjs";
+import {
+  resolveAttachment, resolveLinkCosmetics, resolvePresentation, sanitizeCardAnchorsWithMain
+} from "../presentation.mjs";
+
+export const VAULT_DATA_FORMAT = 2;
+
+const NOTE_SCHEMA_VERSION = 1;
+const MAX_NAME_LENGTH = 200;
+const MAX_ROUTE_ANCHORS = 24;
+const MAX_ANCHOR_ID_LENGTH = 64;
+const ID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 /** Secret note titles carry a `GM-XXXX ` prefix so they never collide with player titles. */
 export const SECRET_PREFIX_RE = /^GM-[A-Z0-9]{4} /;
 const PREFIX_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I
 
-export function emptyVault() {
-  return { format: VAULT_DATA_FORMAT, rev: 0, notes: {}, hiddenBlocks: {}, hiddenLinks: {}, labels: {} };
+/** Foundry-style id for data the vault has to invent while normalizing (pure, no globals). */
+export function randomVaultId(length = 16) {
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(length));
+  let id = "";
+  for (const byte of bytes) id += ID_ALPHABET[byte % ID_ALPHABET.length];
+  return id;
 }
 
+function normalizeAnchors(anchors, mainPinEnabled, createdBy) {
+  return sanitizeCardAnchorsWithMain(anchors, mainPinEnabled, createdBy);
+}
+
+/** Geometry-only card, including ports and the local anchor registry. */
+export function normalizeVaultCard(card, mainPinEnabled = true, createdBy = "") {
+  if (!card || typeof card !== "object") return null;
+  return {
+    x: Number.isFinite(card.x) ? card.x : 0,
+    y: Number.isFinite(card.y) ? card.y : 0,
+    width: Number.isFinite(card.width) && card.width > 0 ? card.width : null,
+    height: Number.isFinite(card.height) && card.height > 0 ? card.height : null,
+    rotation: Number.isFinite(card.rotation) ? card.rotation : 0,
+    ports: validCardPorts(card.ports) ? [...card.ports] : [...DEFAULT_CARD_PORTS],
+    anchors: normalizeAnchors(card.anchors, mainPinEnabled, createdBy)
+  };
+}
+
+function anchorId(value) {
+  return typeof value === "string" ? value.slice(0, MAX_ANCHOR_ID_LENGTH) : "";
+}
+
+export function normalizeRouteAnchors(list) {
+  if (!Array.isArray(list)) return [];
+  const seen = new Set();
+  const anchors = [];
+  for (const anchor of list) {
+    if (typeof anchor?.noteId !== "string" || !anchor.noteId) continue;
+    if (typeof anchor?.anchorId !== "string" || !anchor.anchorId) continue;
+    const key = `${anchor.noteId}:${anchor.anchorId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    anchors.push({
+      noteId: anchor.noteId.slice(0, MAX_ANCHOR_ID_LENGTH),
+      anchorId: anchor.anchorId.slice(0, MAX_ANCHOR_ID_LENGTH)
+    });
+    if (anchors.length >= MAX_ROUTE_ANCHORS) break;
+  }
+  return anchors;
+}
+
+/** One link, including legacy fields and the new cosmetic/anchor fields. */
+export function normalizeVaultLink(link) {
+  link = link && typeof link === "object" ? link : {};
+  const direction = ["none", "one", "two"].includes(link.direction) ? link.direction : "none";
+  const lineStyle = link.lineStyle === "dashed" ? "dashed" : "solid";
+  const cosmetics = resolveLinkCosmetics(link);
+  const clean = {
+    id: typeof link.id === "string" && link.id ? link.id : randomVaultId(),
+    targetId: typeof link.targetId === "string" ? link.targetId : "",
+    label: typeof link.label === "string" ? link.label.slice(0, 200) : "",
+    direction,
+    color: normalizeLinkColor(link.color),
+    lineStyle,
+    origin: link.origin === "typed" ? "typed" : "drawn",
+    edited: link.edited === true,
+    createdBy: typeof link.createdBy === "string" ? link.createdBy : "",
+    hint: link.hint === true,
+    sourceAnchorId: anchorId(link.sourceAnchorId),
+    targetAnchorId: anchorId(link.targetAnchorId),
+    routeAnchors: normalizeRouteAnchors(link.routeAnchors),
+    material: cosmetics.material,
+    thickness: cosmetics.thickness,
+    slack: cosmetics.slack,
+    pattern: cosmetics.pattern,
+    ends: cosmetics.ends,
+    secondaryColor: cosmetics.secondaryColor
+  };
+  for (const key of ["sourceSide", "targetSide"]) {
+    if (CARD_SIDES.includes(link[key])) clean[key] = link[key];
+  }
+  for (const key of ["sourcePoint", "targetPoint"]) {
+    if (validLinkPoint(link[key])) clean[key] = { x: link[key].x, y: link[key].y };
+  }
+  if (Array.isArray(link.pins)) {
+    clean.pins = link.pins.slice(0, MAX_THREAD_PINS).filter(validThreadPin).map(({ x, y }) => ({ x, y }));
+  }
+  return clean;
+}
+
+export function normalizeVaultBlock(block, fallbackId = null) {
+  const blockId = fallbackId
+    ?? (typeof block?.blockId === "string" && block.blockId ? block.blockId : randomVaultId());
+  return {
+    blockId,
+    text: typeof block?.text === "string" ? block.text : "",
+    authorId: typeof block?.authorId === "string" ? block.authorId : ""
+  };
+}
+
+/** A whole secret note: content, presentation and its card. */
+export function normalizeVaultNote(note, fallbackId = null) {
+  note = note && typeof note === "object" ? note : {};
+  const name = typeof note.name === "string" ? note.name.slice(0, MAX_NAME_LENGTH) : "";
+  const style = Object.hasOwn(CARD_STYLES, note.style) ? note.style : "sticky";
+  const targetHeading = typeof note.targetHeading === "string" ? note.targetHeading.slice(0, 80) : "";
+  const stored = note.presentation && typeof note.presentation === "object" ? note.presentation : {};
+  const presentation = resolvePresentation({
+    name,
+    system: { style, targetHeading, label: note.label, presentation: stored }
+  });
+  const hasLabel = typeof note.label === "string";
+  const humanTitle = stripSecretPrefix(name).trim();
+  const { label: _ignored, ...presentationFields } = presentation;
+  const id = fallbackId ?? (typeof note.id === "string" && note.id ? note.id : randomVaultId());
+  const attachment = resolveAttachment({ system: { attachment: note.attachment } });
+  return {
+    id,
+    name,
+    kind: note.kind === "location" ? "location" : "note",
+    style,
+    targetHeading,
+    schemaVersion: Number.isInteger(note.schemaVersion) && note.schemaVersion > 0
+      ? note.schemaVersion : NOTE_SCHEMA_VERSION,
+    label: hasLabel
+      ? note.label.slice(0, MAX_NAME_LENGTH)
+      : (presentation.nameGenerated || !humanTitle ? "" : humanTitle.slice(0, MAX_NAME_LENGTH)),
+    presentation: presentationFields,
+    attachment,
+    image: typeof note.image === "string" ? note.image : null,
+    backgroundImage: typeof note.backgroundImage === "string" ? note.backgroundImage : null,
+    blocks: Array.isArray(note.blocks) ? note.blocks.map(block => normalizeVaultBlock(block)) : [],
+    links: (Array.isArray(note.links) ? note.links : []).map(normalizeVaultLink),
+    authorId: typeof note.authorId === "string" ? note.authorId : "",
+    createdAt: Number.isFinite(note.createdAt) ? note.createdAt : Date.now(),
+    updatedAt: Number.isFinite(note.updatedAt) ? note.updatedAt : Date.now(),
+    card: normalizeVaultCard(note.card, attachment.mainPinEnabled, note.authorId),
+    formerNames: (Array.isArray(note.formerNames) ? note.formerNames : [])
+      .filter(name => typeof name === "string").slice(-20)
+      .map(name => name.slice(0, MAX_NAME_LENGTH))
+  };
+}
+
+export function normalizeVaultLabel(label) {
+  label = label && typeof label === "object" ? label : {};
+  return {
+    text: typeof label.text === "string" ? label.text.slice(0, 500) : "",
+    x: Number.isFinite(label.x) ? label.x : 0,
+    y: Number.isFinite(label.y) ? label.y : 0,
+    size: Number.isFinite(label.size) ? label.size : 14,
+    color: Object.values(STAMP_COLORS).includes(label.color) ? label.color : "",
+    stamp: typeof label.stamp === "string" && stampUrl(label.stamp) ? label.stamp : "",
+    noteId: typeof label.noteId === "string" ? label.noteId : "",
+    corner: isStampCorner(label.corner) ? label.corner : DEFAULT_STAMP_CORNER
+  };
+}
+
+function normalizeHiddenEntry(entry) {
+  const source = entry && typeof entry === "object" ? entry : {};
+  const blocks = {};
+  if (source.blocks && typeof source.blocks === "object") {
+    for (const [id, block] of Object.entries(source.blocks)) {
+      if (!id) continue;
+      blocks[id] = normalizeVaultBlock(block, id);
+    }
+  }
+  const seen = new Set();
+  const order = (Array.isArray(source.order) ? source.order : []).filter(id => {
+    if (typeof id !== "string" || !id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+  return { order, blocks };
+}
+
+export function emptyVault() {
+  return {
+    format: VAULT_DATA_FORMAT, rev: 0, notes: {}, hiddenBlocks: {}, hiddenLinks: {}, labels: {}
+  };
+}
+
+/**
+ * Reads formats 1 and 2 and returns a complete format-2 tree in memory. Unknown fields are
+ * dropped deliberately: the vault only trusts the schemas this version knows how to render.
+ * The next vaultStore.mutate() re-encrypts the normalized tree.
+ */
 export function normalizeVault(data) {
   const vault = data && typeof data === "object" ? data : {};
+  const notes = {};
+  for (const [id, note] of Object.entries(vault.notes && typeof vault.notes === "object" ? vault.notes : {})) {
+    if (!id || !note || typeof note !== "object") continue;
+    notes[id] = normalizeVaultNote(note, id);
+  }
+  const hiddenBlocks = {};
+  for (const [noteId, entry] of Object.entries(vault.hiddenBlocks && typeof vault.hiddenBlocks === "object" ? vault.hiddenBlocks : {})) {
+    if (!noteId || !entry || typeof entry !== "object") continue;
+    hiddenBlocks[noteId] = normalizeHiddenEntry(entry);
+  }
+  const hiddenLinks = {};
+  for (const [noteId, links] of Object.entries(vault.hiddenLinks && typeof vault.hiddenLinks === "object" ? vault.hiddenLinks : {})) {
+    if (!noteId || !Array.isArray(links)) continue;
+    hiddenLinks[noteId] = links.map(normalizeVaultLink);
+  }
+  const labels = {};
+  for (const [id, label] of Object.entries(vault.labels && typeof vault.labels === "object" ? vault.labels : {})) {
+    if (!id || !label || typeof label !== "object") continue;
+    labels[id] = normalizeVaultLabel(label);
+  }
   return {
     format: VAULT_DATA_FORMAT,
     rev: Number.isFinite(vault.rev) ? vault.rev : 0,
-    notes: vault.notes && typeof vault.notes === "object" ? vault.notes : {},
-    hiddenBlocks: vault.hiddenBlocks && typeof vault.hiddenBlocks === "object" ? vault.hiddenBlocks : {},
-    hiddenLinks: vault.hiddenLinks && typeof vault.hiddenLinks === "object" ? vault.hiddenLinks : {},
-    labels: vault.labels && typeof vault.labels === "object" ? vault.labels : {}
+    notes,
+    hiddenBlocks,
+    hiddenLinks,
+    labels
   };
 }
 

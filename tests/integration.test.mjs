@@ -20,6 +20,7 @@ const { vaultStore } = await import("../scripts/secrets/vault-store.mjs");
 const { notesStore } = await import("../scripts/store/notes-store.mjs");
 const secrets = await import("../scripts/secrets/secret-actions.mjs");
 const { registerSocket, requestWrite } = await import("../scripts/socket.mjs");
+const { resolvePresentation } = await import("../scripts/presentation.mjs");
 registerSocket();
 
 const PASS = "correct horse battery staple";
@@ -185,6 +186,42 @@ test("GM-only label and link", async () => {
   assert.equal(notesStore.isHiddenLink(tavernId, link.id), true);
 });
 
+test("secret legacy setters keep stored presentation in sync", async () => {
+  const id = await secrets.createSecretNote({ title: "Legacy Secret", x: 700, y: 0 });
+  await secrets.setSecretNotePresentation(id, { font: "hand", pictureLayout: "left" });
+  await secrets.setSecretTargetHeading(id, "  Secret Heading  ");
+  await secrets.setSecretNoteStyle(id, "torn");
+
+  let note = vaultStore.data.notes[id];
+  let presentation = resolvePresentation(note);
+  assert.equal(presentation.extendedStyle, "memo");
+  assert.equal(presentation.forceExtended, true);
+  assert.equal(presentation.torn, true);
+  assert.equal(presentation.font, "hand", "a style change keeps the chosen font");
+  assert.equal(presentation.pictureLayout, "left");
+  assert.equal(presentation.heading, "Secret Heading");
+  assert.equal(note.schemaVersion, 1);
+
+  await secrets.setSecretNotePresentation(id, { font: "serif" });
+  assert.equal(vaultStore.data.notes[id].targetHeading, "Secret Heading",
+    "an absent heading leaves the legacy secret heading alone");
+  await secrets.setSecretNotePresentation(id, { heading: "" });
+  assert.equal(vaultStore.data.notes[id].targetHeading, "",
+    "an explicit empty heading clears the legacy secret heading");
+  assert.equal(resolvePresentation(vaultStore.data.notes[id]).heading, "");
+
+  await secrets.renameSecretNote(id, "Captain of Secrets");
+  note = vaultStore.data.notes[id];
+  presentation = resolvePresentation(note);
+  assert.equal(presentation.nameGenerated, false);
+  assert.equal(note.label, "Captain of Secrets", "a meaningful rename replaces the old bare label");
+  assert.equal(note.schemaVersion, 1);
+  assert.ok(note.formerNames.some(name => name.endsWith(" Legacy Secret")),
+    "the previous secret title is kept as a former name");
+
+  await secrets.deleteSecretNote(id);
+});
+
 test("a temporarily missing shared journal never prunes hidden content", async () => {
   const before = {
     notes: Object.keys(vaultStore.data.notes).sort(),
@@ -224,6 +261,26 @@ test("a pre-existing hidden drawn link survives a hidden-block edit after the sh
     vaultStore.data.hiddenLinks[tavernId]?.some(l => l.id === hiddenLink.id),
     "the pre-existing GM-only link was not dropped"
   );
+});
+
+test("client-created links cannot carry route waypoints before Phase 6", async () => {
+  await fromPlayer({ type: "createNote", title: "Route Ignore Target", x: 620, y: 0 });
+  const target = sharedByName("Route Ignore Target");
+  assert.ok(cultId && vaultStore.data.notes[cultId], "the waypoint note is still secret");
+  const malicious = [{ noteId: cultId, anchorId: "main" }, { noteId: tavernId, anchorId: "main" }];
+  await fromPlayer({
+    type: "createLink", sourceId: tavernId, targetId: target.id, routeAnchors: malicious
+  });
+  const link = sharedByName("Tavern").system.links.find(item => item.targetId === target.id);
+  assert.deepEqual(link.routeAnchors, [], "createLink ignores client routeAnchors");
+  assert.ok(!JSON.stringify(link).includes(cultId), "a still-secret waypoint id never enters the link");
+
+  await fromPlayer({
+    type: "updateLink", noteId: tavernId, linkId: link.id, fields: { routeAnchors: malicious }
+  });
+  const updated = sharedByName("Tavern").system.links.find(item => item.id === link.id);
+  assert.deepEqual(updated.routeAnchors, [], "updateLink does not accept route changes");
+  assert.ok(!JSON.stringify(updated).includes(cultId));
 });
 
 test("player actions never resolve against or collide with secret notes", async () => {
@@ -312,6 +369,42 @@ test("declassifying a note refuses a taken title, then publishes with the same i
   assert.equal(vaultStore.data.notes[vexId], undefined);
   const layout = shared().pages.get(containers.ids.layoutPage).system;
   assert.ok(layout.cards[vexId], "card moved to the shared layout");
+});
+
+test("declassifying a routed link drops waypoints through still-secret notes", async () => {
+  const waypointId = await secrets.createSecretNote({ title: "Waypoint Secret", x: 0, y: 0 });
+  const routedId = await secrets.createSecretNote({ title: "Routed Secret", x: 100, y: 0 });
+  await secrets.addHiddenLink(routedId, tavernId, { sourceSide: "right", targetSide: "left" });
+  const hidden = vaultStore.data.notes[routedId].links.find(link => link.targetId === tavernId);
+  await secrets.updateHiddenLink(routedId, hidden.id, {
+    routeAnchors: [
+      { noteId: waypointId, anchorId: "main" },
+      { noteId: tavernId, anchorId: "main" }
+    ]
+  });
+
+  assert.equal(await secrets.declassifyNote(routedId, "Published Route"), true);
+  const page = shared().pages.get(routedId);
+  const link = page.system.links.find(item => item.targetId === tavernId);
+  assert.deepEqual(link.routeAnchors.map(anchor => anchor.noteId), [tavernId],
+    "only the live shared waypoint is published");
+
+  const dump = playerVisibleDump();
+  assert.ok(!dump.includes(waypointId), "a still-secret waypoint id must not leave the vault");
+  assert.ok(!dump.includes(vaultStore.data.notes[waypointId].name),
+    "a still-secret waypoint title must not leave the vault");
+  assert.ok(vaultStore.data.notes[waypointId], "the waypoint note itself stays secret");
+});
+
+test("declassification preserves bounded former names after a secret rename", async () => {
+  const secretId = await secrets.createSecretNote({ title: "Former Secret", x: 0, y: 0 });
+  const oldName = vaultStore.data.notes[secretId].name;
+  await secrets.renameSecretNote(secretId, "Renamed Secret");
+  assert.notEqual(vaultStore.data.notes[secretId].name, oldName);
+
+  assert.equal(await secrets.declassifyNote(secretId, "Public Renamed Secret"), true);
+  const page = shared().pages.get(secretId);
+  assert.deepEqual(page.system.formerNames, [oldName], "the former secret title survives declassification");
 });
 
 test("hiding a shared block moves it into the vault", async () => {
@@ -415,8 +508,301 @@ test("only the GM may link a note to an actor, and the ref survives as shared no
   assert.equal(note.system.actorRef, null);
 });
 
-test("final leak check (key is in the world now: open mode, so only ciphertext is checked)", () => {
+test("mid-suite leak check (key is in the world now: open mode, so only ciphertext is checked)", () => {
   // In open mode the key is readable by design, so check the vault blob holds no plaintext.
   const blob = JSON.stringify(containers.secrets.flags["fvtt-journalinator"].vault);
   for (const s of ["Hidden Cult", "secret link label", "GM label text"]) assert.ok(!blob.includes(s));
+});
+
+test("new shared notes carry schema defaults, a label slot and a main anchor", async () => {
+  await fromPlayer({ type: "createNote", title: "Presentation Fixture", x: 0, y: 0 });
+  const note = sharedByName("Presentation Fixture");
+  assert.equal(note.system.schemaVersion, 1);
+  assert.equal(note.system.label, "");
+  assert.equal(note.system.presentation.extendedStyle, "memo");
+  assert.equal(note.system.presentation.forceExtended, false);
+  assert.equal(note.system.attachment.mainPinEnabled, true);
+  assert.equal(note.system.attachment.mainSnapRadius, 24);
+  const card = notesStore.getSharedLayout().cards[note.id];
+  assert.deepEqual(card.anchors.main, {
+    kind: "main", x: 0.5, y: 0, createdBy: player.id
+  });
+});
+
+test("presentation, label and attachment handlers roundtrip and reject invalid batches", async () => {
+  const note = sharedByName("Presentation Fixture");
+  const originalName = note.name;
+
+  await fromPlayer({
+    type: "setNotePresentation", noteIds: [note.id],
+    fields: { extendedStyle: "document", font: "hand", pictureLayout: "left", torn: true }
+  });
+  assert.equal(note.system.presentation.extendedStyle, "document");
+  assert.equal(note.system.presentation.font, "hand");
+  assert.equal(note.system.presentation.pictureLayout, "left");
+  assert.equal(note.system.presentation.torn, true);
+  assert.equal(note.system.presentation.forceExtended, false, "unspecified fields stay untouched");
+  assert.equal(note.system.label, "", "presentation changes do not touch the label");
+
+  await fromPlayer({ type: "setNoteLabel", noteId: note.id, label: "  A readable label  " });
+  assert.equal(note.system.label, "A readable label");
+  assert.equal(note.name, originalName, "the Foundry page name is never renamed by a label edit");
+
+  await fromPlayer({
+    type: "setNoteAttachment", noteIds: [note.id],
+    fields: { mainPinEnabled: false, mainSnapRadius: 99, minorSnapRadius: 4, pinStyle: "brass" }
+  });
+  assert.equal(note.system.attachment.mainPinEnabled, false);
+  assert.equal(note.system.attachment.mainSnapRadius, 64);
+  assert.equal(note.system.attachment.minorSnapRadius, 4);
+  assert.equal(note.system.attachment.pinStyle, "brass");
+
+  // Unknown keys, bad enums and one invalid id reject the whole batch before any write.
+  await fromPlayer({
+    type: "setNotePresentation", noteIds: [note.id], fields: { unknownField: true }
+  });
+  await fromPlayer({
+    type: "setNotePresentation", noteIds: [note.id], fields: { extendedStyle: "sticky" }
+  });
+  await fromPlayer({
+    type: "setNotePresentation", noteIds: [note.id, "MissingNote00001"], fields: { font: "serif" }
+  });
+  await fromPlayer({
+    type: "setNoteAttachment", noteIds: [note.id], fields: { pinStyle: "rope" }
+  });
+  await fromPlayer({
+    type: "setNoteAttachment", noteIds: [note.id], fields: { mainPinEnabled: "yes" }
+  });
+  assert.equal(note.system.presentation.extendedStyle, "document");
+  assert.equal(note.system.presentation.font, "hand");
+  assert.equal(note.system.attachment.pinStyle, "brass");
+  assert.equal(note.system.attachment.mainPinEnabled, false);
+
+  const longLabel = "x".repeat(201);
+  await fromPlayer({ type: "setNoteLabel", noteId: note.id, label: longLabel });
+  assert.equal(note.system.label.length, 200);
+  assert.equal(note.name, originalName);
+});
+
+test("legacy setters keep presentation, heading, rename label and schema in sync", async () => {
+  const makeLegacy = (name, style) => JournalEntryPage.create({
+    name,
+    type: "fvtt-journalinator.note",
+    system: {
+      style, targetHeading: "", schemaVersion: 0,
+      blocks: [{ blockId: foundry.utils.randomID(), text: "" }],
+      authorId: player.id, createdAt: 1, updatedAt: 1
+    }
+  }, { parent: shared() });
+
+  const partial = await makeLegacy("Legacy Partial", "wanted");
+  await requestWrite({
+    type: "setNotePresentation", noteIds: [partial.id], fields: { font: "hand" }
+  });
+  const partialPresentation = resolvePresentation(partial);
+  assert.equal(partialPresentation.extendedStyle, "target", "a partial patch keeps the legacy style");
+  assert.equal(partialPresentation.forceExtended, true);
+  assert.equal(partialPresentation.torn, false);
+  assert.equal(partialPresentation.font, "hand");
+  assert.equal(partial.system.schemaVersion, 1);
+
+  const styled = await makeLegacy("Legacy Styled", "sticky");
+  await requestWrite({
+    type: "setNotePresentation", noteIds: [styled.id],
+    fields: { font: "serif", pictureLayout: "left" }
+  });
+  await requestWrite({ type: "setTargetHeading", noteId: styled.id, heading: "  Wanted heading  " });
+  await requestWrite({ type: "setNoteStyle", noteId: styled.id, style: "torn" });
+  const styledPresentation = resolvePresentation(styled);
+  assert.equal(styledPresentation.extendedStyle, "memo");
+  assert.equal(styledPresentation.forceExtended, true);
+  assert.equal(styledPresentation.torn, true);
+  assert.equal(styledPresentation.font, "serif", "a style change keeps the chosen font");
+  assert.equal(styledPresentation.pictureLayout, "left", "a style change keeps the picture layout");
+  assert.equal(styledPresentation.heading, "Wanted heading", "a style change keeps the heading");
+  assert.equal(styled.system.schemaVersion, 1);
+
+  const headingLegacy = await makeLegacy("Legacy Heading", "wanted");
+  await requestWrite({ type: "setTargetHeading", noteId: headingLegacy.id, heading: "Old heading" });
+  await requestWrite({
+    type: "setNotePresentation", noteIds: [headingLegacy.id], fields: { font: "serif" }
+  });
+  assert.equal(headingLegacy.system.targetHeading, "Old heading",
+    "an absent heading leaves the legacy key alone");
+  await requestWrite({
+    type: "setNotePresentation", noteIds: [headingLegacy.id], fields: { heading: "" }
+  });
+  assert.equal(headingLegacy.system.targetHeading, "",
+    "an explicit empty heading clears the legacy key");
+  assert.equal(resolvePresentation(headingLegacy).heading, "");
+
+  const renamed = await makeLegacy("New Note", "sticky");
+  await requestWrite({ type: "setNoteLabel", noteId: renamed.id, label: "New Note" });
+  assert.equal(renamed.system.schemaVersion, 1, "setNoteLabel migrates the schema");
+  await requestWrite({ type: "renameNote", noteId: renamed.id, title: "Captain Vex" });
+  assert.equal(renamed.system.label, "Captain Vex", "a meaningful rename replaces the old bare label");
+  assert.equal(renamed.system.presentation.nameGenerated, false);
+  assert.equal(renamed.system.schemaVersion, 1);
+
+  const zero = await makeLegacy("New Note", "sticky");
+  assert.equal(zero.system.schemaVersion, 0, "legacy pages start unmigrated");
+  await requestWrite({ type: "renameNote", noteId: zero.id, title: "Zero To One" });
+  assert.equal(zero.system.schemaVersion, 1, "rename migrates a page that was still at schema 0");
+});
+
+test("restoring a note copies the whole stored card, including its anchor registry", async () => {
+  await requestWrite({ type: "createNote", title: "Anchor Restore Fixture", x: 20, y: 30 });
+  const note = sharedByName("Anchor Restore Fixture");
+  const layout = shared().pages.get(containers.ids.layoutPage);
+  await layout.update({
+    [`system.cards.${note.id}.anchors.minor`]: {
+      kind: "minor", x: 0.2, y: 0.3, createdBy: player.id
+    }
+  });
+  const before = structuredClone(layout.system.cards[note.id]);
+
+  await requestWrite({ type: "deleteNote", noteId: note.id });
+  assert.equal(notesStore.getSharedLayout().cards[note.id], undefined);
+  await requestWrite({ type: "restoreNote", noteId: note.id });
+
+  const restored = notesStore.getSharedLayout().cards[note.id];
+  assert.deepEqual(restored.anchors, before.anchors);
+  assert.deepEqual([restored.x, restored.y], [before.x, before.y]);
+});
+
+test("declassification preserves label, presentation, attachment, anchors and link ids", async () => {
+  const noteId = "Declassify000001";
+  const blockId = "BlockDeclass0001";
+  const linkId = "LinkDeclass00001";
+  await requestWrite({
+    type: "gmCreateNote",
+    noteId,
+    title: "Declassified Fixture",
+    kind: "note",
+    style: "wanted",
+    targetHeading: "Wanted",
+    label: "Public label",
+    formerNames: ["First Former", 42, "x".repeat(250)],
+    presentation: {
+      extendedStyle: "target", forceExtended: true, font: "serif",
+      pictureLayout: "left", torn: true, heading: "Wanted", nameGenerated: false
+    },
+    attachment: {
+      mainPinEnabled: false, mainSnapRadius: 18, minorSnapRadius: 3, pinStyle: "wax"
+    },
+    blocks: [{ blockId, text: "Declassified body" }],
+    links: [{
+      id: linkId,
+      targetId: tavernId,
+      label: "public link",
+      direction: "one",
+      color: "link2",
+      lineStyle: "dashed",
+      material: "double",
+      thickness: 9,
+      slack: 2,
+      pattern: "alternating",
+      ends: "loose",
+      secondaryColor: "link3",
+      sourceAnchorId: "main",
+      targetAnchorId: "main",
+      routeAnchors: [{ noteId: tavernId, anchorId: "main" }]
+    }],
+    card: {
+      x: 50, y: 60, width: 200, height: 100, rotation: 2, ports: ["left"],
+      anchors: {
+        main: { kind: "main", x: 0.5, y: 0, createdBy: gmUser.id },
+        minor: { kind: "minor", x: 0.2, y: 0.3, createdBy: gmUser.id }
+      }
+    }
+  });
+
+  const page = shared().pages.get(noteId);
+  assert.ok(page);
+  assert.equal(page.system.schemaVersion, 1);
+  assert.equal(page.system.label, "Public label");
+  assert.deepEqual(page.system.formerNames, ["First Former", "x".repeat(200)],
+    "declassified former names are bounded strings");
+  assert.equal(page.system.presentation.extendedStyle, "target");
+  assert.equal(page.system.presentation.pictureLayout, "left");
+  assert.equal(page.system.presentation.torn, true);
+  assert.equal(page.system.attachment.mainPinEnabled, false);
+  assert.equal(page.system.attachment.pinStyle, "wax");
+  const link = page.system.links.find(item => item.id === linkId);
+  assert.ok(link, "a non-colliding link id is preserved");
+  assert.equal(link.material, "double");
+  assert.equal(link.thickness, 5);
+  assert.equal(link.slack, 0.25);
+  assert.equal(link.pattern, "alternating");
+  assert.equal(link.secondaryColor, "link3");
+  assert.deepEqual(link.routeAnchors, [{ noteId: tavernId, anchorId: "main" }]);
+  assert.equal(link.sourceAnchorId, "main");
+  const card = notesStore.getSharedLayout().cards[noteId];
+  assert.deepEqual(card.anchors, {
+    main: { kind: "main", x: 0.5, y: 0, createdBy: gmUser.id },
+    minor: { kind: "minor", x: 0.2, y: 0.3, createdBy: gmUser.id }
+  });
+
+  // A colliding link id in a second declassification is regenerated, not overwritten.
+  await requestWrite({
+    type: "gmCreateNote",
+    noteId: "Declassify000002",
+    title: "Declassified Fixture 2",
+    blocks: [{ blockId: "BlockDeclass0002", text: "Second body" }],
+    links: [{ id: linkId, targetId: tavernId }],
+    card: { x: 90, y: 60 }
+  });
+  const second = shared().pages.get("Declassify000002");
+  assert.ok(second.system.links[0].id);
+  assert.notEqual(second.system.links[0].id, linkId);
+  assert.equal(second.system.links[0].material, "linen");
+  assert.deepEqual(second.system.links[0].routeAnchors, []);
+});
+
+test("shared-world migration is idempotent and adds missing main anchors", async () => {
+  const { migrateSharedWorld } = await import("../scripts/migrate.mjs");
+  const legacy = await JournalEntryPage.create({
+    name: "New Note",
+    type: "fvtt-journalinator.note",
+    system: {
+      style: "sticky",
+      targetHeading: "",
+      blocks: [{ blockId: "LegacyBlock00001", text: "Legacy body" }],
+      authorId: player.id,
+      createdAt: 1,
+      updatedAt: 1
+    }
+  }, { parent: shared() });
+  const layout = shared().pages.get(containers.ids.layoutPage);
+  await layout.update({
+    [`system.cards.${legacy.id}`]: { x: 10, y: 20, rotation: 0, ports: ["right"] }
+  });
+
+  const first = await migrateSharedWorld();
+  assert.ok(first.notes >= 1);
+  assert.ok(first.anchors >= 1);
+  assert.equal(legacy.system.schemaVersion, 1);
+  assert.equal(legacy.system.label, "", "generated title is not turned into a label");
+  assert.equal(legacy.system.presentation.extendedStyle, "memo");
+  assert.equal(legacy.system.attachment.mainPinEnabled, true);
+  assert.deepEqual(layout.system.cards[legacy.id].anchors, {
+    main: { kind: "main", x: 0.5, y: 0, createdBy: player.id }
+  });
+
+  const snapshot = JSON.stringify({ system: legacy.system, card: layout.system.cards[legacy.id] });
+  const second = await migrateSharedWorld();
+  assert.equal(second.notes, 0);
+  assert.equal(second.anchors, 0);
+  assert.equal(
+    JSON.stringify({ system: legacy.system, card: layout.system.cards[legacy.id] }),
+    snapshot
+  );
+});
+
+test("final player-visible dump still excludes the remaining secret notes", () => {
+  const dump = playerVisibleDump();
+  for (const note of Object.values(vaultStore.data?.notes ?? {})) {
+    assert.ok(!dump.includes(note.name), `end of suite: secret title "${note.name}" leaked`);
+    assert.ok(!dump.includes(note.id), `end of suite: secret note id leaked`);
+  }
 });
