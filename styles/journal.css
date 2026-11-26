@@ -24,6 +24,24 @@
   --jn-board-image-size: cover;
   --jn-board-image-repeat: no-repeat;
   --jn-board-vignette: 0;
+  --jn-link-width: 2;
+  --jn-link-width-selected: 3.5;
+  --jn-link-dash: 7 6;
+  --jn-link-dash-hidden: 2 6;
+  --jn-link-dim-opacity: 0.15;
+  --jn-link-shadow: drop-shadow(0 1px 1px color-mix(in srgb, var(--jn-shadow) 60%, transparent));
+  --jn-link-arrow-scale: 1;
+  --jn-link-pin-radius: 3px;
+  --jn-link-pin-fill: var(--jn-acc);
+  --jn-link-pin-stroke: var(--jn-bg);
+  --jn-link-label-size: 11px;
+  --jn-link-label-color: var(--jn-muted);
+  --jn-link-halo: var(--jn-bg);
+  --jn-link-halo-width: 7px;
+  --jn-link-select: var(--jn-acc);
+  --jn-link-1: #a393f2;
+  --jn-link-2: #d6a45c;
+  --jn-link-3: #d77b91;
 }
 
 #journalinator-app .window-content {
@@ -1588,21 +1606,22 @@ input.jn-task-checkbox:disabled { cursor: default; }
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.jn-thread { filter: drop-shadow(0 1px 1px color-mix(in srgb, var(--jn-shadow) 60%, transparent)); }
+.jn-thread { filter: var(--jn-link-shadow); }
 .jn-thread-pin {
   display: inline;
-  fill: var(--jn-acc);
-  stroke: var(--jn-bg);
+  r: var(--jn-link-pin-radius);
+  fill: var(--jn-link-pin-fill);
+  stroke: var(--jn-link-pin-stroke);
   stroke-width: 1px;
 }
 .jn-thread-default { stroke: var(--jn-thread); }
 .jn-thread-arrow-default { fill: var(--jn-thread); }
 .jn-link-arrow { pointer-events: none; }
 .jn-link-label {
-  font-size: 11px;
-  fill: var(--jn-muted);
-  stroke: var(--jn-bg);
-  stroke-width: 7px;
+  font-size: var(--jn-link-label-size);
+  fill: var(--jn-link-label-color);
+  stroke: var(--jn-link-halo);
+  stroke-width: var(--jn-link-halo-width);
   stroke-linejoin: round;
   paint-order: stroke;
   text-anchor: middle;

@@ -420,7 +420,7 @@ export default class JournalCanvas {
       const endpoint = (anchor, directed, lead) => {
         const points = directed ? arrowHead(anchor, lead) : null;
         return `<circle class="jn-thread-pin" cx="${anchor.x - anchor.nx * THREAD_PIN_RADIUS}"
-          cy="${anchor.y - anchor.ny * THREAD_PIN_RADIUS}" r="${THREAD_PIN_RADIUS}"/>
+          cy="${anchor.y - anchor.ny * THREAD_PIN_RADIUS}"/>
           ${points ? `<polygon class="jn-link-arrow${color === LINK_DEFAULT_COLOR ? " jn-thread-arrow-default" : ""}"
           points="${points}" fill="${color}"/>` : ""}`;
       };
@@ -433,7 +433,7 @@ export default class JournalCanvas {
           ${link.hidden ? 'stroke-dasharray="2 6" stroke-linecap="round"' : link.lineStyle === "dashed" ? 'stroke-dasharray="7 6"' : ""}/>
         ${endpoint(start, direction === "two", startLead)}
         ${endpoint(end, direction !== "none", endLead)}
-        ${pins.map((pin, index) => `<circle class="jn-thread-pin jn-board-pin" data-pin-index="${index}" cx="${pin.x}" cy="${pin.y}" r="${THREAD_PIN_RADIUS}"/>`).join("")}
+        ${pins.map((pin, index) => `<circle class="jn-thread-pin jn-board-pin" data-pin-index="${index}" cx="${pin.x}" cy="${pin.y}"/>`).join("")}
         ${link.label || link.hint ? `<text class="jn-link-label" x="${mx}" y="${my + 4}">${link.hint ? "&#10022; " : ""}${foundry.utils.escapeHTML(link.label ?? "")}</text>` : ""}
       </g>`;
       hits += `<path class="jn-link-hit" data-id="${linkId}" d="${d}"/>`;
@@ -738,7 +738,6 @@ export default class JournalCanvas {
     this.linkPlacementHint.textContent = t("JN.Link.PickStart");
     this.edgePin = document.createElementNS("http://www.w3.org/2000/svg", "circle");
     this.edgePin.setAttribute("class", "jn-thread-pin jn-edge-preview");
-    this.edgePin.setAttribute("r", THREAD_PIN_RADIUS);
     this.edgePin.style.display = "none";
     this.svg.appendChild(this.edgePin);
     this.draftPins = document.createElementNS("http://www.w3.org/2000/svg", "g");
@@ -779,7 +778,6 @@ export default class JournalCanvas {
       marker.setAttribute("class", "jn-thread-pin jn-board-pin");
       marker.setAttribute("cx", world.x);
       marker.setAttribute("cy", world.y);
-      marker.setAttribute("r", THREAD_PIN_RADIUS);
       this.draftPins.appendChild(marker);
       this.#updateFreeLinkPreview(world);
       return;
@@ -797,7 +795,6 @@ export default class JournalCanvas {
     this.#startLinkPreview();
     this.previewPin = document.createElementNS("http://www.w3.org/2000/svg", "circle");
     this.previewPin.setAttribute("class", "jn-thread-pin");
-    this.previewPin.setAttribute("r", THREAD_PIN_RADIUS);
     this.svg.appendChild(this.previewPin);
     this.#updateFreeLinkPreview(threadAttachment(edge.box, point));
   }
