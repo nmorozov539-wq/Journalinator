@@ -26,6 +26,10 @@ import {
   classifyNote, defaultLinkCosmetics, isGeneratedTitle, legacyPresentation, legacyStylePresentation,
   resolveAttachment, resolvePresentation, sanitizeCardAnchors, stripSecretPrefix
 } from "./presentation.mjs";
+import {
+  MAX_ROUTE_ANCHORS, ROUTE_UNDO_LIMIT, endpointFields, hasBoardPins, hasRouteWaypoints,
+  insertRouteWaypoint, removeRouteWaypointsFor, splitLinkPair
+} from "./route-notes.mjs";
 
 export { sanitizeCardAnchors };
 
@@ -59,7 +63,6 @@ const MAX_DECLASSIFIED_BLOCKS = 500;
 const MAX_DECLASSIFIED_LINKS = 200;
 const MAX_NOTE_BATCH = 50;
 const MAX_ANCHOR_ID_LENGTH = 100;
-const MAX_ROUTE_ANCHORS = 24;
 const MAX_HEADING_LENGTH = 80;
 const MAX_FORMER_NAMES = 20;
 const PIN_UNDO_LIMIT = 20;
@@ -74,6 +77,16 @@ const PIN_REDISTRIBUTION_SNAP = 12;
  * clobbering newer edits.
  */
 const pinUndoEntries = new Map();
+
+/**
+ * In-memory, per-active-GM undo register for one Phase-6 route operation (A insertion or B split).
+ *
+ * Same Phase-5 limitation: entries live only on the active GM, are capped, and disappear on
+ * failover/reload. Each entry stores the raw link arrays before the operation plus fingerprints of
+ * what the operation wrote. An undo is refused (JN.Route.UndoStale) when either page's links no
+ * longer match, so a later edit/label change cannot be clobbered by a stale Ctrl+Z.
+ */
+const routeUndoEntries = new Map();
 
 function pinsEnabled() {
   return game.settings.get(MODULE_ID, "pinsEnabled") !== false;
@@ -567,6 +580,160 @@ function rememberPinUndo(undoId, entry) {
   while (pinUndoEntries.size > PIN_UNDO_LIMIT) {
     pinUndoEntries.delete(pinUndoEntries.keys().next().value);
   }
+}
+
+/** Client-supplied undo ids are opaque; generate one when absent so every route ack is undoable. */
+function routeUndoId(value) {
+  return typeof value === "string" && value && value.length <= MAX_ANCHOR_ID_LENGTH
+    ? value : foundry.utils.randomID();
+}
+
+function rememberRouteUndo(undoId, entry) {
+  routeUndoEntries.delete(undoId);
+  routeUndoEntries.set(undoId, entry);
+  while (routeUndoEntries.size > ROUTE_UNDO_LIMIT) {
+    routeUndoEntries.delete(routeUndoEntries.keys().next().value);
+  }
+}
+
+/**
+ * Normalizes an undo entry into the page arrays it must restore. Route A only touches the source
+ * page; B touches both. Keeping this generic lets `undoRouteSplit` also undo an A insertion that
+ * the requester acknowledged (detach exists, so A records a small entry too).
+ */
+function routeUndoStates(entry) {
+  const states = [{ noteId: entry.sourceId, before: entry.sourceLinks, after: entry.after?.sourceLinks ?? [] }];
+  if (entry.noteId !== entry.sourceId) {
+    states.push({ noteId: entry.noteId, before: entry.noteLinks, after: entry.after?.noteLinks ?? [] });
+  }
+  return states;
+}
+
+/**
+ * Removes route waypoints whose owner note is no longer a live shared note (trashed, missing, or
+ * still secret) plus malformed/self entries. Route A calls this before inserting so one stale
+ * waypoint cannot silently block every later routing attempt on that thread.
+ */
+function pruneStaleRouteAnchors(shared, value, selfId) {
+  const current = Array.isArray(value) ? value : [];
+  const routeAnchors = [];
+  let dropped = false;
+  for (const entry of current) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)
+        || typeof entry.noteId !== "string" || !DOCUMENT_ID_RE.test(entry.noteId)
+        || !validAnchorId(entry.anchorId) || entry.noteId === selfId) {
+      dropped = true;
+      continue;
+    }
+    const page = shared.pages.get(entry.noteId);
+    if (!isLiveSharedNotePage(page)) {
+      dropped = true;
+      continue;
+    }
+    routeAnchors.push({ noteId: entry.noteId, anchorId: entry.anchorId });
+  }
+  return { routeAnchors, dropped };
+}
+
+/** True when a live shared note already owns a drawn/typed link to `targetId`. */
+function hasSharedRelationship(page, targetId) {
+  return (page?.system?.links ?? []).some(link => link?.targetId === targetId && !link.hidden);
+}
+
+/**
+ * Writes both link arrays for a Route B split.
+ *
+ * Foundry v14 supports `Document.updateDocuments` for embedded pages, so the live path commits
+ * both pages in one database operation and has no crash window. Some harnesses (including this
+ * repo's fake Foundry) only expose per-document `update`, so the fallback keeps the previous
+ * two-write sequence: if the process dies between those two writes, the source page already has
+ * the A→C link while C does not yet have C→B. The explicit catch below restores both arrays on a
+ * normal rejection, and the next split/undo retry can repair the remainder (documented limitation).
+ */
+async function updateSplitLinkArrays(shared, sourcePage, sourceLinks, notePage, noteLinks) {
+  const updates = [
+    { _id: sourcePage.id, "system.links": deepClone(sourceLinks) },
+    { _id: notePage.id, "system.links": deepClone(noteLinks) }
+  ];
+  if (typeof JournalEntryPage.updateDocuments === "function") {
+    await JournalEntryPage.updateDocuments(updates, { parent: shared });
+    return;
+  }
+  await sourcePage.update({ "system.links": deepClone(sourceLinks) });
+  await notePage.update({ "system.links": deepClone(noteLinks) });
+}
+
+/** A shared link id no other shared page owns. Two calls in one operation share `used`. */
+function freshLinkId(shared, used = new Set()) {
+  const all = () => allSharedNoteList(shared)
+    .flatMap(page => page.system.links ?? []);
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const id = foundry.utils.randomID();
+    if (!used.has(id) && !all().some(link => link.id === id)) {
+      used.add(id);
+      return id;
+    }
+  }
+  let id = foundry.utils.randomID();
+  while (used.has(id) || all().some(link => link.id === id)) id += "x";
+  used.add(id);
+  return id.slice(0, MAX_ANCHOR_ID_LENGTH);
+}
+
+/**
+ * Captures shared link arrays that reference `noteId` as a route waypoint and the cleaned arrays.
+ * Includes trashed owners: their links return on restore, so the waypoint must be gone from the
+ * stored array too. Only route entries are removed; every link (and its id/endpoints) survives.
+ */
+function routeWaypointCleanup(shared, noteId) {
+  const before = [];
+  const updates = [];
+  for (const sourcePage of allSharedNoteList(shared)) {
+    const links = sourcePage.system.links ?? [];
+    let touched = false;
+    const next = links.map(link => {
+      const routes = Array.isArray(link.routeAnchors) ? link.routeAnchors : [];
+      if (!routes.some(entry => entry?.noteId === noteId)) return link;
+      touched = true;
+      return { ...link, routeAnchors: removeRouteWaypointsFor(routes, noteId) };
+    });
+    if (!touched) continue;
+    before.push({ noteId: sourcePage.id, links: deepClone(links) });
+    updates.push({ noteId: sourcePage.id, links: next });
+  }
+  return { before, updates };
+}
+
+/**
+ * One C-side split endpoint. A canonical main anchor is used only when pins are enabled both
+ * globally and for the note; otherwise the thread meets the card boundary facing the far end.
+ * Returns the endpoint fields or null when no card/edge exists.
+ */
+function splitNoteEndpoint(prefix, { note, card, toward }) {
+  if (!card) return null;
+  const box = cardBox(note, card);
+  const main = pinsEnabled() && resolveAttachment(note).mainPinEnabled !== false
+    ? cardAnchor(card, MAIN_ANCHOR_ID) : null;
+  if (main?.kind === "main") {
+    return {
+      [`${prefix}AnchorId`]: MAIN_ANCHOR_ID,
+      [`${prefix}Point`]: { x: main.x, y: main.y },
+      [`${prefix}Side`]: anchorSide(main, box)
+    };
+  }
+  const edge = projectToEdge(box, toward);
+  if (!edge) return null;
+  return {
+    [`${prefix}AnchorId`]: "",
+    [`${prefix}Point`]: { x: edge.point.x, y: edge.point.y },
+    [`${prefix}Side`]: edge.side
+  };
+}
+
+/** Clears a copied endpoint anchor id that no longer exists, keeping its point/side fallback. */
+function clearMissingEndpointAnchor(link, prefix, card) {
+  const key = `${prefix}AnchorId`;
+  if (link[key] && !cardAnchor(card, link[key])) link[key] = "";
 }
 
 /**
@@ -1685,6 +1852,298 @@ async function handleMessage(message, senderUserId) {
       return;
     }
 
+    case "routeNoteOnLink": {
+      // Shared-only operation. A secret source note or a vault-hidden link is simply absent from
+      // the shared journal, so it can never be routed: secret/hidden routing stays out of scope.
+      const sourcePage = shared.pages.get(message.sourceId);
+      const notePage = shared.pages.get(message.noteId);
+      if (!isLiveSharedNotePage(sourcePage) || !isLiveSharedNotePage(notePage)) {
+        notifyUser(senderUserId, t("JN.Route.Missing"));
+        return;
+      }
+      if (sourcePage.id === notePage.id) {
+        notifyUser(senderUserId, t("JN.Route.Self"));
+        return;
+      }
+      const link = (sourcePage.system.links ?? []).find(item => item.id === message.linkId);
+      if (!link) {
+        notifyUser(senderUserId, t("JN.Route.Missing"));
+        return;
+      }
+      const targetPage = shared.pages.get(link.targetId);
+      if (!isLiveSharedNotePage(targetPage)) {
+        notifyUser(senderUserId, t("JN.Route.Missing"));
+        return;
+      }
+      // The inserted note must be neither endpoint of the original relationship.
+      if (notePage.id === link.targetId) {
+        notifyUser(senderUserId, t("JN.Route.Endpoint"));
+        return;
+      }
+      if (message.mode !== "route" && message.mode !== "split") {
+        notifyUser(senderUserId, t("JN.Route.Failed"));
+        return;
+      }
+
+      if (message.mode === "route") {
+        // Route A is a visual waypoint through the note's MAIN pin. It requires the experiment to
+        // be on, this note's pin enabled, and a real canonical main anchor on the layout card.
+        if (!pinsEnabled()) {
+          notifyUser(senderUserId, t("JN.Route.PinOff"));
+          return;
+        }
+        if (resolveAttachment(notePage).mainPinEnabled === false) {
+          notifyUser(senderUserId, t("JN.Route.PinOff"));
+          return;
+        }
+        const layout = layoutPage(shared);
+        const noteCard = layout?.system.cards?.[notePage.id];
+        if (!noteCard || cardAnchor(noteCard, MAIN_ANCHOR_ID)?.kind !== "main") {
+          notifyUser(senderUserId, t("JN.Route.PinOff"));
+          return;
+        }
+        const pruned = pruneStaleRouteAnchors(shared, link.routeAnchors, sourcePage.id);
+        const insertion = insertRouteWaypoint(pruned.routeAnchors, notePage.id, MAIN_ANCHOR_ID, message.index);
+        if (!insertion.ok) {
+          notifyUser(senderUserId, t(insertion.reason === "limit"
+            ? "JN.Route.Limit" : "JN.Route.Duplicate"));
+          return;
+        }
+        // Server-side validation: only main anchors of live shared notes may enter route data, and
+        // a still-secret id can never be published. Keep no route changes on any failure.
+        const validated = sanitizeRouteAnchors(insertion.routeAnchors);
+        const scoped = validated && sanitizeSharedRouteAnchors(shared, validated, sourcePage.id);
+        if (!scoped || scoped.length !== validated.length) {
+          notifyUser(senderUserId, t("JN.Route.Stale"));
+          return;
+        }
+
+        const beforeLinks = deepClone(sourcePage.system.links ?? []);
+        const nextLinks = beforeLinks.map(item =>
+          item.id === link.id ? { ...item, routeAnchors: scoped } : item);
+        try {
+          await sourcePage.update({ "system.links": nextLinks });
+        } catch (err) {
+          await sourcePage.update({ "system.links": deepClone(beforeLinks) }).catch(() => {});
+          console.error("Journalinator: route insertion failed", err);
+          notifyUser(senderUserId, t("JN.Route.Failed"));
+          return;
+        }
+        const afterLinks = deepClone(sourcePage.system.links ?? []);
+        const undoId = routeUndoId(message.undoId);
+        rememberRouteUndo(undoId, {
+          requesterId: senderUserId,
+          kind: "route",
+          sourceId: sourcePage.id,
+          noteId: sourcePage.id,
+          sourceLinks: beforeLinks,
+          noteLinks: beforeLinks,
+          after: { sourceLinks: afterLinks, noteLinks: afterLinks }
+        });
+        acknowledgeWriteApplied(senderUserId, { kind: "route", action: "route", undoId });
+        // The insertion still succeeded; tell the requester that stale waypoints were cleaned up.
+        if (pruned.dropped) notifyUser(senderUserId, t("JN.Route.Stale"));
+        return;
+      }
+
+      // Route B actually replaces the relationship. Typed links come from note text and must be
+      // edited there; board pins/routes would be silently dropped by a split, so require detaching
+      // those waypoints first.
+      if (link.origin === "typed") {
+        notifyUser(senderUserId, t("JN.Route.TypedBlocked"));
+        return;
+      }
+      if (hasBoardPins(link) || hasRouteWaypoints(link)) {
+        notifyUser(senderUserId, t("JN.Route.SplitHint"));
+        return;
+      }
+      // A split must not create a relationship that already exists. Either A→C or C→B would be a
+      // duplicate link, so the user has to remove the old relationship first instead of silently
+      // producing two parallel threads.
+      if (hasSharedRelationship(sourcePage, notePage.id) || hasSharedRelationship(notePage, targetPage.id)) {
+        notifyUser(senderUserId, t("JN.Route.DuplicateRelationship"));
+        return;
+      }
+      const layout = layoutPage(shared);
+      const sourceCard = layout?.system.cards?.[sourcePage.id];
+      const targetCard = layout?.system.cards?.[targetPage.id];
+      const noteCard = layout?.system.cards?.[notePage.id];
+      if (!sourceCard || !targetCard || !noteCard) {
+        notifyUser(senderUserId, t("JN.Route.Missing"));
+        return;
+      }
+
+      const noteTarget = splitNoteEndpoint("target", {
+        note: notePage, card: noteCard, toward: endpointWorld(sourcePage, sourceCard, link, "source")
+      });
+      const noteSource = splitNoteEndpoint("source", {
+        note: notePage, card: noteCard, toward: endpointWorld(targetPage, targetCard, link, "target")
+      });
+      if (!noteTarget || !noteSource) {
+        notifyUser(senderUserId, t("JN.Route.Missing"));
+        return;
+      }
+
+      const usedIds = new Set();
+      const firstId = freshLinkId(shared, usedIds);
+      const secondId = freshLinkId(shared, usedIds);
+      const { first, second } = splitLinkPair({
+        link, noteId: notePage.id, firstId, secondId, senderUserId,
+        noteFirstEndpoint: noteTarget, noteSecondEndpoint: noteSource
+      });
+      // Preserve A/B endpoints, but never carry an anchor id whose registry entry vanished.
+      clearMissingEndpointAnchor(first, "source", sourceCard);
+      clearMissingEndpointAnchor(first, "target", noteCard);
+      clearMissingEndpointAnchor(second, "source", noteCard);
+      clearMissingEndpointAnchor(second, "target", targetCard);
+
+      const beforeSource = deepClone(sourcePage.system.links ?? []);
+      const beforeNote = deepClone(notePage.system.links ?? []);
+      const nextSource = beforeSource.filter(item => item.id !== link.id);
+      nextSource.push(first);
+      const nextNote = [...beforeNote, second];
+
+      // Foundry v14 writes both pages atomically; the fake harness uses the documented fallback.
+      try {
+        await updateSplitLinkArrays(shared, sourcePage, nextSource, notePage, nextNote);
+      } catch (err) {
+        await sourcePage.update({ "system.links": deepClone(beforeSource) }).catch(() => {});
+        await notePage.update({ "system.links": deepClone(beforeNote) }).catch(() => {});
+        console.error("Journalinator: route split failed", err);
+        notifyUser(senderUserId, t("JN.Route.Failed"));
+        return;
+      }
+
+      const afterSource = deepClone(sourcePage.system.links ?? []);
+      const afterNote = deepClone(notePage.system.links ?? []);
+      const undoId = routeUndoId(message.undoId);
+      rememberRouteUndo(undoId, {
+        requesterId: senderUserId,
+        kind: "split",
+        sourceId: sourcePage.id,
+        noteId: notePage.id,
+        sourceLinks: beforeSource,
+        noteLinks: beforeNote,
+        after: { sourceLinks: afterSource, noteLinks: afterNote }
+      });
+      acknowledgeWriteApplied(senderUserId, { kind: "route", action: "split", undoId });
+      return;
+    }
+
+    case "undoRouteSplit": {
+      if (typeof message.undoId !== "string" || !message.undoId) return;
+      const entry = routeUndoEntries.get(message.undoId);
+      // Missing/consumed ids are an idempotent no-op. Only the client that requested the operation
+      // may spend its undo entry; another sender is ignored without a status leak.
+      if (!entry) return;
+      if (entry.requesterId !== senderUserId) return;
+      const states = routeUndoStates(entry);
+      for (const state of states) {
+        const notePage = shared.pages.get(state.noteId);
+        if (!isLiveSharedNotePage(notePage)) {
+          notifyUser(senderUserId, t("JN.Route.UndoStale"));
+          return;
+        }
+        // Refuse a stale undo: restoring would erase a later edit to either link array.
+        if (JSON.stringify(notePage.system.links ?? []) !== JSON.stringify(state.after)) {
+          notifyUser(senderUserId, t("JN.Route.UndoStale"));
+          return;
+        }
+      }
+      try {
+        for (const state of states) {
+          await shared.pages.get(state.noteId).update({ "system.links": deepClone(state.before) });
+        }
+        routeUndoEntries.delete(message.undoId);
+      } catch (err) {
+        // Keep the entry so a transient failure can be retried; put back the post-operation state.
+        for (const state of states) {
+          await shared.pages.get(state.noteId)?.update({
+            "system.links": deepClone(state.after)
+          }).catch(() => {});
+        }
+        console.error("Journalinator: route undo failed", err);
+      }
+      return;
+    }
+
+    case "detachRouteNote": {
+      const page = shared.pages.get(message.sourceId);
+      if (!isLiveSharedNotePage(page)) {
+        notifyUser(senderUserId, t("JN.Route.Missing"));
+        return;
+      }
+      if (typeof message.linkId !== "string"
+          || typeof message.noteId !== "string" || !DOCUMENT_ID_RE.test(message.noteId)) {
+        notifyUser(senderUserId, t("JN.Route.Missing"));
+        return;
+      }
+      const links = page.system.links ?? [];
+      const link = links.find(item => item.id === message.linkId);
+      if (!link) {
+        notifyUser(senderUserId, t("JN.Route.Missing"));
+        return;
+      }
+      const routes = Array.isArray(link.routeAnchors) ? link.routeAnchors : [];
+      if (!routes.some(entry => entry?.noteId === message.noteId)) {
+        notifyUser(senderUserId, t("JN.Route.NotRouted"));
+        return;
+      }
+      // Only the waypoint goes away. Link id, endpoints, label, cosmetics and direction stay.
+      const beforeLinks = deepClone(links);
+      const next = links.map(item => item.id === link.id
+        ? { ...item, routeAnchors: removeRouteWaypointsFor(routes, message.noteId) }
+        : item);
+      try {
+        await page.update({ "system.links": next });
+      } catch (err) {
+        await page.update({ "system.links": deepClone(beforeLinks) }).catch(() => {});
+        console.error("Journalinator: route detach failed", err);
+        notifyUser(senderUserId, t("JN.Route.Failed"));
+        return;
+      }
+      const afterLinks = deepClone(page.system.links ?? []);
+      const undoId = routeUndoId(message.undoId);
+      rememberRouteUndo(undoId, {
+        requesterId: senderUserId,
+        kind: "detach",
+        sourceId: page.id,
+        noteId: page.id,
+        sourceLinks: beforeLinks,
+        noteLinks: beforeLinks,
+        after: { sourceLinks: afterLinks, noteLinks: afterLinks }
+      });
+      acknowledgeWriteApplied(senderUserId, { kind: "route", action: "detach", undoId });
+      return;
+    }
+
+    case "clearThreadPins": {
+      // Clears only the free board waypoints. Route waypoints, endpoints and cosmetics are
+      // untouched; this is the escape hatch for the split policy that refuses pinned threads.
+      const page = shared.pages.get(message.noteId);
+      if (!isLiveSharedNotePage(page)) {
+        notifyUser(senderUserId, t("JN.Route.Missing"));
+        return;
+      }
+      if (typeof message.linkId !== "string") {
+        notifyUser(senderUserId, t("JN.Route.Missing"));
+        return;
+      }
+      const links = page.system.links ?? [];
+      const link = links.find(item => item.id === message.linkId);
+      if (!link) {
+        notifyUser(senderUserId, t("JN.Route.Missing"));
+        return;
+      }
+      if (!hasBoardPins(link)) {
+        notifyUser(senderUserId, t("JN.Route.NoPins"));
+        return;
+      }
+      const next = links.map(item => item.id === link.id ? { ...item, pins: [] } : item);
+      await page.update({ "system.links": next });
+      return;
+    }
+
     case "createLink": {
       const page = shared.pages.get(message.sourceId);
       const target = shared.pages.get(message.targetId);
@@ -1858,7 +2317,24 @@ async function handleMessage(message, senderUserId) {
       const lastCard = layout?.system.cards[message.noteId] ?? null;
       const undoId = typeof message.undoId === "string" && DOCUMENT_ID_RE.test(message.undoId)
         ? message.undoId : null;
-      await page.update({ "system.deleted": { at: Date.now(), by: senderUserId, lastCard, undoId } });
+      // Route A deletion policy: remove only this note's waypoints from every shared link (trashed
+      // owners included, so a later restore cannot reattach them). Links and their ids survive.
+      const cleanup = routeWaypointCleanup(shared, page.id);
+      try {
+        for (const update of cleanup.updates) {
+          await shared.pages.get(update.noteId)?.update({ "system.links": update.links });
+        }
+        await page.update({ "system.deleted": { at: Date.now(), by: senderUserId, lastCard, undoId } });
+      } catch (err) {
+        // Roll the route arrays back; a failed delete must not silently strip waypoints.
+        for (const state of cleanup.before) {
+          await shared.pages.get(state.noteId)?.update({
+            "system.links": deepClone(state.links)
+          }).catch(() => {});
+        }
+        console.error("Journalinator: note deletion failed", err);
+        return;
+      }
       if (layout) await layout.update({ [`system.cards.-=${message.noteId}`]: null });
       return;
     }

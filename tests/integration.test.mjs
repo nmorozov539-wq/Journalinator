@@ -21,6 +21,8 @@ const { notesStore } = await import("../scripts/store/notes-store.mjs");
 const secrets = await import("../scripts/secrets/secret-actions.mjs");
 const { registerSocket, requestWrite, sanitizeProjectionBox } = await import("../scripts/socket.mjs");
 const { resolvePresentation } = await import("../scripts/presentation.mjs");
+const { anchorWorld, projectToEdge } = await import("../scripts/anchors.mjs");
+const { MAX_ROUTE_ANCHORS } = await import("../scripts/route-notes.mjs");
 const { noteMatchesQuery, noteSearchLabel, noteFilterKey } = await import("../scripts/app/note-search.mjs");
 const { noteCreationPresentation, noteCreationStyle } = await import("../scripts/app/note-dialog.mjs");
 registerSocket();
@@ -36,6 +38,11 @@ const fromPlayer = async message => { env.deliver(message, player.id); await set
 const sharedCard = noteId => notesStore.getSharedLayout()?.cards?.[noteId];
 const minorAnchors = noteId => Object.entries(sharedCard(noteId)?.anchors ?? {})
   .filter(([, anchor]) => anchor.kind === "minor");
+const linkOn = (noteName, linkId) => sharedByName(noteName).system.links.find(link => link.id === linkId);
+const rejectionReasonsSince = index => env.socketLog.slice(index)
+  .map(entry => entry.message)
+  .filter(message => message.type === "writeRejected")
+  .map(message => message.reason);
 
 /** Creates a note and pins its card to an exact geometry, so redistribution is deterministic. */
 async function createNoteAt(title, x, y) {
@@ -1961,6 +1968,856 @@ test("restoring a note with a disabled main pin does not invent a main anchor", 
   assert.equal(sharedByName("Restore Disabled Main").system.attachment.mainPinEnabled, false);
   assert.equal(sharedCard(note.id).anchors.main, undefined,
     "restore only adds a main anchor when the note still wants one");
+});
+
+test("route A inserts a main waypoint without changing the original link, its index and duplicate rules", async () => {
+  const a = await createNoteAt("Route A Source", 13000, 4200);
+  const b = await createNoteAt("Route A Target", 13400, 4200);
+  const c = await createNoteAt("Route A Insert", 13200, 4200);
+  const d = await createNoteAt("Route A Insert D", 13200, 4400);
+  const e = await createNoteAt("Route A Insert E", 13200, 4600);
+
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: b.id,
+    sourceAnchorId: "main", targetAnchorId: "main"
+  });
+  const original = sharedByName("Route A Source").system.links.find(link => link.targetId === b.id);
+  await fromPlayer({
+    type: "updateLink", noteId: a.id, linkId: original.id,
+    fields: {
+      label: "Route A label", direction: "one", material: "double", thickness: 4,
+      slack: 0.2, pattern: "alternating", ends: "loose",
+      color: "link2", secondaryColor: "link3", lineStyle: "dashed"
+    }
+  });
+  const before = structuredClone(linkOn("Route A Source", original.id));
+
+  const ackBefore = env.socketLog.length;
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: original.id, noteId: c.id,
+    mode: "route", index: 0, undoId: "RouteAUndo000001"
+  });
+  const routed = linkOn("Route A Source", original.id);
+  assert.deepEqual({ ...routed, routeAnchors: [] }, { ...before, routeAnchors: [] },
+    "route A preserves the link id, endpoints, label, direction and cosmetics");
+  assert.deepEqual(routed.routeAnchors, [{ noteId: c.id, anchorId: "main" }]);
+
+  const acks = env.socketLog.slice(ackBefore)
+    .filter(entry => entry.message.type === "writeApplied");
+  assert.deepEqual(acks.map(entry => entry.message), [{
+    type: "writeApplied", forUserId: player.id, kind: "route", action: "route", undoId: "RouteAUndo000001"
+  }]);
+  assert.deepEqual(acks[0].options.recipients, [player.id], "the ack goes only to the requester");
+
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: original.id, noteId: c.id,
+    mode: "route", index: 0, undoId: "RouteADuplicate1"
+  });
+  assert.deepEqual(linkOn("Route A Source", original.id).routeAnchors,
+    [{ noteId: c.id, anchorId: "main" }], "duplicate routing is rejected");
+
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: original.id, noteId: d.id,
+    mode: "route", index: 999, undoId: "RouteAIndexD001"
+  });
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: original.id, noteId: e.id,
+    mode: "route", index: -5, undoId: "RouteAIndexE001"
+  });
+  assert.deepEqual(linkOn("Route A Source", original.id).routeAnchors.map(entry => entry.noteId),
+    [e.id, c.id, d.id], "index is clamped to both ends");
+
+  const beforeDetach = structuredClone(linkOn("Route A Source", original.id));
+  await fromPlayer({ type: "detachRouteNote", sourceId: a.id, linkId: original.id, noteId: c.id });
+  const detached = linkOn("Route A Source", original.id);
+  assert.deepEqual(detached.routeAnchors.map(entry => entry.noteId), [e.id, d.id]);
+  assert.deepEqual({ ...detached, routeAnchors: [] }, { ...beforeDetach, routeAnchors: [] },
+    "detach keeps the link id/endpoints/label/cosmetics");
+
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: original.id, noteId: c.id,
+    mode: "route", index: 1, undoId: "RouteAUndoBack1"
+  });
+  assert.deepEqual(linkOn("Route A Source", original.id).routeAnchors.map(entry => entry.noteId),
+    [e.id, c.id, d.id]);
+  await fromPlayer({ type: "undoRouteSplit", undoId: "RouteAUndoBack1" });
+  assert.deepEqual(linkOn("Route A Source", original.id).routeAnchors.map(entry => entry.noteId),
+    [e.id, d.id], "the acknowledged route insertion can be undone");
+
+  await fromPlayer({ type: "deleteLink", noteId: a.id, linkId: original.id });
+  assert.ok(sharedByName("Route A Source") && sharedByName("Route A Target")
+    && sharedByName("Route A Insert"), "deleting a thread leaves every note");
+});
+
+test("route A rejects secret, hidden, trashed, self and pin-off targets", async () => {
+  const a = await createNoteAt("Route Reject Source", 13000, 5000);
+  const b = await createNoteAt("Route Reject Target", 13400, 5000);
+  const c = await createNoteAt("Route Reject Insert", 13200, 5000);
+  const f = await createNoteAt("Route Reject Pin Off", 13200, 5200);
+  const g = await createNoteAt("Route Reject World Off", 13200, 5400);
+  const h = await createNoteAt("Route Reject No Main", 13200, 5600);
+  const gone = await createNoteAt("Route Reject Trashed", 13200, 5800);
+
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: b.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 }
+  });
+  const link = sharedByName("Route Reject Source").system.links.find(item => item.targetId === b.id);
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: c.id,
+    mode: "route", index: 0, undoId: "RouteRejectBase1"
+  });
+  const routed = structuredClone(linkOn("Route Reject Source", link.id));
+  assert.deepEqual(routed.routeAnchors, [{ noteId: c.id, anchorId: "main" }]);
+
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: cultId,
+    mode: "route", index: 0, undoId: "RouteRejectSecret"
+  });
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: cultId, linkId: link.id, noteId: c.id,
+    mode: "route", index: 0, undoId: "RouteRejectSrcSec"
+  });
+  assert.deepEqual(linkOn("Route Reject Source", link.id).routeAnchors, routed.routeAnchors,
+    "secret notes are never routable");
+
+  const hiddenTarget = await createNoteAt("Route Hidden Target", 13800, 5000);
+  await secrets.addHiddenLink(tavernId, hiddenTarget.id, {
+    sourceSide: "right", targetSide: "left"
+  });
+  const hiddenLink = vaultStore.data.hiddenLinks[tavernId].find(link =>
+    link.targetId === hiddenTarget.id);
+  assert.ok(hiddenLink);
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: tavernId, linkId: hiddenLink.id, noteId: c.id,
+    mode: "route", index: 0, undoId: "RouteRejectHidden"
+  });
+  assert.deepEqual(linkOn("Route Reject Source", link.id).routeAnchors, routed.routeAnchors,
+    "a vault-hidden link cannot be routed through the shared handler");
+
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: a.id,
+    mode: "route", index: 0, undoId: "RouteRejectSelf01"
+  });
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: b.id,
+    mode: "route", index: 0, undoId: "RouteRejectSelf02"
+  });
+  assert.deepEqual(linkOn("Route Reject Source", link.id).routeAnchors, routed.routeAnchors,
+    "an endpoint note cannot be its own route waypoint");
+
+  await requestWrite({ type: "deleteNote", noteId: gone.id });
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: gone.id,
+    mode: "route", index: 0, undoId: "RouteRejectTrash1"
+  });
+  assert.deepEqual(linkOn("Route Reject Source", link.id).routeAnchors, routed.routeAnchors,
+    "a trashed note is not a live route target");
+
+  await fromPlayer({
+    type: "setMainPinEnabled", noteId: f.id, enabled: false, undoId: "RouteRejectPin01"
+  });
+  assert.equal(sharedByName("Route Reject Pin Off").system.attachment.mainPinEnabled, false);
+  let mark = env.socketLog.length;
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: f.id,
+    mode: "route", index: 0, undoId: "RouteRejectPin02"
+  });
+  assert.deepEqual(linkOn("Route Reject Source", link.id).routeAnchors, routed.routeAnchors);
+  assert.ok(rejectionReasonsSince(mark).some(reason => reason.includes("main pin is off")),
+    "pin-off routing is rejected with an explanation");
+
+  const layout = shared().pages.get(containers.ids.layoutPage);
+  await layout.update({ [`system.cards.${h.id}.anchors`]: {} });
+  mark = env.socketLog.length;
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: h.id,
+    mode: "route", index: 0, undoId: "RouteRejectMain1"
+  });
+  assert.deepEqual(linkOn("Route Reject Source", link.id).routeAnchors, routed.routeAnchors);
+  assert.ok(rejectionReasonsSince(mark).some(reason => reason.includes("main pin is off")),
+    "a missing canonical main anchor is rejected");
+
+  await game.settings.set("fvtt-journalinator", "pinsEnabled", false);
+  try {
+    mark = env.socketLog.length;
+    await fromPlayer({
+      type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: g.id,
+      mode: "route", index: 0, undoId: "RouteRejectWorld"
+    });
+    assert.deepEqual(linkOn("Route Reject Source", link.id).routeAnchors, routed.routeAnchors);
+    assert.ok(rejectionReasonsSince(mark).some(reason => reason.includes("main pin is off")),
+      "routing is rejected while the pin experiment is off");
+  } finally {
+    await game.settings.set("fvtt-journalinator", "pinsEnabled", true);
+  }
+});
+
+test("disabling a routed note's main pin drops only its waypoint and re-routing is refused", async () => {
+  const a = await createNoteAt("Route Pin Drop Source", 14000, 4200);
+  const b = await createNoteAt("Route Pin Drop Target", 14400, 4200);
+  const c = await createNoteAt("Route Pin Drop Note", 14200, 4200);
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: b.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 }
+  });
+  const link = sharedByName("Route Pin Drop Source").system.links.find(item => item.targetId === b.id);
+  const before = structuredClone(linkOn("Route Pin Drop Source", link.id));
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: c.id,
+    mode: "route", index: 0, undoId: "RoutePinDrop0001"
+  });
+  assert.deepEqual(linkOn("Route Pin Drop Source", link.id).routeAnchors,
+    [{ noteId: c.id, anchorId: "main" }]);
+
+  await fromPlayer({
+    type: "setMainPinEnabled", noteId: c.id, enabled: false, undoId: "RoutePinDrop0002"
+  });
+  const dropped = linkOn("Route Pin Drop Source", link.id);
+  assert.equal(dropped.id, before.id);
+  assert.deepEqual(dropped.routeAnchors, [], "pin-off drops only the route waypoint");
+  assert.equal(sharedByName("Route Pin Drop Source").system.links.length, 1, "the link survives");
+
+  const mark = env.socketLog.length;
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: c.id,
+    mode: "route", index: 0, undoId: "RoutePinDrop0003"
+  });
+  assert.deepEqual(linkOn("Route Pin Drop Source", link.id).routeAnchors, [],
+    "route A cannot reattach a disabled main pin");
+  assert.ok(rejectionReasonsSince(mark).some(reason => reason.includes("main pin is off")));
+
+  await requestWrite({ type: "undoPinChange", undoId: "RoutePinDrop0002" });
+  assert.deepEqual(linkOn("Route Pin Drop Source", link.id).routeAnchors,
+    [{ noteId: c.id, anchorId: "main" }], "pin undo restores the exact routed link");
+});
+
+test("route B splits into two styled links and undo restores the exact original", async () => {
+  const a = await createNoteAt("Route Split Source", 15000, 4200);
+  const b = await createNoteAt("Route Split Target", 15400, 4200);
+  const c = await createNoteAt("Route Split Note", 15200, 4200);
+
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: b.id,
+    sourceAnchorId: "main", targetAnchorId: "main"
+  });
+  const original = sharedByName("Route Split Source").system.links.find(link => link.targetId === b.id);
+  await fromPlayer({
+    type: "updateLink", noteId: a.id, linkId: original.id,
+    fields: {
+      label: "split label", material: "double", thickness: 3.4, slack: 0.15,
+      pattern: "interrupted", ends: "loose", color: "link1", secondaryColor: "link2",
+      lineStyle: "dashed"
+    }
+  });
+  await requestWrite({ type: "gmSetLinkHint", noteId: a.id, linkId: original.id, hint: true });
+
+  const beforeSource = structuredClone(sharedByName("Route Split Source").system.links);
+  const beforeNote = structuredClone(sharedByName("Route Split Note").system.links);
+  const beforeLink = structuredClone(linkOn("Route Split Source", original.id));
+  const ackBefore = env.socketLog.length;
+  const undoId = "RouteSplitUndo01";
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: original.id, noteId: c.id,
+    mode: "split", index: 0, undoId
+  });
+
+  const sourceLinks = sharedByName("Route Split Source").system.links;
+  const noteLinks = sharedByName("Route Split Note").system.links;
+  assert.equal(sourceLinks.length, beforeSource.length, "one link replaced by one on the source");
+  assert.ok(!sourceLinks.some(link => link.id === original.id), "the original link id is gone");
+  assert.equal(noteLinks.length, beforeNote.length + 1);
+  const first = sourceLinks[sourceLinks.length - 1];
+  const second = noteLinks[noteLinks.length - 1];
+  assert.notEqual(first.id, second.id);
+  assert.notEqual(first.id, original.id);
+  assert.equal(first.targetId, c.id);
+  assert.equal(second.targetId, b.id);
+  assert.equal(first.sourceAnchorId, beforeLink.sourceAnchorId, "A side endpoint preserved");
+  assert.deepEqual(first.sourcePoint, beforeLink.sourcePoint);
+  assert.equal(first.sourceSide, beforeLink.sourceSide);
+  assert.equal(first.targetAnchorId, "main", "C side uses its main pin");
+  assert.deepEqual(first.targetPoint, { x: 0.5, y: 0 });
+  assert.equal(first.targetSide, "top");
+  assert.equal(second.sourceAnchorId, "main");
+  assert.deepEqual(second.sourcePoint, { x: 0.5, y: 0 });
+  assert.equal(second.sourceSide, "top");
+  assert.equal(second.targetAnchorId, beforeLink.targetAnchorId, "B side endpoint preserved");
+  assert.deepEqual(second.targetPoint, beforeLink.targetPoint);
+  assert.equal(second.targetSide, beforeLink.targetSide);
+
+  for (const item of [first, second]) {
+    assert.equal(item.material, "double");
+    assert.equal(item.thickness, 3.4);
+    assert.equal(item.slack, 0.15);
+    assert.equal(item.pattern, "interrupted");
+    assert.equal(item.ends, "loose");
+    assert.equal(item.color, "link1");
+    assert.equal(item.secondaryColor, "link2");
+    assert.equal(item.lineStyle, "dashed");
+    assert.equal(item.origin, "drawn");
+    assert.equal(item.edited, true);
+    assert.equal(item.createdBy, player.id);
+    assert.equal(item.direction, "none");
+    assert.equal(item.hint, true);
+    assert.deepEqual(item.routeAnchors, []);
+    assert.ok(!item.pins || item.pins.length === 0, "no board pins are invented");
+  }
+  assert.equal(first.label, "split label");
+  assert.equal(second.label, "");
+
+  const ack = env.socketLog.slice(ackBefore).map(entry => entry.message)
+    .find(message => message.type === "writeApplied");
+  assert.deepEqual(ack, { type: "writeApplied", forUserId: player.id, kind: "route", action: "split", undoId });
+
+  // Unauthorized client (the GM here) cannot spend the player's undo entry.
+  await requestWrite({ type: "undoRouteSplit", undoId });
+  assert.equal(sharedByName("Route Split Source").system.links.length, sourceLinks.length);
+  await fromPlayer({ type: "undoRouteSplit", undoId });
+  assert.deepEqual(sharedByName("Route Split Source").system.links, beforeSource,
+    "undo restores the exact original source array");
+  assert.deepEqual(sharedByName("Route Split Note").system.links, beforeNote,
+    "undo removes the second link and leaves C's other links alone");
+
+  // A stale undo after a later edit is refused and keeps the split links.
+  const staleUndo = "RouteSplitStale1";
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: original.id, noteId: c.id,
+    mode: "split", index: 0, undoId: staleUndo
+  });
+  const splitLinks = sharedByName("Route Split Source").system.links;
+  const splitFirst = splitLinks[splitLinks.length - 1];
+  await fromPlayer({
+    type: "updateLink", noteId: a.id, linkId: splitFirst.id, fields: { label: "later edit" }
+  });
+  const afterEdit = structuredClone(sharedByName("Route Split Source").system.links);
+  const mark = env.socketLog.length;
+  await fromPlayer({ type: "undoRouteSplit", undoId: staleUndo });
+  assert.deepEqual(sharedByName("Route Split Source").system.links, afterEdit,
+    "a stale undo does not clobber a later edit");
+  assert.ok(rejectionReasonsSince(mark).some(reason => reason.includes("no longer be undone")));
+});
+
+test("route B rejects typed links and links with existing pins or route waypoints", async () => {
+  const a = await createNoteAt("Route Split Reject Source", 15600, 5000);
+  const b = await createNoteAt("Route Split Reject Target", 16000, 5000);
+  const c = await createNoteAt("Route Split Reject Note", 15800, 5000);
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: b.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 }
+  });
+  const link = sharedByName("Route Split Reject Source").system.links.find(item => item.targetId === b.id);
+
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: c.id,
+    mode: "route", index: 0, undoId: "RouteSplitBlockA"
+  });
+  const routed = structuredClone(linkOn("Route Split Reject Source", link.id));
+  const mark = env.socketLog.length;
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: c.id,
+    mode: "split", index: 0, undoId: "RouteSplitBlock01"
+  });
+  assert.deepEqual(linkOn("Route Split Reject Source", link.id), routed,
+    "existing route waypoints must be detached before splitting");
+  assert.ok(rejectionReasonsSince(mark).some(reason => reason.includes("Detach board pins")));
+
+  const pinTarget = await createNoteAt("Route Split Pin Target", 16000, 5200);
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: pinTarget.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 }
+  });
+  const pinLink = sharedByName("Route Split Reject Source").system.links
+    .find(item => item.targetId === pinTarget.id);
+  const pinPage = sharedByName("Route Split Reject Source");
+  await pinPage.update({
+    "system.links": pinPage.system.links.map(item =>
+      item.id === pinLink.id ? { ...item, pins: [{ x: 10, y: 20 }] } : item)
+  });
+  const pinned = structuredClone(linkOn("Route Split Reject Source", pinLink.id));
+  const pinMark = env.socketLog.length;
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: pinLink.id, noteId: c.id,
+    mode: "split", index: 0, undoId: "RouteSplitBlock02"
+  });
+  assert.deepEqual(linkOn("Route Split Reject Source", pinLink.id), pinned,
+    "board pins must be detached before splitting");
+  assert.ok(rejectionReasonsSince(pinMark).some(reason => reason.includes("Detach board pins")));
+
+  const ts = await createNoteAt("Route Typed Source", 16200, 5000);
+  await createNoteAt("Route Typed Target", 16600, 5000);
+  const tn = await createNoteAt("Route Typed Note", 16400, 5000);
+  const block = sharedByName("Route Typed Source").system.blocks[0];
+  await fromPlayer({ type: "requestLock", noteId: ts.id, blockId: block.blockId });
+  await fromPlayer({
+    type: "saveBlock", noteId: ts.id, blockId: block.blockId,
+    text: "See [[Route Typed Target]]."
+  });
+  await fromPlayer({ type: "releaseLock", noteId: ts.id, blockId: block.blockId });
+  const typed = sharedByName("Route Typed Source").system.links.find(item => item.origin === "typed");
+  assert.ok(typed);
+  const typedBefore = structuredClone(sharedByName("Route Typed Source").system.links);
+  const typedMark = env.socketLog.length;
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: ts.id, linkId: typed.id, noteId: tn.id,
+    mode: "split", index: 0, undoId: "RouteSplitBlock03"
+  });
+  assert.deepEqual(sharedByName("Route Typed Source").system.links, typedBefore);
+  assert.ok(rejectionReasonsSince(typedMark).some(reason => reason.includes("Typed [[links]]")));
+});
+
+test("a failed second split write rolls both source and inserted-note links back", async () => {
+  const a = await createNoteAt("Route Split Rollback Source", 16800, 4200);
+  const b = await createNoteAt("Route Split Rollback Target", 17200, 4200);
+  const c = await createNoteAt("Route Split Rollback Note", 17000, 4200);
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: b.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 }
+  });
+  const link = sharedByName("Route Split Rollback Source").system.links
+    .find(item => item.targetId === b.id);
+  const beforeSource = structuredClone(sharedByName("Route Split Rollback Source").system.links);
+  const beforeNote = structuredClone(sharedByName("Route Split Rollback Note").system.links);
+
+  const originalUpdate = c.update.bind(c);
+  let calls = 0;
+  c.update = async function update(changes) {
+    calls += 1;
+    if (calls === 1) throw new Error("injected split write failure");
+    return originalUpdate(changes);
+  };
+  const mark = env.socketLog.length;
+  try {
+    await fromPlayer({
+      type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: c.id,
+      mode: "split", index: 0, undoId: "RouteSplitFail01"
+    });
+  } finally {
+    c.update = originalUpdate;
+  }
+  assert.ok(calls >= 1);
+  assert.deepEqual(sharedByName("Route Split Rollback Source").system.links, beforeSource,
+    "the already-written source page was restored");
+  assert.deepEqual(sharedByName("Route Split Rollback Note").system.links, beforeNote);
+  assert.equal(env.socketLog.slice(mark).some(entry => entry.message.type === "writeApplied"
+    && entry.message.undoId === "RouteSplitFail01"), false,
+  "a rolled-back split sends no acknowledgement");
+  await requestWrite({ type: "undoRouteSplit", undoId: "RouteSplitFail01" });
+  assert.deepEqual(sharedByName("Route Split Rollback Source").system.links, beforeSource,
+    "no undo entry was recorded");
+});
+
+test("route B without a main pin uses the facing card edges for the inserted note", async () => {
+  const a = await createNoteAt("Route Split Edge Source", 17400, 4200);
+  const b = await createNoteAt("Route Split Edge Target", 18200, 4200);
+  const c = await createNoteAt("Route Split Edge Note", 17800, 4200);
+  const layout = shared().pages.get(containers.ids.layoutPage);
+  for (const note of [a, b, c]) {
+    await layout.update({ [`system.cards.${note.id}.rotation`]: 0 });
+  }
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: b.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 }
+  });
+  const link = sharedByName("Route Split Edge Source").system.links.find(item => item.targetId === b.id);
+  await fromPlayer({
+    type: "setMainPinEnabled", noteId: c.id, enabled: false, undoId: "RouteSplitEdge01"
+  });
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: c.id,
+    mode: "split", index: 0, undoId: "RouteSplitEdge02"
+  });
+  const first = sharedByName("Route Split Edge Source").system.links
+    .find(item => item.targetId === c.id);
+  const second = sharedByName("Route Split Edge Note").system.links
+    .find(item => item.targetId === b.id);
+  assert.ok(first && second);
+  assert.equal(first.targetAnchorId, "", "no main anchor is referenced when the pin is off");
+  assert.equal(second.sourceAnchorId, "");
+  assert.equal(first.targetSide, "left", "the C side faces the source on its left");
+  assert.equal(second.sourceSide, "right", "the C side faces the target on its right");
+  assert.deepEqual(first.targetPoint, { x: 0, y: 0.5 });
+  assert.deepEqual(second.sourcePoint, { x: 1, y: 0.5 });
+  assert.ok(sharedCard(c.id).anchors.main, "the stored main anchor is retained for re-enable");
+});
+
+test("deleting a routed note removes only its waypoints from every stored link", async () => {
+  const source = await createNoteAt("Route Cleanup Source", 18400, 5000);
+  const t1 = await createNoteAt("Route Cleanup Target 1", 18800, 5000);
+  const t2 = await createNoteAt("Route Cleanup Target 2", 18800, 5200);
+  const via = await createNoteAt("Route Cleanup Via", 18600, 5100);
+
+  await fromPlayer({
+    type: "createLink", sourceId: source.id, targetId: t1.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 }
+  });
+  await fromPlayer({
+    type: "createLink", sourceId: source.id, targetId: t2.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 }
+  });
+  const links = sharedByName("Route Cleanup Source").system.links
+    .filter(item => [t1.id, t2.id].includes(item.targetId));
+  assert.equal(links.length, 2);
+  for (const link of links) {
+    await fromPlayer({
+      type: "routeNoteOnLink", sourceId: source.id, linkId: link.id, noteId: via.id,
+      mode: "route", index: 0, undoId: `RouteCleanup${link.targetId.slice(0, 4)}`
+    });
+  }
+  const linkIds = sharedByName("Route Cleanup Source").system.links.map(link => link.id);
+  assert.ok(sharedByName("Route Cleanup Source").system.links
+    .every(link => link.routeAnchors.some(entry => entry.noteId === via.id)));
+
+  // A trashed owner still stores its links, so cleanup must scan all shared notes.
+  await requestWrite({ type: "deleteNote", noteId: source.id });
+  assert.ok(sharedByName("Route Cleanup Source").system.links
+    .every(link => link.routeAnchors.some(entry => entry.noteId === via.id)),
+  "trashing the owner keeps its routed links");
+
+  await fromPlayer({ type: "deleteNote", noteId: via.id });
+  const trashedLinks = sharedByName("Route Cleanup Source").system.links;
+  assert.equal(trashedLinks.length, 2, "links survive deleting the routed note");
+  assert.deepEqual(trashedLinks.map(link => link.id).sort(), linkIds.slice().sort());
+  assert.ok(trashedLinks.every(link => link.routeAnchors.length === 0),
+    "only the deleted note's waypoints are removed from trashed owners too");
+
+  await requestWrite({ type: "restoreNote", noteId: via.id });
+  assert.ok(sharedByName("Route Cleanup Source").system.links
+    .every(link => link.routeAnchors.length === 0), "restoring the note does not re-add waypoints");
+  await requestWrite({ type: "restoreNote", noteId: source.id });
+  const restoredLinks = sharedByName("Route Cleanup Source").system.links;
+  assert.equal(restoredLinks.length, 2);
+  assert.ok(restoredLinks.every(link => link.routeAnchors.length === 0));
+
+  await fromPlayer({ type: "deleteLink", noteId: source.id, linkId: restoredLinks[0].id });
+  assert.ok(sharedByName("Route Cleanup Source") && sharedByName("Route Cleanup Target 1")
+    && sharedByName("Route Cleanup Via"), "deleting a thread leaves notes");
+});
+
+test("route A may add a visual waypoint to a typed link without changing its origin", async () => {
+  const source = await createNoteAt("Route Typed Route Source", 19000, 5000);
+  await createNoteAt("Route Typed Route Target", 19600, 5000);
+  const insert = await createNoteAt("Route Typed Route Note", 19300, 5000);
+  const block = sharedByName("Route Typed Route Source").system.blocks[0];
+  await fromPlayer({ type: "requestLock", noteId: source.id, blockId: block.blockId });
+  await fromPlayer({
+    type: "saveBlock", noteId: source.id, blockId: block.blockId,
+    text: "See [[Route Typed Route Target]]."
+  });
+  await fromPlayer({ type: "releaseLock", noteId: source.id, blockId: block.blockId });
+  const typed = sharedByName("Route Typed Route Source").system.links
+    .find(link => link.origin === "typed");
+  assert.ok(typed);
+  const before = structuredClone(typed);
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: source.id, linkId: typed.id, noteId: insert.id,
+    mode: "route", index: 0, undoId: "RouteTypedA0001"
+  });
+  const routed = linkOn("Route Typed Route Source", typed.id);
+  assert.equal(routed.origin, "typed", "route A never converts a typed relationship");
+  assert.deepEqual(routed.routeAnchors, [{ noteId: insert.id, anchorId: "main" }]);
+  assert.deepEqual({ ...routed, routeAnchors: [] }, { ...before, routeAnchors: [] });
+  assert.equal(sharedByName("Route Typed Route Source").system.blocks[0].text,
+    "See [[Route Typed Route Target]].", "note text is untouched");
+});
+
+test("route A reports duplicate/cap/missing rejections and board pins can be cleared", async () => {
+  const a = await createNoteAt("Route Limit Source", 20000, 4200);
+  const b = await createNoteAt("Route Limit Target", 20400, 4200);
+  const c = await createNoteAt("Route Limit Note", 20200, 4200);
+  const d = await createNoteAt("Route Limit Note D", 20200, 4400);
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: b.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 }
+  });
+  const link = sharedByName("Route Limit Source").system.links.find(item => item.targetId === b.id);
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: c.id,
+    mode: "route", index: 0, undoId: "RouteLimitBase01"
+  });
+  assert.deepEqual(linkOn("Route Limit Source", link.id).routeAnchors,
+    [{ noteId: c.id, anchorId: "main" }]);
+
+  let mark = env.socketLog.length;
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: c.id,
+    mode: "route", index: 0, undoId: "RouteLimitDup001"
+  });
+  assert.ok(rejectionReasonsSince(mark).some(reason => reason.includes("already routed through this thread")),
+    "a duplicate route waypoint is rejected with a localized reason");
+  assert.deepEqual(linkOn("Route Limit Source", link.id).routeAnchors,
+    [{ noteId: c.id, anchorId: "main" }]);
+
+  const page = sharedByName("Route Limit Source");
+  await page.update({
+    "system.links": page.system.links.map(item => item.id === link.id ? {
+      ...item,
+      routeAnchors: Array.from({ length: MAX_ROUTE_ANCHORS }, () => ({ noteId: c.id, anchorId: "main" }))
+    } : item)
+  });
+  mark = env.socketLog.length;
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: d.id,
+    mode: "route", index: 0, undoId: "RouteLimitCap0001"
+  });
+  assert.equal(linkOn("Route Limit Source", link.id).routeAnchors.length, MAX_ROUTE_ANCHORS);
+  assert.ok(rejectionReasonsSince(mark).some(reason => reason.includes("maximum number of routed notes")),
+    "the server cap is reported instead of silently returning");
+  assert.equal(env.socketLog.slice(mark).some(entry => entry.message.type === "writeApplied"
+    && entry.message.undoId === "RouteLimitCap0001"), false, "a capped route sends no ack");
+
+  mark = env.socketLog.length;
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: "MissingNote00001",
+    mode: "route", index: 0, undoId: "RouteLimitMiss001"
+  });
+  assert.ok(rejectionReasonsSince(mark).some(reason => reason.includes("no longer available")),
+    "a missing/trashed route target is reported");
+
+  // Clear only the free board pins; route waypoints and every other link field stay untouched.
+  await page.update({
+    "system.links": page.system.links.map(item => item.id === link.id ? {
+      ...item,
+      pins: [{ x: 10, y: 20 }, { x: 30, y: 40 }],
+      routeAnchors: [{ noteId: c.id, anchorId: "main" }]
+    } : item)
+  });
+  const beforeClear = structuredClone(linkOn("Route Limit Source", link.id));
+  const clearMark = env.socketLog.length;
+  await fromPlayer({ type: "clearThreadPins", noteId: a.id, linkId: link.id });
+  const cleared = linkOn("Route Limit Source", link.id);
+  assert.deepEqual(cleared.pins, [], "the clear-pins request removes every board pin");
+  assert.deepEqual(cleared.routeAnchors, beforeClear.routeAnchors, "route waypoints are not pins");
+  assert.deepEqual({ ...cleared, pins: beforeClear.pins }, beforeClear,
+    "all other link fields survive clearing pins");
+  assert.equal(env.socketLog.slice(clearMark).some(entry => entry.message.type === "writeRejected"), false);
+
+  mark = env.socketLog.length;
+  await fromPlayer({ type: "clearThreadPins", noteId: a.id, linkId: link.id });
+  assert.ok(rejectionReasonsSince(mark).some(reason => reason.includes("no board pins")),
+    "clearing an unpinned thread is explained instead of silently ignored");
+});
+
+test("route A drops stale waypoints and continues instead of silently no-oping", async () => {
+  const a = await createNoteAt("Route Stale Source", 20600, 4200);
+  const b = await createNoteAt("Route Stale Target", 21000, 4200);
+  const c = await createNoteAt("Route Stale Note", 20800, 4200);
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: b.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 }
+  });
+  const link = sharedByName("Route Stale Source").system.links.find(item => item.targetId === b.id);
+  const page = sharedByName("Route Stale Source");
+  const staleId = "StaleNote0000001";
+  await page.update({
+    "system.links": page.system.links.map(item => item.id === link.id
+      ? { ...item, routeAnchors: [{ noteId: staleId, anchorId: "main" }] } : item)
+  });
+  const mark = env.socketLog.length;
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: c.id,
+    mode: "route", index: 0, undoId: "RouteStale000001"
+  });
+  const routed = linkOn("Route Stale Source", link.id);
+  assert.deepEqual(routed.routeAnchors, [{ noteId: c.id, anchorId: "main" }],
+    "the stale waypoint is removed and the new waypoint is inserted");
+  assert.ok(rejectionReasonsSince(mark).some(reason => reason.includes("missing or unavailable")),
+    "the stale cleanup is reported");
+  assert.ok(env.socketLog.slice(mark).some(entry => entry.message.type === "writeApplied"
+    && entry.message.action === "route" && entry.message.undoId === "RouteStale000001"),
+  "a successful cleanup still acknowledges the route write");
+});
+
+test("detaching a routed note is acknowledged and can be undone", async () => {
+  const a = await createNoteAt("Route Detach Source", 21200, 4200);
+  const b = await createNoteAt("Route Detach Target", 21600, 4200);
+  const c = await createNoteAt("Route Detach Note", 21400, 4200);
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: b.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 }
+  });
+  const link = sharedByName("Route Detach Source").system.links.find(item => item.targetId === b.id);
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: c.id,
+    mode: "route", index: 0, undoId: "RouteDetachBase1"
+  });
+  const routed = structuredClone(linkOn("Route Detach Source", link.id));
+  const detachId = "RouteDetachUndo";
+  const mark = env.socketLog.length;
+  await fromPlayer({
+    type: "detachRouteNote", sourceId: a.id, linkId: link.id, noteId: c.id, undoId: detachId
+  });
+  const detached = linkOn("Route Detach Source", link.id);
+  assert.deepEqual(detached.routeAnchors, []);
+  assert.deepEqual({ ...detached, routeAnchors: routed.routeAnchors }, routed,
+    "detach changes only the route waypoints");
+  const ack = env.socketLog.slice(mark).map(entry => entry.message)
+    .find(message => message.type === "writeApplied");
+  assert.deepEqual(ack, {
+    type: "writeApplied", forUserId: player.id, kind: "route", action: "detach", undoId: detachId
+  }, "detach acknowledges the action and undo id");
+
+  await fromPlayer({ type: "undoRouteSplit", undoId: detachId });
+  assert.deepEqual(linkOn("Route Detach Source", link.id), routed,
+    "Ctrl+Z can restore the exact pre-detach link array");
+});
+
+test("route B rejects a split that would duplicate an existing relationship", async () => {
+  const a = await createNoteAt("Route Duplicate Source", 21800, 5000);
+  const b = await createNoteAt("Route Duplicate Target", 22400, 5000);
+  const c = await createNoteAt("Route Duplicate Note", 22100, 5000);
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: b.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 }
+  });
+  const ab = sharedByName("Route Duplicate Source").system.links.find(item => item.targetId === b.id);
+
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: c.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 }
+  });
+  const ac = sharedByName("Route Duplicate Source").system.links.find(item => item.targetId === c.id);
+  let before = structuredClone(sharedByName("Route Duplicate Source").system.links);
+  let mark = env.socketLog.length;
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: ab.id, noteId: c.id,
+    mode: "split", index: 0, undoId: "RouteDupSplit001"
+  });
+  assert.deepEqual(sharedByName("Route Duplicate Source").system.links, before,
+    "an existing A→C link blocks the split without writing");
+  assert.ok(rejectionReasonsSince(mark).some(reason => reason.includes("duplicate an existing link")));
+
+  await fromPlayer({ type: "deleteLink", noteId: a.id, linkId: ac.id });
+  await fromPlayer({
+    type: "createLink", sourceId: c.id, targetId: b.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 }
+  });
+  before = structuredClone(sharedByName("Route Duplicate Source").system.links);
+  const beforeNote = structuredClone(sharedByName("Route Duplicate Note").system.links);
+  mark = env.socketLog.length;
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: ab.id, noteId: c.id,
+    mode: "split", index: 0, undoId: "RouteDupSplit002"
+  });
+  assert.deepEqual(sharedByName("Route Duplicate Source").system.links, before,
+    "an existing C→B link blocks the split too");
+  assert.deepEqual(sharedByName("Route Duplicate Note").system.links, beforeNote);
+  assert.ok(rejectionReasonsSince(mark).some(reason => reason.includes("duplicate an existing link")));
+});
+
+test("route A waypoints survive a later typed-link save", async () => {
+  const source = await createNoteAt("Route Typed Keep Source", 22800, 5000);
+  await createNoteAt("Route Typed Keep Target", 23300, 5000);
+  const insert = await createNoteAt("Route Typed Keep Note", 23050, 5000);
+  const sourcePage = sharedByName("Route Typed Keep Source");
+  const block = sourcePage.system.blocks[0];
+  await fromPlayer({ type: "requestLock", noteId: source.id, blockId: block.blockId });
+  await fromPlayer({
+    type: "saveBlock", noteId: source.id, blockId: block.blockId,
+    text: "See [[Route Typed Keep Target]]."
+  });
+  await fromPlayer({ type: "releaseLock", noteId: source.id, blockId: block.blockId });
+  const typed = sharedByName("Route Typed Keep Source").system.links
+    .find(item => item.origin === "typed");
+  assert.ok(typed);
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: source.id, linkId: typed.id, noteId: insert.id,
+    mode: "route", index: 0, undoId: "RouteTypedKeep1"
+  });
+  assert.deepEqual(linkOn("Route Typed Keep Source", typed.id).routeAnchors,
+    [{ noteId: insert.id, anchorId: "main" }]);
+
+  await fromPlayer({ type: "requestLock", noteId: source.id, blockId: block.blockId });
+  await fromPlayer({
+    type: "saveBlock", noteId: source.id, blockId: block.blockId,
+    text: "See [[Route Typed Keep Target]] and more."
+  });
+  await fromPlayer({ type: "releaseLock", noteId: source.id, blockId: block.blockId });
+  const resaved = sharedByName("Route Typed Keep Source").system.links
+    .find(item => item.origin === "typed");
+  assert.equal(resaved.id, typed.id, "re-saving keeps the same typed relationship");
+  assert.deepEqual(resaved.routeAnchors, [{ noteId: insert.id, anchorId: "main" }],
+    "reconciliation preserves the routed waypoint");
+});
+
+test("route B computes the rotated inserted note's facing edges", async () => {
+  const a = await createNoteAt("Route Rotated Source", 23600, 5200);
+  const b = await createNoteAt("Route Rotated Target", 24400, 5200);
+  const c = await createNoteAt("Route Rotated Note", 24000, 5200);
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: b.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 }
+  });
+  const link = sharedByName("Route Rotated Source").system.links.find(item => item.targetId === b.id);
+  await fromPlayer({
+    type: "setMainPinEnabled", noteId: c.id, enabled: false, undoId: "RouteRotatedPin1"
+  });
+  const layout = shared().pages.get(containers.ids.layoutPage);
+  await layout.update({ [`system.cards.${c.id}.rotation`]: 90 });
+  await fromPlayer({
+    type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: c.id,
+    mode: "split", index: 0, undoId: "RouteRotatedSp1"
+  });
+  const first = sharedByName("Route Rotated Source").system.links.find(item => item.targetId === c.id);
+  const second = sharedByName("Route Rotated Note").system.links.find(item => item.targetId === b.id);
+  assert.ok(first && second);
+  const boxA = { x: 23600, y: 5200, w: 200, h: 100, rotation: 0 };
+  const boxB = { x: 24400, y: 5200, w: 200, h: 100, rotation: 0 };
+  const boxC = { x: 24000, y: 5200, w: 200, h: 100, rotation: 90 };
+  const towardC = anchorWorld(boxA, { x: 1, y: 0.5 });
+  const towardB = anchorWorld(boxB, { x: 0, y: 0.5 });
+  const edgeFromA = projectToEdge(boxC, towardC);
+  const edgeFromB = projectToEdge(boxC, towardB);
+  assert.equal(first.targetAnchorId, "", "no main anchor is referenced when the pin is off");
+  assert.equal(second.sourceAnchorId, "");
+  assert.deepEqual(first.targetPoint, { x: edgeFromA.point.x, y: edgeFromA.point.y },
+    "the A→C endpoint projects onto the rotated card");
+  assert.equal(first.targetSide, edgeFromA.side);
+  assert.deepEqual(second.sourcePoint, { x: edgeFromB.point.x, y: edgeFromB.point.y },
+    "the C→B endpoint projects onto the rotated card");
+  assert.equal(second.sourceSide, edgeFromB.side);
+});
+
+test("route B uses one updateDocuments call when Foundry exposes it", async () => {
+  const a = await createNoteAt("Route Atomic Source", 24800, 5200);
+  const b = await createNoteAt("Route Atomic Target", 25300, 5200);
+  const c = await createNoteAt("Route Atomic Note", 25050, 5200);
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: b.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 }
+  });
+  const link = sharedByName("Route Atomic Source").system.links.find(item => item.targetId === b.id);
+  const calls = [];
+  const original = globalThis.JournalEntryPage.updateDocuments;
+  // The real Foundry v14 static commits both embedded pages in one database operation; this stub
+  // records the call and applies the same update payloads so the rest of the split path is tested.
+  globalThis.JournalEntryPage.updateDocuments = async (updates, { parent } = {}) => {
+    calls.push({ updates, parent });
+    for (const update of updates) {
+      const page = parent.pages.get(update._id);
+      for (const [key, value] of Object.entries(update)) {
+        if (key !== "_id") await page.update({ [key]: value });
+      }
+    }
+    return [];
+  };
+  try {
+    const mark = env.socketLog.length;
+    await fromPlayer({
+      type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: c.id,
+      mode: "split", index: 0, undoId: "RouteAtomic00001"
+    });
+    assert.equal(calls.length, 1, "the split takes the single-call atomic path");
+    assert.equal(calls[0].parent, shared());
+    assert.deepEqual(calls[0].updates.map(update => update._id).sort(), [a.id, c.id].sort(),
+      "both pages are updated in the same operation");
+    assert.ok(env.socketLog.slice(mark).some(entry => entry.message.type === "writeApplied"
+      && entry.message.action === "split" && entry.message.undoId === "RouteAtomic00001"));
+    assert.ok(sharedByName("Route Atomic Source").system.links.some(item => item.targetId === c.id));
+    assert.ok(sharedByName("Route Atomic Note").system.links.some(item => item.targetId === b.id));
+  } finally {
+    globalThis.JournalEntryPage.updateDocuments = original;
+  }
 });
 
 test("final player-visible dump still excludes the remaining secret notes", () => {

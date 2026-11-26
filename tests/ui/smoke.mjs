@@ -45,6 +45,8 @@ const { registerSocket, requestWrite } = await import(`${JN}/scripts/socket.mjs`
 const { privateStore } = await import(`${JN}/scripts/store/private-store.mjs`);
 const { resolvePresentation } = await import(`${JN}/scripts/presentation.mjs`);
 const { anchorWorld } = await import(`${JN}/scripts/anchors.mjs`);
+const { THREAD_PIN_RADIUS } = await import(`${JN}/scripts/card-ports.mjs`);
+const { MAX_ROUTE_ANCHORS } = await import(`${JN}/scripts/route-notes.mjs`);
 const { default: NoteEditor } = await import(`${JN}/scripts/app/editor.mjs`);
 const { default: JournalCanvas } = await import(`${JN}/scripts/app/canvas.mjs`);
 const { default: JournalApp, isTextEntryTarget, themeApplicationChanged } =
@@ -2944,6 +2946,605 @@ test("JournalApp Ctrl+Z sends undoPinChange before trash undo", async () => {
       "Ctrl+Z pops the pin history and requests an undo");
   } finally {
     await game.settings.set("fvtt-journalinator", "pinsEnabled", true);
+    app._onClose();
+    host.remove();
+  }
+});
+
+test("routed threads pass through main pins, ignore minor targets, and follow transforms", () => {
+  const canvas = new JournalCanvas({ onSelectNote() {}, onDeleteLink() {} });
+  document.body.appendChild(canvas.root);
+  canvas.pinsEnabled = true;
+  const aId = "routecardA000001";
+  const bId = "routecardB000002";
+  const rId = "routecardR000003";
+  const link = {
+    id: "routelink", targetId: bId, sourceAnchorId: "main", targetAnchorId: "main",
+    label: "Via", slack: 0, pins: [{ x: 450, y: 210 }],
+    routeAnchors: [
+      { noteId: rId, anchorId: "m1" },
+      { noteId: rId, anchorId: "main" },
+      { noteId: "missingcard00004", anchorId: "main" }
+    ]
+  };
+  const notes = [
+    { _id: aId, name: aId, system: { style: "sticky", blocks: [], links: [link] } },
+    { _id: bId, name: bId, system: { style: "sticky", blocks: [], links: [] } },
+    {
+      _id: rId, name: rId,
+      system: { style: "sticky", blocks: [], presentation: { torn: true }, links: [] }
+    }
+  ];
+  const layout = () => ({
+    cards: {
+      [aId]: { x: 0, y: 0, width: 200, height: 100, rotation: 0, anchors: { main: { kind: "main", x: 0.5, y: 0 } } },
+      [bId]: { x: 600, y: 0, width: 200, height: 100, rotation: 0, anchors: { main: { kind: "main", x: 0.5, y: 0 } } },
+      [rId]: {
+        x: 300, y: 150, width: 200, height: 100, rotation: 0,
+        anchors: {
+          main: { kind: "main", x: 0.5, y: 0 },
+          m1: { kind: "minor", x: 0.2, y: 0.5 }
+        }
+      }
+    },
+    labels: {}
+  });
+  const attachment = (box, anchor) => {
+    const world = anchorWorld(box, anchor);
+    return { x: world.x + world.nx * THREAD_PIN_RADIUS, y: world.y + world.ny * THREAD_PIN_RADIUS };
+  };
+  const startsAt = (path, point) => path.includes(`M${point.x} ${point.y}`);
+  try {
+    canvas.update(notes, layout());
+    const card = id => canvas.root.querySelector(`.jn-card[data-id="${id}"]`);
+    const firstLayout = layout();
+    const firstBox = { ...firstLayout.cards[rId], w: 200, h: 100 };
+    const mainPoint = attachment(firstBox, { kind: "main", x: 0.5, y: 0 });
+    const minorPoint = attachment(firstBox, { kind: "minor", x: 0.2, y: 0.5 });
+    const path = () => canvas.svg.querySelector('g[data-id="routelink"] .jn-thread-layer').getAttribute("d");
+    const hit = () => canvas.root.querySelector('.jn-link-hit[data-id="routelink"]').getAttribute("d");
+    assert.equal(canvas.threads.get("routelink").routePoints.length, 1,
+      "only the canonical main waypoint resolves; minor and missing entries are ignored");
+    assert.ok(startsAt(path(), mainPoint), "the routed path runs through the main attachment point");
+    assert.ok(!startsAt(path(), minorPoint), "Route A never targets a minor pin");
+    assert.ok(startsAt(path(), { x: 450, y: 210 }), "existing board pins stay in the path before the route");
+    assert.equal(hit(), path(), "the hit path follows the routed geometry");
+    assert.equal(canvas.svg.querySelector('g[data-id="routelink"] .jn-link-label').textContent, "Via",
+      "labels remain on routed threads");
+    assert.ok(canvas.svg.querySelector('.jn-thread-mask-shape[data-note-id="routecardR000003"]'),
+      "the routed note contributes its silhouette to the fade mask");
+
+    const group = canvas.svg.querySelector('g[data-id="routelink"]');
+    const moved = layout();
+    moved.cards[rId] = {
+      x: 330, y: 180, width: 240, height: 120, rotation: 90,
+      anchors: firstLayout.cards[rId].anchors
+    };
+    canvas.update(notes, moved);
+    const movedBox = { x: 330, y: 180, w: 240, h: 120, rotation: 90 };
+    const movedPoint = attachment(movedBox, { kind: "main", x: 0.5, y: 0 });
+    assert.equal(canvas.svg.querySelector('g[data-id="routelink"]'), group,
+      "route geometry follows a card transform without rebuilding the group");
+    assert.ok(startsAt(path(), movedPoint), "moving/rotating/resizing the routed note moves the waypoint");
+    assert.notEqual(movedPoint.x, mainPoint.x);
+    assert.ok(card(rId).classList.contains("jn-torn"), "the routed note keeps its torn silhouette");
+
+    const detached = [];
+    const cleared = [];
+    canvas.callbacks.onDetachRouteNote = (...args) => detached.push(args);
+    canvas.callbacks.onClearThreadPins = (...args) => cleared.push(args);
+    const selectLink = () => {
+      const hitEl = canvas.root.querySelector('.jn-link-hit[data-id="routelink"]');
+      hitEl.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+      canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+    };
+    selectLink();
+    const clearPins = canvas.linkToolbar.querySelector(".jn-link-clear-pins");
+    assert.ok(clearPins, "a pinned thread offers a clear-pins action");
+    clearPins.click();
+    assert.deepEqual(cleared, [[aId, "routelink"]], "clear pins names the source and link only");
+    canvas.lastLinkClick = null;
+    selectLink();
+    const detach = canvas.linkToolbar.querySelector(".jn-link-detach");
+    assert.ok(detach, "the selected routed thread offers a detach action");
+    detach.click();
+    assert.deepEqual(detached[0].slice(0, 3), [aId, "routelink", rId],
+      "detach names the source, link and routed note");
+    assert.match(detached[0][3], /^[A-Za-z0-9]{16}$/, "detach generates an undo id for the acknowledged transaction");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("multiple route waypoints keep stored order and disabled pins skip rendering", () => {
+  const canvas = new JournalCanvas({ onSelectNote() {} });
+  document.body.appendChild(canvas.root);
+  canvas.pinsEnabled = true;
+  const aId = "orderrouteA00001";
+  const bId = "orderrouteB00002";
+  const r1 = "orderrouteR100003";
+  const r2 = "orderrouteR200004";
+  const link = {
+    id: "orderlink", targetId: bId, sourceAnchorId: "main", targetAnchorId: "main",
+    sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 },
+    sourceSide: "right", targetSide: "left", slack: 0,
+    routeAnchors: [{ noteId: r1, anchorId: "main" }, { noteId: r2, anchorId: "main" }]
+  };
+  const notes = [
+    { _id: aId, name: aId, system: { style: "sticky", blocks: [], links: [link] } },
+    { _id: bId, name: bId, system: { style: "sticky", blocks: [], links: [] } },
+    {
+      _id: r1, name: r1,
+      system: { style: "sticky", blocks: [], links: [], attachment: { mainPinEnabled: true } }
+    },
+    {
+      _id: r2, name: r2,
+      system: { style: "sticky", blocks: [], links: [], attachment: { mainPinEnabled: true } }
+    }
+  ];
+  const layout = () => ({
+    cards: {
+      [aId]: { x: 0, y: 0, width: 200, height: 100, anchors: { main: { kind: "main", x: 0.5, y: 0 } } },
+      [bId]: { x: 700, y: 0, width: 200, height: 100, anchors: { main: { kind: "main", x: 0.5, y: 0 } } },
+      [r1]: { x: 240, y: 180, width: 200, height: 100, anchors: { main: { kind: "main", x: 0.5, y: 0 } } },
+      [r2]: { x: 460, y: 180, width: 200, height: 100, anchors: { main: { kind: "main", x: 0.5, y: 0 } } }
+    },
+    labels: {}
+  });
+  const attachment = (id, data) => {
+    const box = { ...data, w: data.width, h: data.height, rotation: data.rotation ?? 0 };
+    const world = anchorWorld(box, data.anchors.main);
+    return { x: world.x + world.nx * THREAD_PIN_RADIUS, y: world.y + world.ny * THREAD_PIN_RADIUS };
+  };
+  try {
+    const base = layout();
+    canvas.update(notes, base);
+    const thread = canvas.threads.get("orderlink");
+    assert.equal(thread.routePoints.length, 2, "both route waypoints resolve");
+    const first = attachment(r1, base.cards[r1]);
+    const second = attachment(r2, base.cards[r2]);
+    assert.deepEqual(thread.routePoints.map(point => [point.x, point.y]),
+      [[first.x, first.y], [second.x, second.y]], "route points keep their stored order");
+    const path = canvas.svg.querySelector('g[data-id="orderlink"] .jn-thread-layer').getAttribute("d");
+    assert.ok(path.indexOf(`M${first.x} ${first.y}`) < path.indexOf(`M${second.x} ${second.y}`),
+      "the drawn path follows the stored route order");
+
+    // A note that switched its main pin off stops contributing a waypoint immediately.
+    notes[3].system.attachment.mainPinEnabled = false;
+    canvas.update(notes, layout());
+    assert.equal(canvas.threads.get("orderlink").routePoints.length, 1,
+      "a disabled main pin is skipped defensively");
+    assert.deepEqual(canvas.threads.get("orderlink").routePoints.map(point => [point.x, point.y]),
+      [[first.x, first.y]]);
+
+    // The world pin experiment off suppresses every route waypoint, including valid ones.
+    canvas.pinsEnabled = false;
+    canvas.update(notes, layout());
+    assert.equal(canvas.threads.get("orderlink").routePoints.length, 0,
+      "pinsEnabled=false skips all route waypoints");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("dropping a note near a thread previews a target and opens the chooser only after drop", () => {
+  const calls = [];
+  const canvas = new JournalCanvas({
+    onSelectNote() {},
+    onMoveCard: (...args) => calls.push(["move", ...args]),
+    onRouteNoteOnLink: (...args) => calls.push(["route", ...args])
+  });
+  document.body.appendChild(canvas.root);
+  canvas.pinsEnabled = true;
+  const aId = "dropcardA0000001";
+  const bId = "dropcardB0000002";
+  const rId = "dropcardR0000003";
+  const link = {
+    id: "droplink", targetId: bId, sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 },
+    sourceSide: "right", targetSide: "left", slack: 0, pins: [{ x: 450, y: 50 }], label: "Wire"
+  };
+  const notes = [
+    { _id: aId, name: aId, system: { style: "sticky", blocks: [], links: [link] } },
+    { _id: bId, name: bId, system: { style: "sticky", blocks: [], links: [] } },
+    { _id: rId, name: rId, system: { style: "sticky", blocks: [], links: [] } }
+  ];
+  const layout = () => ({
+    cards: {
+      [aId]: { x: 0, y: 0, width: 200, height: 100, anchors: { main: { kind: "main", x: 0.5, y: 0 } } },
+      [bId]: { x: 500, y: 0, width: 200, height: 100, anchors: { main: { kind: "main", x: 0.5, y: 0 } } },
+      [rId]: { x: 300, y: 0, width: 200, height: 100, anchors: { main: { kind: "main", x: 0.5, y: 0 } } }
+    },
+    labels: {}
+  });
+  const pointer = (target, type, x, y, button = 0) => target.dispatchEvent(new MouseEvent(type, {
+    bubbles: true, button, buttons: type === "pointerup" ? 0 : 1, clientX: x, clientY: y
+  }));
+  const beginDrag = (id, dx = 30, dy = 0) => {
+    const card = canvas.root.querySelector(`.jn-card[data-id="${id}"]`);
+    const box = canvas.cardBox(id);
+    const sx = box.x + box.w / 2, sy = box.y + box.h / 2;
+    pointer(card, "pointerdown", sx, sy);
+    pointer(canvas.root, "pointermove", sx + dx, sy + dy);
+    return { sx, sy, ex: sx + dx, ey: sy + dy };
+  };
+  try {
+    canvas.update(notes, layout());
+    let drag = beginDrag(rId);
+    assert.ok(!canvas.routeChooser, "no mode chooser during the drag");
+    assert.ok(canvas.root.querySelector('g[data-id="droplink"]').classList.contains("jn-link-drop-target"),
+      "the target thread is highlighted while the note hovers it");
+    assert.ok(canvas.svg.querySelector(".jn-route-preview"), "a tentative route preview is drawn");
+    pointer(canvas.root, "pointerup", drag.ex, drag.ey);
+    assert.ok(canvas.routeChooser, "the chooser opens only after the drop");
+    assert.equal(canvas.routeChooser.parentElement, canvas.root, "the chooser is a screen-space child of the canvas");
+    assert.equal(canvas.root.querySelector('g[data-id="droplink"] .jn-link-label').textContent, "Wire");
+    assert.equal(canvas.root.querySelectorAll('.jn-link-hit[data-id="droplink"]').length, 1,
+      "existing hit geometry remains available");
+    assert.ok(calls.some(([name, id]) => name === "move" && id === rId), "the note move is committed first");
+    assert.equal(calls.some(([name]) => name === "route"), false, "nothing is mutated before a choice");
+    assert.deepEqual(link.routeAnchors, undefined, "dragging never edits route data on its own");
+
+    canvas.routeChooser.querySelector(".jn-route-cancel").click();
+    assert.equal(canvas.routeChooser, null, "cancel closes the chooser");
+    assert.equal(canvas.root.querySelector(".jn-link-drop-target"), null, "cancel clears the highlight");
+    assert.equal(canvas.svg.querySelector(".jn-route-preview"), null, "cancel clears the preview");
+    assert.equal(calls.some(([name]) => name === "route"), false, "cancel writes nothing");
+
+    // A cancelled pointer (browser gesture, lost capture) must not leave a highlight, preview or
+    // chooser behind, and must never open the route transaction.
+    drag = beginDrag(rId, 18, 2);
+    assert.ok(canvas.root.querySelector('g[data-id="droplink"]').classList.contains("jn-link-drop-target"));
+    assert.ok(canvas.svg.querySelector(".jn-route-preview"));
+    pointer(canvas.root, "pointercancel", drag.ex, drag.ey);
+    assert.equal(canvas.routeDrop, null, "pointercancel clears the drop target");
+    assert.equal(canvas.routeChooser, null, "pointercancel never opens the chooser");
+    assert.equal(canvas.root.querySelector(".jn-link-drop-target"), null, "pointercancel clears the highlight");
+    assert.equal(canvas.svg.querySelector(".jn-route-preview"), null, "pointercancel clears the preview");
+    assert.equal(calls.some(([name]) => name === "route"), false, "pointercancel writes nothing");
+
+    // The route preview uses the live thread's spring motion, not a neutral rest path.
+    drag = beginDrag(rId, 22, 1);
+    const preview = () => canvas.svg.querySelector(".jn-route-preview").getAttribute("d");
+    const restPreview = preview();
+    const thread = canvas.threads.get("droplink");
+    thread.motion.x = 24;
+    thread.motion.y = 9;
+    pointer(canvas.root, "pointermove", drag.ex, drag.ey);
+    assert.notEqual(preview(), restPreview,
+      "moving thread motion changes the tentative route path");
+    thread.motion.x = 0;
+    thread.motion.y = 0;
+    pointer(canvas.root, "pointercancel", drag.ex, drag.ey);
+
+    calls.length = 0;
+    drag = beginDrag(rId, 20, 4);
+    pointer(canvas.root, "pointerup", drag.ex, drag.ey);
+    canvas.routeChooser.querySelector(".jn-route-through").click();
+    const routed = calls.find(([name]) => name === "route");
+    assert.deepEqual(routed, ["route", aId, "droplink", rId, "route", 0, undefined],
+      "Route A sends the link, note, mode and append index");
+    assert.equal(canvas.routeChooser, null);
+    const card = canvas.root.querySelector(`.jn-card[data-id="${rId}"]`);
+    const lastMove = [...calls].reverse().find(([name]) => name === "move");
+    assert.equal(Number.parseFloat(card.style.left), lastMove[2], "the note stays where it was dropped");
+
+    // Split is deliberately blocked on a thread with board pins, so clear the test pin before
+    // exercising the successful split path.
+    link.pins = [];
+    canvas.update(notes, layout());
+    calls.length = 0;
+    drag = beginDrag(rId, -20, -4);
+    pointer(canvas.root, "pointerup", drag.ex, drag.ey);
+    canvas.routeChooser.querySelector(".jn-route-split").click();
+    const split = calls.find(([name]) => name === "route");
+    assert.equal(split[1], aId);
+    assert.equal(split[2], "droplink");
+    assert.equal(split[3], rId);
+    assert.equal(split[4], "split");
+    assert.equal(split[5], 0);
+    assert.match(split[6], /^[A-Za-z0-9]{16}$/, "Split generates an undo id for the acknowledged transaction");
+
+    // Focus trap: Tab/Shift+Tab cycle only through enabled choices, and Escape/outside dismissal
+    // returns focus to the canvas instead of leaving it on a removed node.
+    const press = (target, key, extra = {}) => target.dispatchEvent(new KeyboardEvent("keydown", {
+      key, bubbles: true, cancelable: true, ...extra
+    }));
+    canvas.root.focus({ preventScroll: true });
+    calls.length = 0;
+    drag = beginDrag(rId, 10, 0);
+    pointer(canvas.root, "pointerup", drag.ex, drag.ey);
+    let chooser = canvas.routeChooser;
+    assert.ok(chooser, "the chooser reopens for the focus test");
+    assert.equal(chooser.getAttribute("role"), "dialog");
+    assert.equal(chooser.getAttribute("aria-modal"), "true", "the chooser declares itself modal");
+    const buttons = [...chooser.querySelectorAll("button:not([disabled])")];
+    assert.equal(buttons.length, 3);
+    assert.equal(document.activeElement, buttons[0], "initial focus lands on the first choice");
+    press(buttons[0], "Tab");
+    assert.equal(document.activeElement, buttons[1], "Tab moves forward inside the chooser");
+    press(buttons[1], "Tab", { shiftKey: true });
+    assert.equal(document.activeElement, buttons[0], "Shift+Tab moves backward");
+    press(buttons[0], "Tab", { shiftKey: true });
+    assert.equal(document.activeElement, buttons[2], "Shift+Tab from the first choice wraps to the last");
+    press(buttons[2], "Tab");
+    assert.equal(document.activeElement, buttons[0], "Tab from the last choice wraps to the first");
+    press(buttons[0], "Escape");
+    assert.equal(canvas.routeChooser, null, "Escape closes the chooser");
+    assert.equal(document.activeElement, canvas.root, "Escape restores focus to the canvas");
+
+    drag = beginDrag(rId, 12, 1);
+    pointer(canvas.root, "pointerup", drag.ex, drag.ey);
+    chooser = canvas.routeChooser;
+    assert.ok(chooser);
+    document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 1, clientY: 1 }));
+    assert.equal(canvas.routeChooser, null, "clicking outside dismisses the chooser");
+    assert.equal(document.activeElement, canvas.root, "outside dismissal restores focus to the canvas");
+    assert.equal(canvas.root.querySelector(".jn-link-drop-target"), null, "outside dismissal clears the highlight");
+    assert.equal(calls.some(([name]) => name === "route"), false, "focus and dismissal never write route data");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("route/split drop modes explain disabled reasons and never open on pan or far drops", () => {
+  const calls = [];
+  const canvas = new JournalCanvas({
+    onSelectNote() {},
+    onMoveCard() {},
+    onRouteNoteOnLink: (...args) => calls.push(args)
+  });
+  document.body.appendChild(canvas.root);
+  canvas.pinsEnabled = true;
+  const aId = "disabledA00000001";
+  const bId = "disabledB00000002";
+  const rId = "disabledR00000003";
+  const link = {
+    id: "disabledlink", targetId: bId, sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 },
+    sourceSide: "right", targetSide: "left", slack: 0
+  };
+  const notes = [
+    { _id: aId, name: aId, system: { style: "sticky", blocks: [], links: [link] } },
+    { _id: bId, name: bId, system: { style: "sticky", blocks: [], links: [] } },
+    { _id: rId, name: rId, system: { style: "sticky", blocks: [], links: [], attachment: { mainPinEnabled: true } } }
+  ];
+  const layout = () => ({
+    cards: {
+      [aId]: { x: 0, y: 0, width: 200, height: 100, anchors: { main: { kind: "main", x: 0.5, y: 0 } } },
+      [bId]: { x: 500, y: 0, width: 200, height: 100, anchors: { main: { kind: "main", x: 0.5, y: 0 } } },
+      [rId]: { x: 300, y: 0, width: 200, height: 100, anchors: { main: { kind: "main", x: 0.5, y: 0 } } }
+    },
+    labels: {}
+  });
+  const pointer = (target, type, x, y, button = 0) => target.dispatchEvent(new MouseEvent(type, {
+    bubbles: true, button, clientX: x, clientY: y
+  }));
+  const drop = (id, dx = 20, dy = 0, button = 0) => {
+    const box = canvas.cardBox(id);
+    const card = canvas.root.querySelector(`.jn-card[data-id="${id}"]`);
+    const sx = box.x + box.w / 2, sy = box.y + box.h / 2;
+    pointer(card, "pointerdown", sx, sy, button);
+    pointer(canvas.root, "pointermove", sx + dx, sy + dy, button);
+    pointer(canvas.root, "pointerup", sx + dx, sy + dy, button);
+  };
+  const reset = () => {
+    link.origin = "drawn";
+    link.pins = [];
+    link.routeAnchors = [];
+    notes[2].system.attachment = { mainPinEnabled: true };
+    canvas.pinsEnabled = true;
+    canvas.update(notes, layout());
+  };
+  try {
+    reset();
+    link.origin = "typed";
+    canvas.update(notes, layout());
+    drop(rId);
+    assert.ok(canvas.routeChooser.querySelector(".jn-route-split").disabled,
+      "typed links cannot be split");
+    assert.match(canvas.routeChooser.querySelector(".jn-route-split").textContent,
+      new RegExp(game.i18n.localize("JN.Route.TypedBlocked").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      "the disabled split explains why");
+    assert.equal(canvas.routeChooser.querySelector(".jn-route-through").disabled, false);
+    canvas.routeChooser.querySelector(".jn-route-cancel").click();
+
+    reset();
+    link.pins = [{ x: 450, y: 50 }];
+    canvas.update(notes, layout());
+    drop(rId);
+    assert.ok(canvas.routeChooser.querySelector(".jn-route-split").disabled,
+      "board-pinned threads cannot be split");
+    assert.match(canvas.routeChooser.querySelector(".jn-route-split").textContent,
+      new RegExp(game.i18n.localize("JN.Route.SplitHint").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      "the waypoint policy is explained");
+    canvas.routeChooser.querySelector(".jn-route-cancel").click();
+
+    reset();
+    link.routeAnchors = [{ noteId: "otherrouted00005", anchorId: "main" }];
+    canvas.update(notes, layout());
+    drop(rId);
+    assert.ok(canvas.routeChooser.querySelector(".jn-route-split").disabled,
+      "threads that already route through notes cannot be split");
+    canvas.routeChooser.querySelector(".jn-route-cancel").click();
+
+    reset();
+    notes[2].system.attachment = { mainPinEnabled: false };
+    canvas.update(notes, layout());
+    drop(rId);
+    assert.ok(canvas.routeChooser.querySelector(".jn-route-through").disabled,
+      "Route A is unavailable when the dragged note's main pin is off");
+    assert.match(canvas.routeChooser.querySelector(".jn-route-through").textContent,
+      new RegExp(game.i18n.localize("JN.Route.PinOff").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      "the pin-off reason stays visible");
+    canvas.routeChooser.querySelector(".jn-route-cancel").click();
+
+    reset();
+    const noMain = layout();
+    noMain.cards[rId].anchors = { m1: { kind: "minor", x: 0.2, y: 0.4 } };
+    canvas.update(notes, noMain);
+    drop(rId);
+    assert.ok(canvas.routeChooser.querySelector(".jn-route-through").disabled,
+      "Route A requires a main anchor and never falls back to a minor");
+    canvas.routeChooser.querySelector(".jn-route-cancel").click();
+
+    reset();
+    canvas.pinsEnabled = false;
+    drop(rId);
+    assert.ok(canvas.routeChooser.querySelector(".jn-route-through").disabled,
+      "turning the world pin experiment off disables Route A");
+    canvas.routeChooser.querySelector(".jn-route-cancel").click();
+
+    reset();
+    link.routeAnchors = Array.from({ length: MAX_ROUTE_ANCHORS }, (_, index) => ({
+      noteId: `fullroute${String(index).padStart(7, "0")}`, anchorId: "main"
+    }));
+    canvas.update(notes, layout());
+    drop(rId);
+    assert.ok(canvas.routeChooser.querySelector(".jn-route-through").disabled,
+      "Route A is disabled at the server cap");
+    assert.match(canvas.routeChooser.querySelector(".jn-route-through").textContent,
+      new RegExp(game.i18n.localize("JN.Route.Limit").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      "the cap reason is localized and visible");
+    canvas.routeChooser.querySelector(".jn-route-cancel").click();
+
+    reset();
+    drop(rId, 20, 200);
+    assert.equal(canvas.routeChooser, null, "a far drop opens no chooser");
+    assert.equal(canvas.root.querySelector(".jn-link-drop-target"), null);
+
+    reset();
+    const box = canvas.cardBox(rId);
+    pointer(canvas.root, "pointerdown", box.x + 10, box.y + 10, 1);
+    pointer(canvas.root, "pointermove", box.x + 140, box.y + 90, 1);
+    pointer(canvas.root, "pointerup", box.x + 140, box.y + 90, 1);
+    assert.equal(canvas.routeChooser, null, "panning never opens the route chooser");
+
+    reset();
+    canvas.update(notes, layout());
+    drop(aId);
+    assert.equal(canvas.routeChooser, null, "links already attached to the dragged note are excluded");
+
+    reset();
+    link.routeAnchors = [{ noteId: rId, anchorId: "main" }];
+    canvas.update(notes, layout());
+    drop(rId);
+    assert.equal(canvas.routeChooser, null, "a note already routed through the link is not offered again");
+    assert.equal(calls.length, 0, "no mode callback ran in any disabled/far/pan scenario");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("JournalApp uses one newest-first undo stack for split, pin, route and detach", async () => {
+  await requestWrite({ type: "createNote", title: "Route Undo", x: 1800, y: 120 });
+  await settle();
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  try {
+    await redraw();
+    const canvas = host.querySelector(".jn-canvas");
+    const descriptor = Object.getOwnPropertyDescriptor(game.users, "activeGM");
+    const otherGM = { id: "RouteGM000000001", name: "Route GM", isGM: true, active: true };
+    Object.defineProperty(game.users, "activeGM", { configurable: true, get: () => otherGM });
+    const undo = async () => {
+      canvas.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "z", ctrlKey: true, bubbles: true, cancelable: true
+      }));
+      await settle();
+    };
+    const sentSince = mark => env.socketLog.slice(mark).map(entry => entry.message);
+    try {
+      // Acknowledgements from another user (or without an undo id) must never create an entry.
+      Hooks.callAll("journalinatorWriteApplied", { kind: "route", forUserId: "someoneelse0001", undoId: "wronguser0000001" });
+      Hooks.callAll("journalinatorWriteApplied", { kind: "route", forUserId: game.user.id });
+      let before = env.socketLog.length;
+      await undo();
+      assert.equal(sentSince(before).some(message => message.type === "undoRouteSplit"), false,
+        "no route undo exists before a successful split acknowledgement");
+
+      // Split acknowledgement, then a later pin acknowledgement: the pin is the newest action.
+      Hooks.callAll("journalinatorWriteApplied", {
+        kind: "route", action: "split", forUserId: game.user.id, undoId: "routesplitundo001"
+      });
+      Hooks.callAll("journalinatorWriteApplied", { kind: "pin", forUserId: game.user.id, undoId: "pinundo0000000001" });
+      before = env.socketLog.length;
+      await undo();
+      const first = sentSince(before);
+      assert.ok(first.some(message => message.type === "undoPinChange" && message.undoId === "pinundo0000000001"),
+        "Ctrl+Z undoes the newest acknowledged action (the pin move) first");
+      assert.equal(first.some(message => message.type === "undoRouteSplit"), false,
+        "the older split entry waits behind the pin");
+
+      before = env.socketLog.length;
+      await undo();
+      const second = sentSince(before);
+      assert.ok(second.some(message => message.type === "undoRouteSplit" && message.undoId === "routesplitundo001"),
+        "the split is undone next, in chronological order");
+
+      // A Route A acknowledgement and a detach acknowledgement join the same stack.
+      Hooks.callAll("journalinatorWriteApplied", {
+        kind: "route", action: "route", forUserId: game.user.id, undoId: "routeinsertundo01"
+      });
+      Hooks.callAll("journalinatorWriteApplied", {
+        kind: "route", action: "detach", forUserId: game.user.id, undoId: "routeDetachUndo1"
+      });
+      before = env.socketLog.length;
+      await undo();
+      assert.ok(sentSince(before).some(message => message.type === "undoRouteSplit" && message.undoId === "routeDetachUndo1"),
+        "detach joins the same chronological stack");
+      before = env.socketLog.length;
+      await undo();
+      assert.ok(sentSince(before).some(message => message.type === "undoRouteSplit" && message.undoId === "routeinsertundo01"),
+        "the earlier route insertion is next");
+
+      // A stale ack that lacks an undo id is ignored; a rolled-back operation never becomes Ctrl+Z.
+      Hooks.callAll("journalinatorWriteApplied", { kind: "route", forUserId: game.user.id, undoId: "" });
+      before = env.socketLog.length;
+      await undo();
+      assert.equal(sentSince(before).some(message => message.type === "undoRouteSplit"), false,
+        "stale/rolled-back acknowledgements do not add undo history");
+
+      // Success notices are generated only from acknowledged writes.
+      const notices = env.notifications.splice(0).filter(([level]) => level === "info").map(([, text]) => text);
+      assert.ok(notices.includes(game.i18n.localize("JN.Route.SplitDone")), "split success is shown on ack");
+      assert.ok(notices.includes(game.i18n.localize("JN.Route.Routed")), "route success is shown on ack");
+      assert.ok(notices.includes(game.i18n.localize("JN.Route.Detached")), "detach success is shown on ack");
+
+      // Deleting a note joins the same stack, and a later pin is still newer than that deletion.
+      const undoNote = sharedByName("Route Undo");
+      const card = canvas.querySelector(`.jn-card[data-id="${undoNote.id}"]`);
+      card.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 5, clientY: 5 }));
+      canvas.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 5, clientY: 5 }));
+      await settle();
+      canvas.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "Backspace", bubbles: true, cancelable: true
+      }));
+      await settle();
+      Hooks.callAll("journalinatorWriteApplied", { kind: "pin", forUserId: game.user.id, undoId: "pinNewestAfterDelete" });
+      before = env.socketLog.length;
+      await undo();
+      assert.ok(sentSince(before).some(message => message.type === "undoPinChange"
+        && message.undoId === "pinNewestAfterDelete"),
+      "a pin acknowledged after a delete is still the newest undo entry");
+      before = env.socketLog.length;
+      await undo();
+      assert.ok(sentSince(before).some(message => message.type === "restoreNote"
+        && message.noteId === undoNote.id),
+      "the earlier keyboard deletion is restored after the newer pin entry");
+    } finally {
+      Object.defineProperty(game.users, "activeGM", descriptor);
+    }
+  } finally {
     app._onClose();
     host.remove();
   }

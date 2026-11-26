@@ -1001,3 +1001,139 @@
     transition: none;
   }
 }
+
+/* --- Route-on-thread drop target and screen-space mode chooser ----------------------------- */
+
+/* Hovering a thread with a single dragged note highlights the existing group only; the SVG is
+   not rebuilt during the drag. The dashed preview overlays the tentative Route A waypoint. */
+.jn-canvas .jn-link-drop-target {
+  --jn-thread-boost: 1.3;
+}
+.jn-canvas .jn-link-drop-target .jn-link-strokes {
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--jn-acc, #e4c07a) 85%, transparent))
+    drop-shadow(0 0 10px color-mix(in srgb, var(--jn-acc, #e4c07a) 45%, transparent));
+}
+.jn-canvas .jn-route-preview {
+  fill: none;
+  stroke: var(--jn-sc-route-preview, var(--jn-acc, #e4c07a));
+  stroke-width: calc(2px * var(--jn-zoom-comp, 1));
+  stroke-linecap: round;
+  stroke-dasharray: 7 6;
+  opacity: .9;
+  pointer-events: none;
+  animation: jn-route-preview-flow 1.4s linear infinite;
+}
+.jn-canvas .jn-route-preview-pin {
+  fill: var(--jn-sc-route-preview, var(--jn-acc, #e4c07a));
+  stroke: rgba(24, 15, 8, .72);
+  stroke-width: 1.5px;
+  pointer-events: none;
+}
+@keyframes jn-route-preview-flow {
+  to { stroke-dashoffset: -13; }
+}
+
+/* Screen-space overlay: a dark application surface consistent with the context menu, not
+   another piece of parchment. It never reserves canvas space. */
+.jn-canvas .jn-route-chooser {
+  position: absolute;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: min(286px, 88vw);
+  padding: 8px;
+  color: var(--jn-text, #ece0cc);
+  background: var(--jn-panel, #221a12);
+  border: 1px solid var(--jn-line, #55432f);
+  border-radius: 11px;
+  box-shadow: 0 14px 34px color-mix(in srgb, var(--jn-shadow, #000) 64%, transparent);
+}
+.jn-canvas .jn-route-heading {
+  padding: 2px 6px 5px;
+  font-size: 11px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--jn-text-soft, #b8a98f);
+}
+.jn-canvas .jn-route-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 9px;
+  text-align: left;
+  color: var(--jn-text, #ece0cc);
+  background: var(--jn-bg, #17110b);
+  border: 1px solid var(--jn-line, #55432f);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.jn-canvas .jn-route-choice > i {
+  width: 16px;
+  margin-top: 2px;
+  color: var(--jn-acc, #e4c07a);
+  text-align: center;
+}
+.jn-canvas .jn-route-choice > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.jn-canvas .jn-route-choice b {
+  font-size: 13px;
+  font-weight: 600;
+}
+.jn-canvas .jn-route-choice small {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--jn-text-soft, #b8a98f);
+}
+.jn-canvas .jn-route-choice:not(:disabled):hover {
+  border-color: var(--jn-acc, #e4c07a);
+  background: color-mix(in srgb, var(--jn-acc, #e4c07a) 12%, var(--jn-bg, #17110b));
+}
+.jn-canvas .jn-route-choice:not(:disabled):focus-visible {
+  outline: 2px solid var(--jn-acc, #e4c07a);
+  outline-offset: 2px;
+}
+.jn-canvas .jn-route-choice:disabled,
+.jn-canvas .jn-route-choice.disabled {
+  cursor: not-allowed;
+  opacity: .55;
+}
+.jn-canvas .jn-route-choice:disabled > i {
+  color: var(--jn-text-soft, #b8a98f);
+}
+.jn-canvas .jn-route-cancel {
+  align-self: flex-end;
+  margin-top: 2px;
+  padding: 4px 10px;
+  color: var(--jn-text-soft, #b8a98f);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.jn-canvas .jn-route-cancel:hover,
+.jn-canvas .jn-route-cancel:focus-visible {
+  color: var(--jn-text, #ece0cc);
+  border-color: var(--jn-line, #55432f);
+  outline: none;
+}
+.jn-canvas .jn-route-cancel:focus-visible {
+  outline: 2px solid var(--jn-acc, #e4c07a);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jn-canvas .jn-route-preview {
+    animation: none;
+  }
+  .jn-canvas .jn-route-chooser,
+  .jn-canvas .jn-route-choice,
+  .jn-canvas .jn-route-cancel {
+    transition: none;
+  }
+}

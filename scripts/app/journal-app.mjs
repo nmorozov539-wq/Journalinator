@@ -105,10 +105,10 @@ export default class JournalApp extends ApplicationV2 {
   #toolbarPointerTarget = null;
   #focusedCanvasRenders = new WeakSet();
   #lastAppliedTheme = null;
-  #deletionHistory = [];
-  // Client-side pin undo ids only. The active GM keeps the authoritative before/after
-  // fingerprints and refuses a stale id, so we do not need to chase every later write here.
-  #pinHistory = [];
+  // One chronological undo stack for every client-visible operation. Delete entries are pushed
+  // when the request is sent; pin/route entries only after the active GM acknowledges the write,
+  // so a rejected or rolled-back operation can never consume a Ctrl+Z.
+  #history = [];
   #clipboard = [];
   #replacingHTML = false;
   #editor = new NoteEditor({
@@ -196,6 +196,14 @@ export default class JournalApp extends ApplicationV2 {
     onAddCardAnchor: (noteId, anchor) => this.#addCardAnchor(noteId, anchor),
     onMoveCardAnchor: (noteId, anchorId, x, y) => this.#moveCardAnchor(noteId, anchorId, x, y),
     onRemoveCardAnchor: (noteId, anchorId) => this.#removeCardAnchor(noteId, anchorId),
+    // Route A keeps the original link and appends a main-pin waypoint; Route B is an atomic
+    // split whose undo id becomes usable only after the GM's writeApplied acknowledgement.
+    onRouteNoteOnLink: (sourceId, linkId, noteId, mode, index, undoId) =>
+      requestWrite({ type: "routeNoteOnLink", sourceId, linkId, noteId, mode, index, undoId }),
+    onDetachRouteNote: (sourceId, linkId, noteId, undoId) =>
+      requestWrite({ type: "detachRouteNote", sourceId, linkId, noteId, undoId }),
+    onClearThreadPins: (noteId, linkId) =>
+      requestWrite({ type: "clearThreadPins", noteId, linkId }),
     onHideLink: (noteId, linkId) => gm(() => secrets.hideSharedLink(noteId, linkId)),
     onRevealLink: (noteId, linkId) => gm(() => secrets.revealLink(noteId, linkId)),
     onToggleLinkHint: (noteId, linkId, hint) => requestWrite({ type: "gmSetLinkHint", noteId, linkId, hint }),
@@ -469,10 +477,18 @@ export default class JournalApp extends ApplicationV2 {
     this.#hookIds.push(["journalinatorThemeRegistered", Hooks.on("journalinatorThemeRegistered", rerender)]);
     this.#hookIds.push(["journalinatorWriteApplied", Hooks.on("journalinatorWriteApplied", message => {
       // Commit client-side undo only after the active GM confirms the write actually landed.
+      // A rejected, rolled-back or stale operation sends no acknowledgement (or one without an
+      // undo id), so it can never consume a later Ctrl+Z.
       if (message?.forUserId !== game.user.id) return;
-      if (message.kind !== "pin" || typeof message.undoId !== "string" || !message.undoId) return;
-      this.#pinHistory.push({ kind: "pin", undoId: message.undoId });
-      if (this.#pinHistory.length > 20) this.#pinHistory.shift();
+      if (typeof message.undoId !== "string" || !message.undoId) return;
+      if (message.kind === "route") {
+        this.#pushHistory({ kind: "route", undoId: message.undoId });
+        // The success notice is only shown here, after the server acknowledged the operation.
+        const key = { route: "JN.Route.Routed", split: "JN.Route.SplitDone", detach: "JN.Route.Detached" }[message.action];
+        if (key) ui.notifications?.info(t(key));
+        return;
+      }
+      if (message.kind === "pin") this.#pushHistory({ kind: "pin", undoId: message.undoId });
     })]);
     const rerenderForScene = () => {
       if ((game.settings.get("fvtt-journalinator", "boardTheme") ?? "stylized") !== SCENE_THEME_ID) return;
@@ -583,8 +599,7 @@ export default class JournalApp extends ApplicationV2 {
         for (const labelId of labelIds) this.#removeLabel(labelId);
         if (shared.length) {
           const undoId = foundry.utils.randomID();
-          this.#deletionHistory.push({ noteIds: shared, undoId });
-          if (this.#deletionHistory.length > 20) this.#deletionHistory.shift();
+          this.#pushHistory({ kind: "delete", noteIds: shared, undoId });
           for (const noteId of shared) requestWrite({ type: "deleteNote", noteId, undoId });
         }
         return;
@@ -594,14 +609,18 @@ export default class JournalApp extends ApplicationV2 {
           && (ev.code === "KeyZ" || ev.key.toLowerCase() === "z")) {
         consume();
         if (ev.repeat) return;
-        const pinUndo = this.#pinHistory.pop();
-        if (pinUndo) {
-          requestWrite({ type: "undoPinChange", undoId: pinUndo.undoId });
-          return;
+        // One chronological stack: whatever the user did last is undone first, regardless of
+        // whether it was a delete, a pin change, a route insertion/split or a detach. A stale id
+        // is refused by the active GM (JN.Pin.UndoStale / JN.Route.UndoStale) after it is consumed.
+        const entry = this.#history.pop();
+        if (!entry) return;
+        if (entry.kind === "route") {
+          requestWrite({ type: "undoRouteSplit", undoId: entry.undoId });
+        } else if (entry.kind === "pin") {
+          requestWrite({ type: "undoPinChange", undoId: entry.undoId });
+        } else if (entry.kind === "delete") {
+          for (const noteId of entry.noteIds) requestWrite({ type: "restoreNote", noteId, undoId: entry.undoId });
         }
-        const deleted = this.#deletionHistory.pop();
-        if (!deleted) return;
-        for (const noteId of deleted.noteIds) requestWrite({ type: "restoreNote", noteId, undoId: deleted.undoId });
       }
     };
     addEventListener("keydown", this.#onGlobalKeydown, true);
@@ -629,6 +648,12 @@ export default class JournalApp extends ApplicationV2 {
     if (!q) return true;
     const author = game.users.get(note.system.authorId)?.name ?? "";
     return noteMatchesQuery(note, q, author);
+  }
+
+  /** Append to the single chronological undo stack, capped like the old per-kind arrays. */
+  #pushHistory(entry) {
+    this.#history.push(entry);
+    if (this.#history.length > 20) this.#history.shift();
   }
 
   #pinsEnabled() {

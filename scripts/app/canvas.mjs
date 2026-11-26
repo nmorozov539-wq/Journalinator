@@ -1,7 +1,7 @@
 import {
   CARD_SIDES, MAX_THREAD_PINS, THREAD_PIN_RADIUS, cardEdgeAt, cardPointAnchor, moveThreadPin, threadAttachment, validThreadPin
 } from "../card-ports.mjs";
-import { anchorWorld, cardNormalizedPoint, isMainAnchor, nearestAnchor, validAnchorId } from "../anchors.mjs";
+import { MAIN_ANCHOR_ID, anchorWorld, cardNormalizedPoint, isMainAnchor, nearestAnchor, validAnchorId } from "../anchors.mjs";
 import { looseTails, pinnedThreadPath, threadLayerSpecs, ThreadMotion, THREAD_PRESETS } from "../link-thread.mjs";
 import { LINK_COLOR_SLOTS, normalizeLinkColor } from "../link-colors.mjs";
 import PatchNotesPanel from "./patch-notes.mjs";
@@ -11,6 +11,7 @@ import { renderMarkdown } from "../markdown.mjs";
 import { t } from "../i18n.mjs";
 import { classifyNote, resolveAttachment, resolveLinkCosmetics, resolvePresentation } from "../presentation.mjs";
 import { tearPoints, tearPolygon, tearSeed } from "../tear.mjs";
+import { MAX_ROUTE_ANCHORS } from "../route-notes.mjs";
 import { DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, STAMP_CORNERS, STAMP_IDS, stampUrl } from "../stamps.mjs";
 
 const DRAG_THRESHOLD = 5;
@@ -18,6 +19,53 @@ let threadMaskSequence = 0;
 const LINK_COLOR_OPTIONS = ["", ...LINK_COLOR_SLOTS];
 const CARD_CORNERS = Object.freeze([{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }]);
 const PATCH_NOTES_SELECTOR = ".jn-patch-notes, .jn-patch-notes-button";
+// Screen-space radius for "dropped on a thread". Converted through zoom so it feels the same
+// near and far; no snapping happens before the explicit mode chooser is confirmed.
+const ROUTE_DROP_RADIUS = 18;
+
+/**
+ * Distance from a world point to the existing thread geometry, using the hit path's cubic
+ * commands. This is only called while a card drag is live and once on drop; it never rebuilds
+ * the SVG or writes to the DOM.
+ */
+function distanceToThreadPath(d, point) {
+  if (typeof d !== "string" || !d) return Infinity;
+  const tokens = d.match(/[MC]|-?\d*\.?\d+(?:[eE][-+]?\d+)?/g) ?? [];
+  const distanceSq = (x, y) => (x - point.x) ** 2 + (y - point.y) ** 2;
+  let cursor = null;
+  let minimum = Infinity;
+  let index = 0;
+  while (index < tokens.length) {
+    const command = tokens[index++];
+    if (command === "M") {
+      const x = Number(tokens[index++]);
+      const y = Number(tokens[index++]);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) break;
+      cursor = { x, y };
+      minimum = Math.min(minimum, distanceSq(x, y));
+      continue;
+    }
+    if (command !== "C") break;
+    const c1 = { x: Number(tokens[index++]), y: Number(tokens[index++]) };
+    const c2 = { x: Number(tokens[index++]), y: Number(tokens[index++]) };
+    const end = { x: Number(tokens[index++]), y: Number(tokens[index++]) };
+    if (!cursor || !Number.isFinite(end.x) || !Number.isFinite(end.y)) {
+      cursor = cursor ?? end;
+      continue;
+    }
+    const start = cursor;
+    const steps = 14;
+    for (let step = 0; step <= steps; step++) {
+      const t = step / steps;
+      const u = 1 - t;
+      const x = u * u * u * start.x + 3 * u * u * t * c1.x + 3 * u * t * t * c2.x + t * t * t * end.x;
+      const y = u * u * u * start.y + 3 * u * u * t * c1.y + 3 * u * t * t * c2.y + t * t * t * end.y;
+      minimum = Math.min(minimum, distanceSq(x, y));
+    }
+    cursor = end;
+  }
+  return Math.sqrt(minimum);
+}
 
 // Extended style class names stay aligned with the legacy theme token keys (`wanted` is Target).
 const STYLE_CLASSES = Object.freeze({
@@ -83,6 +131,16 @@ export default class JournalCanvas {
     this.cardResizeObserver = null;
     this.inlineText = null;
     this.linkPlacement = null;
+    // Dropping a single note near a thread previews the target link. The chooser is built only
+    // on pointerup, in screen space, so a pan or a plain drag never opens a menu.
+    this.routeDrop = null;
+    this.routeDragNoteId = null;
+    this.routeChooser = null;
+    this.routeChooserTarget = null;
+    this.routeChooserDismiss = null;
+    this.routeChooserReturnFocus = null;
+    this.routePreview = null;
+    this.routePreviewPin = null;
     // Thread fade is a class toggle on the existing mask silhouettes: hover/editing never
     // rebuilds paths or the SVG.
     this.hoverNoteId = null;
@@ -170,6 +228,11 @@ export default class JournalCanvas {
     if (this.linkPlacement?.source && !this.cardEls.has(this.linkPlacement.source.id)) this.cancelLinkTool();
     if (this.hoverNoteId && !this.cardEls.has(this.hoverNoteId)) this.hoverNoteId = null;
     if (this.focusedNoteId && !this.cardEls.has(this.focusedNoteId)) this.focusedNoteId = null;
+    const chooserTarget = this.routeChooserTarget;
+    if (chooserTarget && (!this.cardEls.has(chooserTarget.noteId)
+        || !this.linksById.has(chooserTarget.linkId))) {
+      this.#closeRouteChooser();
+    }
 
     if (!deferGeometry) this.refreshGeometry();
   }
@@ -211,6 +274,8 @@ export default class JournalCanvas {
     this.pinTarget = null;
     this.snappedPinEl = null;
     this.movingThreads.clear();
+    this.#closeRouteChooser();
+    this.#clearRouteDrop();
   }
 
   setDimMatch(dimMatch) {
@@ -661,9 +726,9 @@ export default class JournalCanvas {
     const threads = new Map();
     for (const entry of links) {
       const { note, link } = entry;
-      const { p, r, cosmetics, pins, motion } = this.#resolveThread(entry, boxes, animate);
-      threads.set(link.id, { start: p, end: r, pins, motion });
-      const { path: d, center: { x: mx, y: my }, start, end } = pinnedThreadPath(p, r, pins, motion, cosmetics.slack);
+      const { p, r, cosmetics, pins, routePoints, waypoints, motion } = this.#resolveThread(entry, boxes, animate);
+      threads.set(link.id, { start: p, end: r, pins, routePoints, waypoints, motion });
+      const { path: d, center: { x: mx, y: my }, start, end } = pinnedThreadPath(p, r, waypoints, motion, cosmetics.slack);
       const color = normalizeLinkColor(link.color);
       const colorClass = color ? `jn-link-color-${color}` : "jn-link-color-default";
       const accentClass = `jn-link-accent-${cosmetics.secondaryColor || "default"}`;
@@ -694,6 +759,7 @@ export default class JournalCanvas {
         `jn-link-pattern-${pattern}`,
         `jn-link-ends-${cosmetics.ends}`,
         selected ? "jn-link-selected" : "",
+        this.routeDrop?.linkId === link.id ? "jn-link-drop-target" : "",
         dimmed ? "jn-link-dimmed" : "",
         link.hidden ? "jn-link-hidden" : "",
         link.hint ? "jn-link-hint" : ""
@@ -740,6 +806,8 @@ export default class JournalCanvas {
     if (this.previewPin) this.svg.appendChild(this.previewPin);
     if (this.edgePin) this.svg.appendChild(this.edgePin);
     if (this.draftPins) this.svg.appendChild(this.draftPins);
+    if (this.routePreview) this.svg.appendChild(this.routePreview);
+    if (this.routePreviewPin) this.svg.appendChild(this.routePreviewPin);
     this.#syncMaskState();
     if (animate && this.movingThreads.size) this.#requestThreadFrame();
   }
@@ -757,7 +825,290 @@ export default class JournalCanvas {
     motion.retarget(p, r, animate, cosmetics.slack);
     const savedPins = Array.isArray(link.pins) ? link.pins.slice(0, MAX_THREAD_PINS).filter(validThreadPin) : [];
     const pins = this.pinDrag?.id === link.id ? moveThreadPin(savedPins, this.pinDrag) ?? savedPins : savedPins;
-    return { p, r, cosmetics, savedPins, pins, motion };
+    // Stable route order: source endpoint -> free board pins (in stored order) -> routed note
+    // waypoints (in `routeAnchors` order) -> target endpoint. Route A only ever resolves the
+    // canonical `main` attachment anchor, so a stale/malicious entry can never route through a
+    // minor pin; missing anchors are ignored rather than synthesized.
+    const routePoints = this.#routeWorldPoints(link, boxes);
+    const waypoints = [...pins, ...routePoints];
+    return { p, r, cosmetics, savedPins, pins, routePoints, waypoints, motion };
+  }
+
+  /** Resolve `link.routeAnchors` to world points, canonical main anchors only. */
+  #routeWorldPoints(link, boxes) {
+    const entries = Array.isArray(link.routeAnchors) ? link.routeAnchors : [];
+    const points = [];
+    // Defensive rendering: a disabled pin experiment or a note that re-enabled/removed its main
+    // pin must not draw a waypoint the server would no longer accept. Missing anchors and secret/
+    // trashed notes are skipped here too; the active GM prunes them on the next route write.
+    if (!this.#pinsOn()) return points;
+    for (const entry of entries) {
+      if (!entry || entry.anchorId !== MAIN_ANCHOR_ID) continue;
+      const box = boxes.get(entry.noteId);
+      if (!box) continue;
+      const note = this.notes.find(item => item._id === entry.noteId);
+      if (!note || note.secret) continue;
+      if (resolveAttachment(note).mainPinEnabled === false) continue;
+      const anchor = this.#cardAnchor(entry.noteId, entry.anchorId);
+      if (!isMainAnchor(anchor)) continue;
+      const point = this.#anchorWorldAttachment(box, anchor);
+      if (point) points.push(point);
+    }
+    return points;
+  }
+
+  /** World attachment for a note's canonical main pin, if the note has one. */
+  #mainRouteAttachment(noteId) {
+    const anchor = this.#cardAnchor(noteId, MAIN_ANCHOR_ID);
+    if (!isMainAnchor(anchor)) return null;
+    return this.#anchorWorldAttachment(this.#cardBox(noteId), anchor);
+  }
+
+  /**
+   * Why each drop mode is unavailable for this note/link. The chooser always keeps both
+   * choices visible and explains a disabled mode instead of hiding or silently changing it.
+   */
+  #routeAvailability(note, link) {
+    const attachment = resolveAttachment(note);
+    const main = this.#cardAnchor(note._id, MAIN_ANCHOR_ID);
+    let routeReason = "";
+    if (!this.#pinsOn() || !attachment.mainPinEnabled || !isMainAnchor(main)) {
+      routeReason = "JN.Route.PinOff";
+    } else if ((link.routeAnchors?.length ?? 0) >= MAX_ROUTE_ANCHORS) {
+      // The server caps a routed thread; disable the action before the user can request it.
+      routeReason = "JN.Route.Limit";
+    }
+    let splitReason = "";
+    if (link.origin === "typed") splitReason = "JN.Route.TypedBlocked";
+    else if ((link.pins?.length ?? 0) > 0 || (link.routeAnchors?.length ?? 0) > 0) {
+      // The server's split policy refuses board pins and routed waypoints; the supplied hint
+      // doubles as the explicit explanation instead of hiding the choice.
+      splitReason = "JN.Route.SplitHint";
+    }
+    return {
+      routeDisabled: !!routeReason,
+      routeReason,
+      splitDisabled: !!splitReason,
+      splitReason
+    };
+  }
+
+  /** Class-only highlight + optional route preview while a card drag hovers a thread. */
+  #setRouteDropTarget(linkId) {
+    if (this.routeDrop?.linkId === linkId) {
+      // Keep the tentative Route A waypoint attached to the note while it moves.
+      if (linkId) this.#updateRoutePreview(linkId);
+      return;
+    }
+    for (const group of this.svg.querySelectorAll(".jn-link-drop-target")) {
+      group.classList.remove("jn-link-drop-target");
+    }
+    this.routeDrop = linkId ? { linkId } : null;
+    if (!linkId) {
+      this.#clearRoutePreview();
+      return;
+    }
+    const group = [...this.svg.querySelectorAll("g[data-id]")]
+      .find(item => item.dataset.id === String(linkId));
+    group?.classList.add("jn-link-drop-target");
+    this.#updateRoutePreview(linkId);
+  }
+
+  #clearRouteDrop() {
+    this.routeDrop = null;
+    this.routeDragNoteId = null;
+    for (const group of this.svg?.querySelectorAll(".jn-link-drop-target") ?? []) {
+      group.classList.remove("jn-link-drop-target");
+    }
+    this.#clearRoutePreview();
+  }
+
+  #clearRoutePreview() {
+    this.routePreview?.remove();
+    this.routePreview = null;
+    this.routePreviewPin?.remove();
+    this.routePreviewPin = null;
+  }
+
+  /**
+   * Route A preview: the existing path plus the dragged note's main pin appended as the last
+   * waypoint (the same insertion index the chooser sends). Only drawn when Route A is possible.
+   */
+  #updateRoutePreview(linkId) {
+    const thread = this.threads.get(linkId);
+    const link = this.linksById.get(linkId);
+    if (!thread || !link) return this.#clearRoutePreview();
+    const note = this.notes.find(item => item._id === this.routeDragNoteId);
+    const availability = note ? this.#routeAvailability(note, link) : null;
+    const main = this.routeDragNoteId ? this.#mainRouteAttachment(this.routeDragNoteId) : null;
+    if (!availability || availability.routeDisabled || !main) {
+      this.#clearRoutePreview();
+      return;
+    }
+    const waypoints = [...(thread.waypoints ?? thread.pins), main];
+    const cosmetics = resolveLinkCosmetics(link);
+    // Preview the same physics as the live thread: passing the real motion keeps the tentative
+    // path from jumping when a settled/pulled thread is already offset by its spring state.
+    const { path } = pinnedThreadPath(thread.start, thread.end, waypoints, thread.motion, cosmetics.slack);
+    if (!this.routePreview) {
+      this.routePreview = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      this.routePreview.setAttribute("class", "jn-route-preview");
+      this.svg.appendChild(this.routePreview);
+      this.routePreviewPin = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      this.routePreviewPin.setAttribute("class", "jn-route-preview-pin");
+      this.svg.appendChild(this.routePreviewPin);
+    }
+    this.routePreview.setAttribute("d", path);
+    this.routePreviewPin.setAttribute("cx", main.x);
+    this.routePreviewPin.setAttribute("cy", main.y);
+    this.routePreviewPin.setAttribute("r", String(5 / this.view.k));
+  }
+
+  /** Find the closest eligible thread under the dragged note's center (screen-space radius). */
+  #updateRouteDropTarget(drag, ev) {
+    if (typeof this.callbacks.onRouteNoteOnLink !== "function"
+        || !drag || drag.type !== "card" || drag.readOnly || drag.ids.length !== 1
+        || drag.moved <= DRAG_THRESHOLD) {
+      this.#setRouteDropTarget(null);
+      return;
+    }
+    const noteId = drag.id;
+    const note = this.notes.find(item => item._id === noteId);
+    // Secret/vault notes and hidden links are outside the shared route transaction; never offer
+    // an operation the active GM would silently reject.
+    if (!note || note.secret) {
+      this.#setRouteDropTarget(null);
+      return;
+    }
+    const box = this.#cardBox(noteId);
+    const center = { x: box.x + box.w / 2, y: box.y + box.h / 2 };
+    const radius = ROUTE_DROP_RADIUS / this.view.k;
+    let best = null;
+    for (const [linkId, thread] of this.threads) {
+      const link = this.linksById.get(linkId);
+      if (!link || !thread.hit || link.hidden) continue;
+      if (link.sourceId === noteId || link.targetId === noteId) continue;
+      if ((link.routeAnchors ?? []).some(entry => entry?.noteId === noteId)) continue;
+      const distance = distanceToThreadPath(thread.hit.getAttribute("d"), center);
+      if (!Number.isFinite(distance) || distance > radius) continue;
+      if (!best || distance < best.distance) best = { linkId, distance };
+    }
+    this.routeDragNoteId = noteId;
+    this.#setRouteDropTarget(best?.linkId ?? null);
+  }
+
+  /**
+   * Screen-space mode chooser, built only after a card drop. It overlays the canvas without
+   * changing layout; both choices stay visible and disabled modes carry their explanation.
+   */
+  #openRouteChooser({ linkId, noteId, clientX, clientY }) {
+    const link = this.linksById.get(linkId);
+    const note = this.notes.find(item => item._id === noteId);
+    if (!link || !note) {
+      this.#clearRouteDrop();
+      return;
+    }
+    if (this.routeChooser) this.#closeRouteChooser({ keepDrop: true });
+    const availability = this.#routeAvailability(note, link);
+    const index = Array.isArray(link.routeAnchors) ? link.routeAnchors.length : 0;
+    this.routeChooserTarget = { linkId, noteId };
+    const active = this.root.ownerDocument.activeElement;
+    this.routeChooserReturnFocus = active && active !== this.root.ownerDocument.body ? active : null;
+    const el = document.createElement("div");
+    el.className = "jn-route-chooser";
+    el.setAttribute("role", "dialog");
+    el.setAttribute("aria-modal", "true");
+    el.setAttribute("aria-label", t("JN.Route.Title"));
+    const reason = (key, id) => key
+      ? `<small class="jn-route-reason" id="${id}">${t(key)}</small>` : "";
+    el.innerHTML = `
+      <div class="jn-route-heading">${t("JN.Route.Title")}</div>
+      <button type="button" class="jn-route-choice jn-route-through${availability.routeDisabled ? " disabled" : ""}"
+        ${availability.routeDisabled ? "disabled" : ""}${availability.routeReason ? ` aria-describedby="jn-route-route-reason"` : ""}>
+        <i class="fa-solid fa-route" aria-hidden="true"></i>
+        <span><b>${t("JN.Route.RouteThrough")}</b>${reason(availability.routeReason, "jn-route-route-reason")}</span>
+      </button>
+      <button type="button" class="jn-route-choice jn-route-split${availability.splitDisabled ? " disabled" : ""}"
+        ${availability.splitDisabled ? "disabled" : ""}${availability.splitReason ? ` aria-describedby="jn-route-split-reason"` : ""}>
+        <i class="fa-solid fa-code-branch" aria-hidden="true"></i>
+        <span><b>${t("JN.Route.Split")}</b>${reason(availability.splitReason, "jn-route-split-reason")}</span>
+      </button>
+      <button type="button" class="jn-route-cancel">${t("JN.Route.Cancel")}</button>
+    `;
+    this.root.appendChild(el);
+    this.routeChooser = el;
+
+    // Position in screen space, clamped like the context menu so it never leaves the canvas.
+    const rootRect = this.root.getBoundingClientRect();
+    let left = clientX - rootRect.left;
+    let top = clientY - rootRect.top;
+    const crop = el.getBoundingClientRect();
+    left = Math.max(6, Math.min(left, rootRect.width - crop.width - 6));
+    top = Math.max(6, Math.min(top, rootRect.height - crop.height - 6));
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+
+    const chooseRoute = () => {
+      if (this.routeChooser !== el || availability.routeDisabled) return;
+      // No optimistic toast: JournalApp shows JN.Route.Routed only after the GM acknowledges the
+      // write. A rejected route therefore never claims success.
+      this.callbacks.onRouteNoteOnLink?.(link.sourceId, link.id, noteId, "route", index, undefined);
+      this.#closeRouteChooser({ restoreFocus: true });
+    };
+    const chooseSplit = () => {
+      if (this.routeChooser !== el || availability.splitDisabled) return;
+      const undoId = foundry.utils.randomID();
+      this.callbacks.onRouteNoteOnLink?.(link.sourceId, link.id, noteId, "split", index, undoId);
+      this.#closeRouteChooser({ restoreFocus: true });
+    };
+    el.querySelector(".jn-route-through").addEventListener("click", chooseRoute);
+    el.querySelector(".jn-route-split").addEventListener("click", chooseSplit);
+    el.querySelector(".jn-route-cancel").addEventListener("click", () => {
+      this.#closeRouteChooser({ restoreFocus: true });
+    });
+    // A real focus trap: Tab and Shift+Tab cycle only through the enabled choices, never escaping
+    // to the rest of the Foundry UI while the modal chooser is open.
+    el.addEventListener("keydown", event => {
+      if (event.key !== "Tab") return;
+      event.preventDefault();
+      event.stopPropagation();
+      const items = [...el.querySelectorAll("button:not([disabled])")];
+      if (!items.length) return;
+      const current = items.indexOf(this.root.ownerDocument.activeElement);
+      const next = current < 0
+        ? (event.shiftKey ? items.length - 1 : 0)
+        : (current + (event.shiftKey ? -1 : 1) + items.length) % items.length;
+      items[next].focus({ preventScroll: true });
+    });
+    const focusables = [...el.querySelectorAll("button:not([disabled])")];
+    (focusables[0] ?? el.querySelector(".jn-route-cancel")).focus({ preventScroll: true });
+
+    this.routeChooserDismiss = ev => {
+      if (this.routeChooser !== el || el.contains(ev.target)) return;
+      this.#closeRouteChooser({ restoreFocus: true });
+    };
+    this.root.ownerDocument.addEventListener("pointerdown", this.routeChooserDismiss, true);
+  }
+
+  #closeRouteChooser({ restoreFocus = false, keepDrop = false } = {}) {
+    if (this.routeChooserDismiss) {
+      this.root.ownerDocument.removeEventListener("pointerdown", this.routeChooserDismiss, true);
+      this.routeChooserDismiss = null;
+    }
+    const chooser = this.routeChooser;
+    const returnFocus = this.routeChooserReturnFocus;
+    this.routeChooser = null;
+    this.routeChooserTarget = null;
+    this.routeChooserReturnFocus = null;
+    chooser?.remove();
+    if (!keepDrop) this.#clearRouteDrop();
+    if (restoreFocus) {
+      if (returnFocus?.isConnected && typeof returnFocus.focus === "function") {
+        returnFocus.focus({ preventScroll: true });
+      } else {
+        this.root.focus({ preventScroll: true });
+      }
+    }
   }
 
   /**
@@ -784,7 +1135,8 @@ export default class JournalCanvas {
         cosmetics.secondaryColor, cosmetics.material, cosmetics.thickness, cosmetics.pattern,
         cosmetics.ends, link.hidden ? 1 : 0, link.hint ? 1 : 0, link.label ?? "",
         savedPins.length, link.id === this.selectedLinkId ? 1 : 0, dimmed ? 1 : 0,
-        sourceSide, targetSide, link.sourceAnchorId ?? "", link.targetAnchorId ?? ""
+        sourceSide, targetSide, link.sourceAnchorId ?? "", link.targetAnchorId ?? "",
+        (link.routeAnchors ?? []).map(entry => `${entry?.noteId ?? ""}:${entry?.anchorId ?? ""}`).join(",")
       ].join("\u0001");
     });
     return `${cards.join("\u0002")}\u0003${parts.join("\u0002")}`;
@@ -809,15 +1161,15 @@ export default class JournalCanvas {
     const threads = new Map();
     for (const entry of links) {
       const { note, link } = entry;
-      const { p, r, cosmetics, pins, motion } = this.#resolveThread(entry, boxes, animate);
-      const { path: d, center: { x: mx, y: my }, start, end } = pinnedThreadPath(p, r, pins, motion, cosmetics.slack);
+      const { p, r, cosmetics, pins, routePoints, waypoints, motion } = this.#resolveThread(entry, boxes, animate);
+      const { path: d, center: { x: mx, y: my }, start, end } = pinnedThreadPath(p, r, waypoints, motion, cosmetics.slack);
       const key = String(link.id);
       const group = this.linkGroupEls.get(key);
       const hit = this.linkHitEls.get(key);
       if (!group || !hit) return false;
       const previous = this.threads.get(link.id);
       const thread = {
-        start: p, end: r, pins, motion, group, hit,
+        start: p, end: r, pins, routePoints, waypoints, motion, group, hit,
         lines: previous?.lines ?? [...group.querySelectorAll(".jn-thread-layer")],
         tails: previous?.tails ?? [...group.querySelectorAll(".jn-thread-tail")],
         endpointPins: previous?.endpointPins ?? [...group.querySelectorAll(".jn-thread-pin:not(.jn-board-pin)")],
@@ -877,10 +1229,10 @@ export default class JournalCanvas {
       for (const { x, y } of corners) extend(x, y);
       shape.setAttribute("points", corners.map(({ x, y }) => `${x},${y}`).join(" "));
     }
-    for (const { start, end, pins } of threads.values()) {
+    for (const { start, end, pins, waypoints } of threads.values()) {
       extend(start.x, start.y);
       extend(end.x, end.y);
-      for (const { x, y } of pins) extend(x, y);
+      for (const { x, y } of waypoints ?? pins) extend(x, y);
     }
     if (!Number.isFinite(left)) left = top = right = bottom = 0;
     const pad = 320;
@@ -925,10 +1277,10 @@ export default class JournalCanvas {
       silhouettes += `<polygon class="jn-thread-mask-shape" data-note-id="${foundry.utils.escapeHTML(String(id))}"
         points="${corners.map(({ x, y }) => `${x},${y}`).join(" ")}"/>`;
     }
-    for (const { start, end, pins } of threads.values()) {
+    for (const { start, end, pins, waypoints } of threads.values()) {
       extend(start.x, start.y);
       extend(end.x, end.y);
-      for (const { x, y } of pins) extend(x, y);
+      for (const { x, y } of waypoints ?? pins) extend(x, y);
     }
     if (!Number.isFinite(left)) left = top = right = bottom = 0;
     // Include the maximum travel of a pulled thread and its control points.
@@ -975,7 +1327,7 @@ export default class JournalCanvas {
   }
 
   #paintThread(id, thread) {
-    const { path, center, start, end } = pinnedThreadPath(thread.start, thread.end, thread.pins, thread.motion);
+    const { path, center, start, end } = pinnedThreadPath(thread.start, thread.end, thread.waypoints ?? thread.pins, thread.motion);
     thread.lines?.forEach(line => line.setAttribute("d", path));
     if (thread.tails?.length) {
       const tailPaths = looseTails(start, end);
@@ -1127,6 +1479,8 @@ export default class JournalCanvas {
         <input type="text" class="jn-link-label-input" placeholder="${t("JN.Link.Label")}" value="${foundry.utils.escapeHTML(link.label ?? "")}">
       </div>
       <div class="jn-link-row jn-link-actions">
+        ${this.#clearBoardPinsButton(link)}
+        ${this.#routeDetachButtons(link)}
         ${this.#gmLinkButtons(link)}
         <button type="button" class="jn-link-delete" title="${t("JN.Link.Delete")}">✕</button>
       </div>
@@ -1193,6 +1547,17 @@ export default class JournalCanvas {
     gmButton(".jn-link-reveal", () => this.callbacks.onRevealLink?.(link.sourceId, link.id));
     const hintBtn = this.linkToolbar.querySelector(".jn-link-hint-toggle");
     if (hintBtn) hintBtn.onclick = () => this.callbacks.onToggleLinkHint?.(link.sourceId, link.id, !link.hint);
+    this.linkToolbar.querySelectorAll(".jn-link-detach").forEach(btn => {
+      btn.onclick = () => {
+        const undoId = foundry.utils.randomID();
+        this.callbacks.onDetachRouteNote?.(link.sourceId, link.id, btn.dataset.routeNoteId, undoId);
+        this.#closeLinkToolbar();
+      };
+    });
+    this.linkToolbar.querySelector(".jn-link-clear-pins")?.addEventListener("click", () => {
+      this.callbacks.onClearThreadPins?.(link.sourceId, link.id);
+      this.#closeLinkToolbar();
+    });
     this.linkToolbar.querySelector(".jn-link-delete").onclick = () => {
       this.callbacks.onDeleteLink(link.sourceId, link.id);
       this.#closeLinkToolbar();
@@ -1211,6 +1576,29 @@ export default class JournalCanvas {
     for (const group of this.svg.querySelectorAll("g[data-id]")) {
       group.classList.toggle("jn-link-selected", group.dataset.id === this.selectedLinkId);
     }
+  }
+
+  /** Clear the free board waypoints when a split is blocked by them; route data is untouched. */
+  #clearBoardPinsButton(link) {
+    if (link.hidden || typeof this.callbacks.onClearThreadPins !== "function") return "";
+    if (!Array.isArray(link.pins) || link.pins.length === 0) return "";
+    return `<button type="button" class="jn-link-clear-pins" title="${t("JN.Route.ClearPins")}">${t("JN.Route.ClearPins")}</button>`;
+  }
+
+  /** Optional detach action for each note routed through this thread (Route A waypoint). */
+  #routeDetachButtons(link) {
+    // Hidden links live in a separate store with their own route policy; only expose the plain
+    // shared detach operation here rather than guessing at vault authority. Local/private
+    // canvases have no route callback and therefore offer no false affordance.
+    if (link.hidden || typeof this.callbacks.onDetachRouteNote !== "function") return "";
+    const routed = Array.isArray(link.routeAnchors) ? link.routeAnchors : [];
+    return routed.map(entry => {
+      const note = this.notes.find(item => item._id === entry?.noteId);
+      const name = note?.system?.label?.trim?.() || note?.name || "";
+      const suffix = name ? ` · ${foundry.utils.escapeHTML(name)}` : "";
+      return `<button type="button" class="jn-link-detach" data-route-note-id="${foundry.utils.escapeHTML(String(entry?.noteId ?? ""))}"
+        title="${t("JN.Route.Detach")}">${t("JN.Route.Detach")}${suffix}</button>`;
+    }).join("");
   }
 
   /** GM-only toolbar buttons: hide a shared link, reveal a hidden one, mark a shared link as a hint. */
@@ -1784,7 +2172,7 @@ export default class JournalCanvas {
         this.callbacks.onEditCardImage?.(camera.closest(".jn-card").dataset.id);
         return;
       }
-      if (ev.button !== 0 || ev.target.closest(`.jn-context-menu, .jn-link-toolbar, ${PATCH_NOTES_SELECTOR}, input, textarea`)) return;
+      if (ev.button !== 0 || ev.target.closest(`.jn-context-menu, .jn-link-toolbar, .jn-route-chooser, ${PATCH_NOTES_SELECTOR}, input, textarea`)) return;
       if (ev.altKey && !this.linkPlacement) this.toggleLinkTool();
       if (!this.linkPlacement) return;
       ev.preventDefault();
@@ -1805,6 +2193,12 @@ export default class JournalCanvas {
 
     this.root.addEventListener("keydown", ev => {
       if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
+      if (ev.key === "Escape" && this.routeChooser) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.#closeRouteChooser({ restoreFocus: true });
+        return;
+      }
       if (ev.key === "Escape" && this.selectedLinkId) {
         ev.preventDefault();
         ev.stopPropagation();
@@ -1826,6 +2220,7 @@ export default class JournalCanvas {
 
     this.root.addEventListener("wheel", ev => {
       if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
+      if (ev.target.closest(".jn-route-chooser")) return;
       if (ev.target.closest(".jn-card input, .jn-card textarea") && !ev.ctrlKey) return;
       ev.preventDefault();
       this.#closeContextMenu();
@@ -1834,6 +2229,7 @@ export default class JournalCanvas {
 
     this.root.addEventListener("pointerdown", ev => {
       if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
+      if (ev.target.closest(".jn-route-chooser")) return;
       if (ev.target.closest(".jn-card-image-button")) return;
       if (!this.linkPlacement && !ev.altKey
           && ev.target.closest(".jn-card-block a[href], .jn-card-block input[type=\"checkbox\"]")) return;
@@ -1848,6 +2244,7 @@ export default class JournalCanvas {
       if (ev.button === 0) ev.preventDefault();
       this.root.focus({ preventScroll: true });
       this.#closeContextMenu();
+      this.#clearRouteDrop();
       if (ev.button === 2) {
         this.cancelLinkTool();
         lastBoardClick = null;
@@ -1991,6 +2388,7 @@ export default class JournalCanvas {
         // This redraw is deliberately local-only. The GM write is sent after pointerup, so
         // other clients see one final movement while the dragging client gets a fluid preview.
         this.#queueLinkDraw();
+        this.#updateRouteDropTarget(drag, ev);
       } else if (drag.type === "label") {
         if (drag.readOnly) return;
         const el = this.labelEls.get(drag.id);
@@ -2100,6 +2498,22 @@ export default class JournalCanvas {
             const el = this.cardEls.get(id);
             this.callbacks.onMoveCard(id, parseFloat(el.style.left), parseFloat(el.style.top));
           }
+          // The note move is committed exactly as before. Only after that does an explicit
+          // drop chooser appear; without a confirmed choice, route topology is never touched.
+          // A cancelled pointer (pointercancel/lost capture) must drop the route highlight and
+          // preview instead of leaving a stale target behind.
+          if (ev.type === "pointerup") {
+            this.#updateRouteDropTarget(drag, ev);
+            if (this.routeDrop && drag.ids.length === 1
+                && typeof this.callbacks.onRouteNoteOnLink === "function") {
+              this.#openRouteChooser({
+                linkId: this.routeDrop.linkId, noteId: drag.id,
+                clientX: ev.clientX, clientY: ev.clientY
+              });
+            }
+          } else {
+            this.#clearRouteDrop();
+          }
         }
       } else if (drag.type === "resize" && !wasClick) {
         const el = this.cardEls.get(drag.id);
@@ -2176,6 +2590,7 @@ export default class JournalCanvas {
           } else lastBoardClick = { at: now, x: ev.clientX, y: ev.clientY };
         } else lastBoardClick = null;
       }
+      if (ev.type !== "pointerup") this.#clearRouteDrop();
       drag = null;
     };
     this.root.addEventListener("pointerup", finishDrag);

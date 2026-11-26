@@ -157,3 +157,17 @@ Delivered:
 - Tests: **320 pass / 0 fail**; syntax pass. Browser probes confirm pin geometry/hit areas at k=0.5/2, six styles, snapping, pin-off rendering.
 
 Known limitations: pin undo is active-GM in-memory (lost on reload/failover, cap 20, stale refused); private main-pin disable with links is shared-canvas-only and the control is qualified; legacy hidden/declassified links have anchor/route fields cleared by design.
+
+### Phase 6 — route notes on threads (A/B)
+
+Implementation agents: `ses_de6ff0656ffeWm1bKi4PoHecjl` (data), `ses_de6ff0656ffdTJ0N4ZFElW3L30` (canvas/drop UI); fixes `ses_de6e3f977ffem26yDsEoTOK2l6`.
+Validation: `ses_de6f203c2ffeqSovIYEK6Mo6Fp`.
+
+Delivered:
+- Route A: drop a note on a thread, choose "Route through note"; inserts a stable `{noteId, anchorId:"main"}` waypoint with original link ID/endpoints/semantics/cosmetics/label unchanged. Path order is source → board pins → route waypoints → target; follows note move/rotate/resize. Main-only; pin-off rejected server/UI; capacity cap 24 with disabled reason.
+- Route B: explicit split into A→C and C→B, atomic via `updateDocuments` on real Foundry (fallback documented), copies material/style, label on first only, hint policy, no dangling pins. Typed links, pinned/routed links, and duplicate A→C/C→B relationships are rejected with localized reasons. Board pins can be cleared from the link toolbar.
+- Drop UX: drag/drop proximity detection, target highlight, screen-space mode chooser with disabled reasons, focus trap/Escape/outside/cancel, no pan snap, no optimistic success toast (ack-driven only).
+- Undo: one chronological client history (delete/pin/route) with newest-first Ctrl+Z; route A insert, split, and detach record exact raw before-state on the active GM (in-memory, cap 20, stale refused) and ack before history/toast.
+- Deleting/soft-deleting a routed note removes only its waypoints from all links (including trashed owners); links survive, restore does not reattach. Delete thread leaves note. Detach action/undo exposed.
+- Server rejection notices for cap/duplicate/stale/pin-off/typed/missing; stale route entries pruned-and-continue; secret/hidden routing rejected; final leak dump remains last.
+- Tests: **347 pass / 0 fail**; syntax pass; 19+ new route tests. Ongoing limitation: session-local active-GM undo, split crash window on fake-Foundry fallback only.
