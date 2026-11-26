@@ -63,6 +63,13 @@
   "JN.Stamp.sword-shield": "Sword and shield",
   "JN.Title": "Journalinator",
   "JN.Scene.Open": "Open Journalinator",
+  "JN.PatchNotes.Button": "Patch notes",
+  "JN.PatchNotes.Title": "Patch notes",
+  "JN.PatchNotes.Close": "Close patch notes",
+  "JN.PatchNotes.Versions": "Versions",
+  "JN.PatchNotes.Unreleased": "Unreleased",
+  "JN.PatchNotes.Loading": "Loading patch notes…",
+  "JN.PatchNotes.Unavailable": "Patch notes could not be loaded.",
 
   "JN.Common.OK": "OK",
   "JN.Common.Cancel": "Cancel",

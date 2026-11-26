@@ -46,6 +46,7 @@ const { default: NoteEditor } = await import(`${JN}/scripts/app/editor.mjs`);
 const { default: JournalCanvas } = await import(`${JN}/scripts/app/canvas.mjs`);
 const { default: JournalApp, isTextEntryTarget } = await import(`${JN}/scripts/app/journal-app.mjs`);
 const { default: PrivateWorkspace } = await import(`${JN}/scripts/app/private-workspace.mjs`);
+const { parsePatchNotes } = await import(`${JN}/scripts/app/patch-notes.mjs`);
 const { applyTheme, getTheme } = await import(`${JN}/scripts/styles/themes.mjs`);
 const { getLock } = await import(`${JN}/scripts/locks.mjs`);
 registerSocket();
@@ -911,6 +912,49 @@ test("link groups carry color slots and state classes without inline paint", asy
   }
 });
 
+test("patch notes open on the canvas with foldable version groups", async () => {
+  const canvas = new JournalCanvas({ onSelectNote() {} });
+  document.body.appendChild(canvas.root);
+  const panel = canvas.patchNotes;
+  panel.load = async () => parsePatchNotes(`# Notes
+
+## Unreleased — Newest dev note
+
+- Newest bullet.
+
+## 0.8.4 — Keep the note type
+
+- Copy and paste keeps the type.
+
+## 0.8.0 — Private canvases
+
+- Private notes and trash.
+`);
+  try {
+    assert.ok(panel);
+    assert.equal(panel.root.hidden, true);
+    panel.button.click();
+    await settle();
+    assert.equal(panel.root.hidden, false);
+    assert.equal(panel.selectedId, "unreleased");
+    assert.match(panel.reader.textContent, /Newest bullet/);
+    const group = panel.root.querySelector('details.jn-patch-series[data-series="0.8"]');
+    assert.ok(group, "0.8 is a foldable series");
+    assert.equal(group.open, true, "the latest series starts open");
+
+    panel.root.querySelector('[data-version-id="v0.8.0"]').click();
+    assert.equal(panel.selectedId, "v0.8.0");
+    assert.match(panel.reader.textContent, /Private notes and trash/);
+    assert.equal(panel.root.querySelectorAll(".jn-patch-version.on").length, 1);
+
+    panel.root.querySelector(".jn-patch-notes-close").click();
+    assert.equal(panel.root.hidden, true);
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
 test("offline mode disables write controls and says the board is read-only", async () => {
   gmUser.active = false;
   const app = new JournalApp();
@@ -1033,6 +1077,7 @@ test("private canvas is separate and copies notes through the clipboard", async 
     assert.ok(host.querySelector(".journalinator-private-new"));
     assert.ok(host.querySelector(".journalinator-private-add-label"));
     assert.ok(host.querySelector(".journalinator-private-add-link"));
+    assert.ok(host.querySelector(".jn-patch-notes-button"), "patch notes are available on the private canvas");
 
     host.querySelector(".journalinator-private-new").click();
     await settle();

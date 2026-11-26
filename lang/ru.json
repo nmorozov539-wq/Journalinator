@@ -63,6 +63,13 @@
   "JN.Stamp.sword-shield": "Меч и щит",
   "JN.Title": "Journalinator",
   "JN.Scene.Open": "Открыть Journalinator",
+  "JN.PatchNotes.Button": "Изменения",
+  "JN.PatchNotes.Title": "Список изменений",
+  "JN.PatchNotes.Close": "Закрыть список изменений",
+  "JN.PatchNotes.Versions": "Версии",
+  "JN.PatchNotes.Unreleased": "В разработке",
+  "JN.PatchNotes.Loading": "Загрузка списка изменений…",
+  "JN.PatchNotes.Unavailable": "Не удалось загрузить список изменений.",
 
   "JN.Common.OK": "ОК",
   "JN.Common.Cancel": "Отмена",

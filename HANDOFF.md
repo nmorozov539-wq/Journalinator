@@ -17,6 +17,7 @@ the bugs found during review, and the GM-side design.
 | Page data models | `scripts/data/*.mjs` |
 | Fullscreen app shell, top bar, switcher, trash, stats UI | `scripts/app/journal-app.mjs` |
 | Canvas, cards, labels, links, pan/zoom | `scripts/app/canvas.mjs` |
+| Development patch-notes overlay | `scripts/app/patch-notes.mjs` |
 | Block editor, locks, split/merge, drafts | `scripts/app/editor.mjs` |
 | Private canvas, editor, clipboard flow | `scripts/app/private-workspace.mjs`, `scripts/app/private-editor.mjs` |
 | Private workspace store and GM admin | `scripts/store/private-store.mjs`, `scripts/app/private-admin.mjs` |

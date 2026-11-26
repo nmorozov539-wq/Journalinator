@@ -1622,6 +1622,162 @@ input.jn-task-checkbox:disabled { cursor: default; }
   stroke: var(--jn-link-pin-stroke);
   stroke-width: 1px;
 }
+/* --- Patch notes (development aid) --------------------------------------------------------- */
+.jn-patch-notes-button {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  z-index: 7;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--jn-line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--jn-panel) 92%, transparent);
+  color: var(--jn-muted);
+  font: 600 11px/1 var(--jn-ui-font);
+  cursor: pointer;
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--jn-shadow) 32%, transparent);
+  backdrop-filter: blur(3px);
+}
+.jn-patch-notes-button i { color: var(--jn-acc); }
+.jn-patch-notes-button:hover,
+.jn-patch-notes-button:focus-visible {
+  color: var(--jn-text);
+  border-color: var(--jn-acc);
+  outline: none;
+}
+.jn-patch-notes {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: color-mix(in srgb, var(--jn-shadow) 55%, transparent);
+}
+.jn-patch-notes[hidden] { display: none; }
+.jn-patch-notes-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(860px, 100%);
+  height: min(720px, 100%);
+  overflow: hidden;
+  background: var(--jn-panel);
+  color: var(--jn-text);
+  border: 1px solid var(--jn-line);
+  border-radius: 12px;
+  box-shadow: 0 18px 50px color-mix(in srgb, var(--jn-shadow) 62%, transparent);
+}
+.jn-patch-notes-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--jn-line);
+}
+.jn-patch-notes-header h2 {
+  margin: 0;
+  font-size: 16px;
+  letter-spacing: .03em;
+}
+.jn-patch-notes-close {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--jn-line);
+  border-radius: 6px;
+  background: var(--jn-bg);
+  color: var(--jn-text);
+  cursor: pointer;
+}
+.jn-patch-notes-close:hover { border-color: var(--jn-acc); color: var(--jn-acc); }
+.jn-patch-notes-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(140px, 210px) 1fr;
+}
+.jn-patch-notes-nav {
+  overflow: auto;
+  padding: 8px;
+  border-right: 1px solid var(--jn-line);
+}
+.jn-patch-series { margin: 0 0 4px; }
+.jn-patch-series > summary {
+  padding: 6px 8px;
+  color: var(--jn-muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.jn-patch-series > summary:hover { color: var(--jn-text); }
+.jn-patch-series-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 0 4px 4px;
+}
+.jn-patch-version {
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--jn-muted);
+  font: 12px/1.2 var(--jn-ui-font);
+  text-align: left;
+  cursor: pointer;
+}
+.jn-patch-version:hover {
+  color: var(--jn-text);
+  background: color-mix(in srgb, var(--jn-text) 7%, transparent);
+}
+.jn-patch-version.on {
+  color: var(--jn-on-accent);
+  background: var(--jn-acc);
+}
+.jn-patch-notes-reader {
+  overflow: auto;
+  padding: 16px 22px 24px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.jn-patch-notes-reader h3 {
+  margin: 0 0 14px;
+  font-size: 18px;
+  line-height: 1.25;
+}
+.jn-patch-notes-markdown > :first-child { margin-top: 0; }
+.jn-patch-notes-markdown ul { margin: 0 0 12px; padding-left: 18px; }
+.jn-patch-notes-markdown li { margin: 0 0 7px; }
+.jn-patch-notes-markdown p { margin: 0 0 10px; }
+.jn-patch-notes-markdown code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--jn-bg);
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+.jn-patch-notes-markdown a { color: var(--jn-acc); }
+.jn-patch-notes-status,
+.jn-patch-notes-error { margin: 0; color: var(--jn-muted); }
+.jn-patch-notes-error { color: var(--jn-danger-text); }
+
+@media (max-width: 620px) {
+  .jn-patch-notes-body {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(90px, 28%) 1fr;
+  }
+  .jn-patch-notes-nav {
+    border-right: 0;
+    border-bottom: 1px solid var(--jn-line);
+  }
+}
+
 .jn-link-color-default .jn-thread { stroke: var(--jn-thread); }
 .jn-link-color-link1 .jn-thread { stroke: var(--jn-link-1); }
 .jn-link-color-link2 .jn-thread { stroke: var(--jn-link-2); }

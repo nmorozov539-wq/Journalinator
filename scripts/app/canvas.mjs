@@ -4,6 +4,7 @@ import {
 } from "../card-ports.mjs";
 import { arrowHead, pinnedThreadPath, ThreadMotion } from "../link-thread.mjs";
 import { LINK_COLOR_SLOTS, normalizeLinkColor } from "../link-colors.mjs";
+import PatchNotesPanel from "./patch-notes.mjs";
 import { noteImageSource } from "../image-url.mjs";
 import { hasAnyLock } from "../locks.mjs";
 import { renderMarkdown } from "../markdown.mjs";
@@ -14,6 +15,7 @@ const DRAG_THRESHOLD = 5;
 let threadMaskSequence = 0;
 const LINK_COLOR_OPTIONS = ["", ...LINK_COLOR_SLOTS];
 const LINK_DIRECTIONS = new Set(["none", "one", "two"]);
+const PATCH_NOTES_SELECTOR = ".jn-patch-notes, .jn-patch-notes-button";
 
 /**
  * The note canvas: pan/zoom viewport, absolutely-positioned cards, free text labels, and now
@@ -78,6 +80,8 @@ export default class JournalCanvas {
     this.contextMenu = this.root.querySelector(".jn-context-menu");
     this.linkToolbar = this.root.querySelector(".jn-link-toolbar");
     this.linkPlacementHint = this.root.querySelector(".jn-link-placement-hint");
+    this.patchNotes = new PatchNotesPanel();
+    this.patchNotes.appendTo(this.root);
 
     this.#bindPointerEvents();
   }
@@ -974,7 +978,7 @@ export default class JournalCanvas {
         this.callbacks.onEditCardImage?.(camera.closest(".jn-card").dataset.id);
         return;
       }
-      if (ev.button !== 0 || ev.target.closest(".jn-context-menu, .jn-link-toolbar, input, textarea")) return;
+      if (ev.button !== 0 || ev.target.closest(`.jn-context-menu, .jn-link-toolbar, ${PATCH_NOTES_SELECTOR}, input, textarea`)) return;
       if (ev.altKey && !this.linkPlacement) this.toggleLinkTool();
       if (!this.linkPlacement) return;
       ev.preventDefault();
@@ -994,6 +998,7 @@ export default class JournalCanvas {
     });
 
     this.root.addEventListener("keydown", ev => {
+      if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
       if (ev.key === "Escape" && this.linkPlacement) {
         ev.preventDefault();
         ev.stopPropagation();
@@ -1008,6 +1013,7 @@ export default class JournalCanvas {
     });
 
     this.root.addEventListener("wheel", ev => {
+      if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
       if (ev.target.closest(".jn-card input, .jn-card textarea") && !ev.ctrlKey) return;
       ev.preventDefault();
       this.#closeContextMenu();
@@ -1015,6 +1021,7 @@ export default class JournalCanvas {
     }, { passive: false });
 
     this.root.addEventListener("pointerdown", ev => {
+      if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
       if (ev.target.closest(".jn-card-image-button")) return;
       if (!this.linkPlacement && !ev.altKey
           && ev.target.closest(".jn-card-block a[href], .jn-card-block input[type=\"checkbox\"]")) return;
@@ -1302,6 +1309,10 @@ export default class JournalCanvas {
     this.root.addEventListener("pointerup", finishDrag);
     this.root.addEventListener("pointercancel", finishDrag);
     this.root.addEventListener("contextmenu", ev => {
+      if (ev.target.closest(PATCH_NOTES_SELECTOR)) {
+        ev.preventDefault();
+        return;
+      }
       if (ev.target.closest(".jn-card input, .jn-card textarea")) return;
       ev.preventDefault();
       ev.stopPropagation();
@@ -1316,6 +1327,7 @@ export default class JournalCanvas {
     });
 
     this.root.addEventListener("dblclick", ev => {
+      if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
       if (ev.target.closest("[data-stamp-label-id], .jn-label")) return;
       if (ev.target.closest(".jn-card-resize")) {
         if (this.readOnly) return this.#warnReadOnly();

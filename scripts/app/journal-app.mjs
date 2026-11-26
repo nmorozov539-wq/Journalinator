@@ -264,6 +264,9 @@ export default class JournalApp extends ApplicationV2 {
     })]);
 
     this.#onGlobalKeydown = ev => {
+      // The patch-notes dialog is a read-only overlay: do not let canvas shortcuts (copy,
+      // paste, Backspace, undo) fire while it has focus.
+      if (ev.target.closest?.(".jn-patch-notes, .jn-patch-notes-button")) return;
       if ((ev.ctrlKey || ev.metaKey) && ev.key === "k") {
         ev.preventDefault();
         const input = this.element.querySelector(".journalinator-search");

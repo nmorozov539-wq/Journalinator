@@ -2,7 +2,7 @@
 
 These notes start with the small board and toolbar polish patches and cover the follow-up fixes and features.
 
-## Unreleased — Themes and note images
+## Unreleased — Themes, images, and link styling
 
 - Themes are now data, not a two-value switch: a theme controls the board background (colour,
   dots/grid pattern, size, opacity, vignette, local image), every note type's surface, edge,
@@ -20,6 +20,13 @@ These notes start with the small board and toolbar polish patches and cover the 
   scene-tuned role picker, automatic dark/light mode, contrast-corrected text, and semantic
   GM/hint/danger colours preserved. It follows the active scene and falls back to Classic when
   the image is unreadable.
+- Link colors are theme slots now. Classic keeps its old three colors; other themes pick their
+  own, and **From scene** derives three link colors from the map.
+- Selected links get a soft ring, a thicker line, and larger pins and arrowheads.
+- Link labels and pins follow the board color, so custom boards no longer show bright patches.
+- Link pins, arrows, and labels keep a steadier size while zooming.
+- A **Patch notes** button in the bottom-left corner of the canvas opens this changelog. Versions
+  are grouped into foldable series and shown one at a time.
 
 ## 0.8.4 — Keep the note type when copying
 
