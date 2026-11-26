@@ -1,7 +1,13 @@
 import { getContainerIds } from "./store/containers.mjs";
 import { privateStore } from "./store/private-store.mjs";
 import { CARD_STYLES, seedTilt } from "./styles/registry.mjs";
-import { cardPorts, linkAnchors, moveThreadPin, validCardPorts } from "./card-ports.mjs";
+import {
+  CARD_SIDES, cardPointAnchor, cardPorts, linkAnchors, moveThreadPin, validCardPorts, validLinkPoint
+} from "./card-ports.mjs";
+import {
+  MAIN_ANCHOR_ID, anchorSide, anchorWorld, canonicalizeMainAnchors, collectAnchorRefs,
+  defaultMainAnchor, pruneAnchorRegistry, projectToEdge, redistributionAnchor, validAnchorId
+} from "./anchors.mjs";
 import { isLinkColor, normalizeLinkColor } from "./link-colors.mjs";
 import { noteImagePath } from "./image-url.mjs";
 import { reconcileTypedLinks } from "./wikilinks.mjs";
@@ -16,8 +22,8 @@ import { attachedStampIds, DEFAULT_STAMP_CORNER, isStampCorner, stampUrl } from 
 import { normalizeActorRef } from "./actor-status.mjs";
 import {
   LINK_ENDS, LINK_MATERIALS, LINK_PATTERNS, LINK_SLACK, LINK_THICKNESS,
-  MAIN_PIN, NOTE_FONT_KEYS, PICTURE_LAYOUTS, PIN_STYLES, PRESENTATION_STYLES,
-  defaultLinkCosmetics, isGeneratedTitle, legacyPresentation, legacyStylePresentation,
+  MAIN_PIN, MAX_CARD_ANCHORS, NOTE_FONT_KEYS, PICTURE_LAYOUTS, PIN_STYLES, PRESENTATION_STYLES,
+  classifyNote, defaultLinkCosmetics, isGeneratedTitle, legacyPresentation, legacyStylePresentation,
   resolveAttachment, resolvePresentation, sanitizeCardAnchors, stripSecretPrefix
 } from "./presentation.mjs";
 
@@ -45,9 +51,9 @@ const PIN_STYLE_SET = new Set(PIN_STYLES);
 const PRESENTATION_KEYS = new Set([
   "extendedStyle", "forceExtended", "font", "pictureLayout", "torn", "heading", "nameGenerated"
 ]);
-const ATTACHMENT_KEYS = new Set([
-  "mainPinEnabled", "mainSnapRadius", "minorSnapRadius", "pinStyle"
-]);
+// `mainPinEnabled` is deliberately absent: the generic attachment batch path must never bypass
+// destructive main-pin redistribution. Shared enabling/disabling goes through setMainPinEnabled.
+const ATTACHMENT_KEYS = new Set(["mainSnapRadius", "minorSnapRadius", "pinStyle"]);
 const DOCUMENT_ID_RE = /^[a-zA-Z0-9]{16}$/;
 const MAX_DECLASSIFIED_BLOCKS = 500;
 const MAX_DECLASSIFIED_LINKS = 200;
@@ -56,6 +62,28 @@ const MAX_ANCHOR_ID_LENGTH = 100;
 const MAX_ROUTE_ANCHORS = 24;
 const MAX_HEADING_LENGTH = 80;
 const MAX_FORMER_NAMES = 20;
+const PIN_UNDO_LIMIT = 20;
+const PIN_REDISTRIBUTION_SNAP = 12;
+
+/**
+ * In-memory, per-active-GM undo register for one atomic main-pin redistribution.
+ *
+ * Phase 5 limitation: undo is active-GM state only, in-memory, capped at PIN_UNDO_LIMIT and lost
+ * on failover/reload. Each entry stores post-operation fingerprints; an undo whose affected
+ * links/attachments/anchors changed afterwards is refused (JN.Pin.UndoStale) instead of
+ * clobbering newer edits.
+ */
+const pinUndoEntries = new Map();
+
+function pinsEnabled() {
+  return game.settings.get(MODULE_ID, "pinsEnabled") !== false;
+}
+
+function deepClone(value) {
+  return typeof foundry.utils.deepClone === "function"
+    ? foundry.utils.deepClone(value)
+    : structuredClone(value);
+}
 
 function senderIsGM(senderUserId) {
   return !!game.users.get(senderUserId)?.isGM;
@@ -132,13 +160,53 @@ function notifyUser(userId, reason) {
 }
 
 /**
+ * Tells the requesting client that a write actually landed. A client must not push an undo entry
+ * for a request that was rejected or rolled back, otherwise Ctrl+Z would silently consume a stale
+ * operation. The active GM is the only sender of this acknowledgement.
+ */
+function acknowledgeWriteApplied(userId, payload) {
+  if (!userId) return;
+  const message = { type: "writeApplied", forUserId: userId, ...payload };
+  if (userId === game.user.id) {
+    Hooks.callAll("journalinatorWriteApplied", message);
+    return;
+  }
+  game.socket.emit(CHANNEL, message, { recipients: [userId] });
+}
+
+/**
+ * Captures the raw stored attachment, including the difference between absent and `null`.
+ * `_source` is the pre-schema data; `system.attachment` would already have the schema's `{}`
+ * default in a real Foundry document, which is exactly what must not be written back on undo.
+ */
+function rawAttachmentState(notePage) {
+  const system = notePage?._source?.system ?? notePage?.system ?? {};
+  const present = Object.hasOwn(system, "attachment");
+  return {
+    attachment: present ? deepClone(system.attachment) : undefined,
+    attachmentPresent: present
+  };
+}
+
+/** Update payload that restores an attachment exactly, including removing an absent key. */
+function attachmentRestoreChanges(state) {
+  return state.attachmentPresent
+    ? { "system.attachment": deepClone(state.attachment) }
+    : { "system.-=attachment": null };
+}
+
+/**
  * Keeps only the cosmetic/endpoint fields a link editor is allowed to change, with validated
  * values. Colors accept "" (default), the three slot keys, or the three legacy hexes. In every
  * accepted case the stored value is a slot key, so newly written data never carries a hex.
  * Route waypoints are deliberately not here: `updateLink` must not accept client route changes
  * until the phase-6 transactional operation exists.
+ *
+ * `anchorContext` is optional: `{ source, target }` are the anchor registries of the source and
+ * target cards. When supplied (as `updateLink` does), a non-empty anchor id must exist in the
+ * matching registry; `""` clears a reference. An unknown id rejects the whole patch.
  */
-export function sanitizeLinkFields(fields) {
+export function sanitizeLinkFields(fields, anchorContext = null) {
   if (!fields || typeof fields !== "object") return null;
   const clean = {};
   if (typeof fields.label === "string") clean.label = fields.label.slice(0, MAX_LABEL_LENGTH);
@@ -159,13 +227,31 @@ export function sanitizeLinkFields(fields) {
     clean.secondaryColor = isLinkColor(fields.secondaryColor)
       ? normalizeLinkColor(fields.secondaryColor) : "";
   }
-  if (typeof fields.sourceAnchorId === "string") {
-    clean.sourceAnchorId = fields.sourceAnchorId.slice(0, MAX_ANCHOR_ID_LENGTH);
-  }
-  if (typeof fields.targetAnchorId === "string") {
-    clean.targetAnchorId = fields.targetAnchorId.slice(0, MAX_ANCHOR_ID_LENGTH);
+  for (const [key, registry] of [
+    ["sourceAnchorId", anchorContext?.source],
+    ["targetAnchorId", anchorContext?.target]
+  ]) {
+    if (!(key in fields)) continue;
+    const value = fields[key];
+    if (typeof value !== "string") return null;
+    if (value !== "" && !validAnchorId(value)) return null;
+    if (value !== "" && anchorContext && !(registry && Object.hasOwn(registry, value) && registry[value])) {
+      return null;
+    }
+    clean[key] = value;
   }
   return Object.keys(clean).length ? clean : null;
+}
+
+/** True when `id` names an own anchor on the given card registry (main included). */
+function cardHasAnchor(card, id) {
+  return validAnchorId(id) && !!card?.anchors && Object.hasOwn(card.anchors, id)
+    && !!card.anchors[id];
+}
+
+/** Own, validated anchor lookup. Never follows `constructor`/`__proto__` or dotted paths. */
+function cardAnchor(card, id) {
+  return cardHasAnchor(card, id) ? card.anchors[id] : null;
 }
 
 /**
@@ -207,15 +293,15 @@ export function sanitizePresentationFields(fields) {
   return Object.keys(clean).length ? clean : null;
 }
 
-/** Attachment patches use the same reject-unknown rule; radii are clamped to their bounds. */
+/**
+ * Attachment patches use the same reject-unknown rule; radii are clamped to their bounds.
+ * `mainPinEnabled` is rejected here on purpose: it has a destructive, undoable operation of its
+ * own and must not be toggled through the non-transactional generic path.
+ */
 export function sanitizeAttachmentFields(fields) {
   if (!fields || typeof fields !== "object" || Array.isArray(fields)) return null;
   if (Object.keys(fields).some(key => !ATTACHMENT_KEYS.has(key))) return null;
   const clean = {};
-  if ("mainPinEnabled" in fields) {
-    if (typeof fields.mainPinEnabled !== "boolean") return null;
-    clean.mainPinEnabled = fields.mainPinEnabled;
-  }
   if ("mainSnapRadius" in fields) {
     if (!Number.isFinite(fields.mainSnapRadius)) return null;
     clean.mainSnapRadius = Math.min(64, Math.max(0, fields.mainSnapRadius));
@@ -242,8 +328,7 @@ export function sanitizeRouteAnchors(value) {
   for (const entry of value) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
     if (typeof entry.noteId !== "string" || !DOCUMENT_ID_RE.test(entry.noteId)) return null;
-    if (typeof entry.anchorId !== "string" || !entry.anchorId
-        || entry.anchorId.length > MAX_ANCHOR_ID_LENGTH) return null;
+    if (!validAnchorId(entry.anchorId)) return null;
     anchors.push({ noteId: entry.noteId, anchorId: entry.anchorId });
   }
   return anchors;
@@ -268,8 +353,7 @@ export function sanitizeSharedRouteAnchors(shared, value, selfId) {
     if (anchors.length >= MAX_ROUTE_ANCHORS) break;
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
     if (typeof entry.noteId !== "string" || !entry.noteId) continue;
-    if (typeof entry.anchorId !== "string" || !entry.anchorId
-        || entry.anchorId.length > MAX_ANCHOR_ID_LENGTH) continue;
+    if (!validAnchorId(entry.anchorId)) continue;
     if (entry.noteId !== selfId) {
       const page = shared?.pages?.get?.(entry.noteId);
       if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) continue;
@@ -279,12 +363,21 @@ export function sanitizeSharedRouteAnchors(shared, value, selfId) {
   return anchors;
 }
 
+/**
+ * Canonicalizes a copied registry and stamps the main anchor's creator from the trusted note
+ * author/sender. Copied minor anchors may keep their original creator; only the main pin is
+ * derived from the destination context, so a client cannot spoof its colour/identity.
+ */
 function addMainAnchor(anchors, authorId) {
-  if (Object.values(anchors).some(anchor => anchor.kind === "main")) return anchors;
-  return {
-    ...anchors,
-    main: { kind: "main", x: MAIN_PIN.x, y: MAIN_PIN.y, createdBy: authorId ?? "" }
-  };
+  const clean = sanitizeCardAnchors(anchors);
+  clean.main = defaultMainAnchor(typeof authorId === "string" ? authorId : "");
+  if (Object.keys(clean).length > MAX_CARD_ANCHORS) {
+    const overflow = Object.keys(clean).length - MAX_CARD_ANCHORS;
+    for (const id of Object.keys(clean).filter(id => id !== MAIN_ANCHOR_ID).slice(0, overflow)) {
+      delete clean[id];
+    }
+  }
+  return clean;
 }
 
 /** All requested ids must be live shared notes; nothing is written if one is missing/secret. */
@@ -298,6 +391,228 @@ function liveSharedNotePages(shared, noteIds) {
     pages.push(page);
   }
   return pages;
+}
+
+/** Every live shared note page, in deterministic document order. */
+function liveSharedNoteList(shared) {
+  return [...(shared?.pages?.values?.() ?? [])]
+    .filter(page => page.type === `${MODULE_ID}.note` && !page.system.deleted);
+}
+
+/**
+ * Every shared note page, including soft-deleted/trashed ones. Reference *collection* must see
+ * trashed links too: restoring a note brings its links back, so their anchors cannot be pruned.
+ * Layout writes still target live cards only.
+ */
+function allSharedNoteList(shared) {
+  return [...(shared?.pages?.values?.() ?? [])]
+    .filter(page => page.type === `${MODULE_ID}.note`);
+}
+
+function isLiveSharedNotePage(page) {
+  return !!page && page.type === `${MODULE_ID}.note` && !page.system.deleted;
+}
+
+/** Layout card plus sensible compact/extended fallback dimensions for redistribution. */
+function cardBox(note, card) {
+  const compact = classifyNote(note).mode === "compact";
+  const style = resolvePresentation(note).extendedStyle;
+  const defaults = style === "document"
+    ? { w: 248, h: 320 }
+    : style === "target" ? { w: 250, h: 290 } : { w: 360, h: 240 };
+  return {
+    x: Number.isFinite(card?.x) ? card.x : 0,
+    y: Number.isFinite(card?.y) ? card.y : 0,
+    w: Number.isFinite(card?.width) && card.width > 0
+      ? card.width : (compact ? 190 : defaults.w),
+    h: Number.isFinite(card?.height) && card.height > 0
+      ? card.height : (compact ? 90 : defaults.h),
+    rotation: Number.isFinite(card?.rotation) ? card.rotation : 0
+  };
+}
+
+/**
+ * Optional client measurement for projection. Only w/h are accepted; values are clamped so a
+ * hostile payload cannot collapse or explode the redistribution geometry. x/y/rotation are never
+ * taken from the client.
+ */
+export function sanitizeProjectionBox(box) {
+  if (!box || typeof box !== "object" || Array.isArray(box)) return null;
+  if (!Number.isFinite(box.w) || !Number.isFinite(box.h)) return null;
+  return {
+    w: Math.min(2000, Math.max(40, box.w)),
+    h: Math.min(2000, Math.max(40, box.h))
+  };
+}
+
+function freshAnchorId(anchors) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const id = foundry.utils.randomID();
+    if (id !== MAIN_ANCHOR_ID && !Object.hasOwn(anchors ?? {}, id)) return id;
+  }
+  let id = foundry.utils.randomID();
+  while (Object.hasOwn(anchors ?? {}, id)) id += "x";
+  return id.slice(0, MAX_ANCHOR_ID_LENGTH);
+}
+
+/** A new minor pin request must be a strict normalized point. */
+function cleanMinorAnchorSpec(spec) {
+  if (!spec || typeof spec !== "object" || Array.isArray(spec)) return null;
+  if (spec.kind !== undefined && spec.kind !== "minor") return null;
+  if (!Number.isFinite(spec.x) || !Number.isFinite(spec.y)) return null;
+  if (spec.x < 0 || spec.x > 1 || spec.y < 0 || spec.y > 1) return null;
+  return { kind: "minor", x: spec.x, y: spec.y };
+}
+
+/**
+ * Resolves one link endpoint. Returns `undefined` when the message has no endpoint field,
+ * `null` when the request is invalid, or `{ anchorId, anchor, created }`.
+ */
+function planAnchorEndpoint({ card, note, anchorId, spec, senderUserId, allowCreate }) {
+  if (spec !== undefined && spec !== null) {
+    if (typeof anchorId === "string" && anchorId !== "") return null;
+    if (!allowCreate || !card) return null;
+    const clean = cleanMinorAnchorSpec(spec);
+    if (!clean) return null;
+    if (Object.keys(card.anchors ?? {}).length >= MAX_CARD_ANCHORS) return null;
+    return {
+      anchorId: freshAnchorId(card.anchors),
+      anchor: { ...clean, createdBy: senderUserId },
+      created: true
+    };
+  }
+  if (anchorId === undefined || anchorId === null) return undefined;
+  if (typeof anchorId !== "string") return null;
+  if (anchorId === "") return { anchorId: "", anchor: null, created: false };
+  if (!cardHasAnchor(card, anchorId)) return null;
+  // A hidden/disabled main pin is not an endpoint a client may newly choose. Existing links that
+  // already reference it keep rendering through the normal fallback/anchor path.
+  if (anchorId === MAIN_ANCHOR_ID && note && resolveAttachment(note).mainPinEnabled === false) return null;
+  return { anchorId, anchor: cardAnchor(card, anchorId), created: false };
+}
+
+function applyAnchorEndpoint(fields, prefix, plan, box) {
+  if (plan === undefined) return;
+  fields[`${prefix}AnchorId`] = plan.anchorId;
+  if (!plan.anchor) return;
+  fields[`${prefix}Point`] = { x: plan.anchor.x, y: plan.anchor.y };
+  const side = anchorSide(plan.anchor, box);
+  if (side) fields[`${prefix}Side`] = side;
+}
+
+/** Refreshes point/side fallback for an endpoint from its current anchor, when one exists. */
+function applyEndpointFallback(link, prefix, note, card) {
+  const anchor = link[`${prefix}AnchorId`] ? cardAnchor(card, link[`${prefix}AnchorId`]) : null;
+  if (anchor) {
+    link[`${prefix}Point`] = { x: anchor.x, y: anchor.y };
+    const side = anchorSide(anchor, cardBox(note, card));
+    if (side) link[`${prefix}Side`] = side;
+    return;
+  }
+  const point = link[`${prefix}Point`];
+  if (validLinkPoint(point)) link[`${prefix}Point`] = { x: point.x, y: point.y };
+}
+
+/** World point of an endpoint: its anchor, then its stored normalized point, then card centre. */
+function endpointWorld(note, card, link, prefix) {
+  const box = cardBox(note, card);
+  const id = prefix === "source" ? link.sourceAnchorId : link.targetAnchorId;
+  const anchor = id ? cardAnchor(card, id) : null;
+  if (anchor) {
+    const world = anchorWorld(box, anchor);
+    if (world) return world;
+  }
+  const point = prefix === "source" ? link.sourcePoint : link.targetPoint;
+  if (validLinkPoint(point)) {
+    const world = anchorWorld(box, point);
+    if (world) return world;
+  }
+  return { x: box.x + box.w / 2, y: box.y + box.h / 2 };
+}
+
+/**
+ * Reuses a nearby minor pin at the boundary point facing `toward`, else creates a new minor pin
+ * there. The working card's registry is updated in memory so later affected links can reuse it.
+ */
+function chooseRedistributionAnchor(card, box, toward, note, senderUserId) {
+  const edge = projectToEdge(box, toward);
+  if (!edge) return null;
+  const snap = Math.max(PIN_REDISTRIBUTION_SNAP, resolveAttachment(note).minorSnapRadius ?? 0);
+  const boundary = cardPointAnchor(box, edge.point);
+  const pick = redistributionAnchor(box, card.anchors ?? {}, boundary, { zoom: 1, snap });
+  if (!pick) return null;
+  if (pick.anchorId) return { anchorId: pick.anchorId, anchor: pick.anchor };
+  // A full registry must never grow past MAX_CARD_ANCHORS. The link still keeps its projected
+  // point/side fallback, so redistribution loses no link and creates no over-cap anchor.
+  if (Object.keys(card.anchors ?? {}).length >= MAX_CARD_ANCHORS) {
+    return {
+      anchorId: "",
+      anchor: { kind: "minor", x: pick.anchor.x, y: pick.anchor.y, createdBy: senderUserId }
+    };
+  }
+  const anchorId = freshAnchorId(card.anchors);
+  const anchor = { kind: "minor", x: pick.anchor.x, y: pick.anchor.y, createdBy: senderUserId };
+  card.anchors = { ...(card.anchors ?? {}), [anchorId]: anchor };
+  return { anchorId, anchor };
+}
+
+/** Folds legacy/dotted main entries into the single canonical `main` anchor. */
+function ensureCanonicalMainAnchor(anchors, authorId) {
+  return addMainAnchor(anchors, authorId);
+}
+
+function rememberPinUndo(undoId, entry) {
+  pinUndoEntries.delete(undoId);
+  pinUndoEntries.set(undoId, entry);
+  while (pinUndoEntries.size > PIN_UNDO_LIMIT) {
+    pinUndoEntries.delete(pinUndoEntries.keys().next().value);
+  }
+}
+
+/**
+ * Removes unreferenced minor anchors from every live shared card in one layout write. Reference
+ * collection uses *all* shared notes (including trashed ones) because restoring a note brings its
+ * links back; only the layout is updated.
+ */
+async function pruneSharedAnchors(shared, layout = layoutPage(shared)) {
+  if (!layout) return;
+  const notes = allSharedNoteList(shared);
+  // Fold any legacy non-canonical main first and move its links to the canonical id. Otherwise
+  // pruning would remove the referenced main and leave the link dangling on an unknown anchor.
+  const canonical = canonicalizeMainAnchors(layout.system.cards ?? {}, notes);
+  for (const { noteId, links } of canonical.links) {
+    const page = shared.pages.get(noteId);
+    if (page?.type === `${MODULE_ID}.note`) await page.update({ "system.links": links });
+  }
+  const changed = pruneAnchorRegistry(canonical.cards, allSharedNoteList(shared));
+  const updates = {};
+  for (const { noteId, anchors } of canonical.changed) {
+    updates[`system.cards.${noteId}.anchors`] = anchors;
+  }
+  for (const { noteId, anchors } of changed) {
+    updates[`system.cards.${noteId}.anchors`] = anchors;
+  }
+  if (Object.keys(updates).length) await layout.update(updates);
+}
+
+/**
+ * Every shared link (including trashed owners, whose links return on restore) that references
+ * `noteId`'s main anchor as an endpoint or waypoint.
+ */
+function mainPinAffectedLinks(shared, noteId) {
+  const affected = [];
+  for (const sourcePage of allSharedNoteList(shared)) {
+    for (const link of sourcePage.system.links ?? []) {
+      const sourceOnThis = sourcePage.id === noteId && link.sourceAnchorId === MAIN_ANCHOR_ID;
+      const targetOnThis = link.targetId === noteId && link.targetAnchorId === MAIN_ANCHOR_ID;
+      const routeOnThis = (link.routeAnchors ?? [])
+        .some(entry => entry?.noteId === noteId && entry?.anchorId === MAIN_ANCHOR_ID);
+      if (sourceOnThis || targetOnThis || routeOnThis) {
+        affected.push({ sourcePage, link, sourceOnThis, targetOnThis, routeOnThis });
+      }
+    }
+  }
+  return affected;
 }
 
 /** Accepts empty, a hex color, or a simple CSS color name; rejects anything else. */
@@ -344,6 +659,14 @@ export function registerSocket() {
     if (message.type === "writeRejected") {
       if (senderUserId !== game.users.activeGM?.id) return;
       if (message.forUserId === game.user.id) ui.notifications?.warn(message.reason);
+      return;
+    }
+    if (message.type === "writeApplied") {
+      // Only the active GM may confirm a write, and only to the requester it names. The local
+      // client uses this to commit undo entries; a rejected/rolled-back write sends no such ack.
+      if (senderUserId !== game.users.activeGM?.id) return;
+      if (message.forUserId && message.forUserId !== game.user.id) return;
+      Hooks.callAll("journalinatorWriteApplied", message);
       return;
     }
     if (!game.user.isGM) return;
@@ -552,15 +875,20 @@ function cleanDeclassifiedNote(shared, message) {
     const preservedId = typeof link.id === "string" && DOCUMENT_ID_RE.test(link.id)
       && !existingLinkIds.has(link.id) ? link.id : foundry.utils.randomID();
     existingLinkIds.add(preservedId);
-    const routeAnchors = sanitizeSharedRouteAnchors(shared, link.routeAnchors, message.noteId);
+    const fields = { ...(sanitizeLinkFields(link) ?? {}) };
+    // A declassified payload may originate from legacy vault data. Shared anchor ids and route
+    // waypoints cannot be trusted there (shared pruning is vault-blind), so publish only the
+    // validated point/side fallback.
+    fields.sourceAnchorId = "";
+    fields.targetAnchorId = "";
     links.push({
       id: preservedId,
       targetId: link.targetId,
       label: "", direction: "one", color: "", lineStyle: "solid",
       ...defaultLinkCosmetics(),
-      ...sanitizeLinkFields(link),
+      ...fields,
       ...linkAnchors(link),
-      routeAnchors,
+      routeAnchors: [],
       origin: "drawn",
       edited: link.edited === true,
       createdBy: "",
@@ -661,16 +989,15 @@ async function handleMessage(message, senderUserId) {
         "system.updatedAt": Date.now(),
         ...(targetHeading ? { "system.targetHeading": targetHeading } : {})
       });
-      // A future clipboard may carry the source card's anchor registry; keep it rather than
-      // silently replacing every pasted card with only the generated main anchor.
-      const pastedAnchors = sanitizeCardAnchors(message.card?.anchors ?? message.anchors);
-      if (Object.keys(pastedAnchors).length) {
-        const layout = layoutPage(shared);
-        if (layout) {
-          await layout.update({
-            [`system.cards.${page.id}.anchors`]: addMainAnchor(pastedAnchors, senderUserId)
-          });
-        }
+      // A future clipboard may carry the source card's anchor registry. Sanitize it, fold any
+      // legacy/non-canonical main into `main`, and stamp the main creator from the sender rather
+      // than trusting the pasted value. Copied minors may keep their original creator.
+      const pastedAnchors = addMainAnchor(message.card?.anchors ?? message.anchors, senderUserId);
+      const layout = layoutPage(shared);
+      if (layout) {
+        await layout.update({
+          [`system.cards.${page.id}.anchors`]: pastedAnchors
+        });
       }
       return;
     }
@@ -1054,63 +1381,445 @@ async function handleMessage(message, senderUserId) {
       return;
     }
 
+    case "addCardAnchor": {
+      const page = shared.pages.get(message.noteId);
+      if (!isLiveSharedNotePage(page) || message.kind !== "minor" || !pinsEnabled()) return;
+      if (!Number.isFinite(message.x) || !Number.isFinite(message.y)) return;
+      if (message.x < 0 || message.x > 1 || message.y < 0 || message.y > 1) return;
+      const layout = layoutPage(shared);
+      const card = layout?.system.cards?.[page.id];
+      if (!card) return;
+      const anchors = { ...(card.anchors ?? {}) };
+      if (Object.keys(anchors).length >= MAX_CARD_ANCHORS) return;
+      const anchorId = freshAnchorId(anchors);
+      anchors[anchorId] = { kind: "minor", x: message.x, y: message.y, createdBy: senderUserId };
+      await layout.update({ [`system.cards.${page.id}.anchors`]: anchors });
+      return;
+    }
+
+    case "moveCardAnchor": {
+      if (!pinsEnabled()) return;
+      const page = shared.pages.get(message.noteId);
+      if (!isLiveSharedNotePage(page) || !validAnchorId(message.anchorId)) return;
+      if (!Number.isFinite(message.x) || !Number.isFinite(message.y)) return;
+      if (message.x < 0 || message.x > 1 || message.y < 0 || message.y > 1) return;
+      const layout = layoutPage(shared);
+      const card = layout?.system.cards?.[page.id];
+      const anchor = cardAnchor(card, message.anchorId);
+      if (!anchor || anchor.kind !== "minor") return; // main pins move the note, not an anchor
+      // Clone the registry and rewrite it whole. A client id never becomes a dotted update path
+      // (which could otherwise reach `__proto__`/`constructor` or unrelated keys).
+      const moved = { ...anchor, x: message.x, y: message.y };
+      const anchors = { ...(card.anchors ?? {}), [message.anchorId]: moved };
+      const box = cardBox(page, card);
+      const side = anchorSide(moved, box);
+      // Links keep a normalized point/side fallback for hidden/legacy rendering. Refresh every
+      // shared reference (trashed owners included) in this same serialized write so a later
+      // hide/reveal still draws the thread at its new position.
+      const pageUpdates = new Map();
+      for (const notePage of allSharedNoteList(shared)) {
+        let touched = false;
+        const links = (notePage.system.links ?? []).map(link => {
+          let next = link;
+          if (notePage.id === page.id && link.sourceAnchorId === message.anchorId) {
+            next = { ...next, sourcePoint: { x: moved.x, y: moved.y } };
+            if (side) next.sourceSide = side;
+          }
+          if (link.targetId === page.id && link.targetAnchorId === message.anchorId) {
+            next = { ...(next === link ? link : next), targetPoint: { x: moved.x, y: moved.y } };
+            if (side) next.targetSide = side;
+          }
+          if (next !== link) touched = true;
+          return next;
+        });
+        if (touched) pageUpdates.set(notePage.id, links);
+      }
+      await layout.update({ [`system.cards.${page.id}.anchors`]: anchors });
+      for (const [noteId, links] of pageUpdates) {
+        await shared.pages.get(noteId)?.update({ "system.links": links });
+      }
+      return;
+    }
+
+    case "removeCardAnchor": {
+      if (!pinsEnabled()) return;
+      const page = shared.pages.get(message.noteId);
+      if (!isLiveSharedNotePage(page) || !validAnchorId(message.anchorId)) return;
+      const layout = layoutPage(shared);
+      const card = layout?.system.cards?.[page.id];
+      const anchor = cardAnchor(card, message.anchorId);
+      if (!anchor || anchor.kind !== "minor") return;
+      // Shared pruning cannot see vault links; hidden links are therefore forced to drop anchor
+      // references when stored. Count every shared reference (trashed notes included, since a
+      // restore brings their links back) before deleting a shared pin.
+      const refs = collectAnchorRefs(allSharedNoteList(shared));
+      if (refs.get(page.id)?.has(message.anchorId)) return;
+      const anchors = { ...(card.anchors ?? {}) };
+      delete anchors[message.anchorId];
+      await layout.update({ [`system.cards.${page.id}.anchors`]: anchors });
+      return;
+    }
+
+    case "setMainPinEnabled": {
+      if (!pinsEnabled()) return;
+      const page = shared.pages.get(message.noteId);
+      if (!isLiveSharedNotePage(page)) return;
+      if (typeof message.enabled !== "boolean") return;
+      const layout = layoutPage(shared);
+      const originalCard = layout?.system.cards?.[page.id];
+      if (!layout || !originalCard) return;
+      const storedAttachment = page.system.attachment && typeof page.system.attachment === "object"
+        ? deepClone(page.system.attachment) : {};
+      const currentlyEnabled = resolveAttachment(page).mainPinEnabled !== false;
+      const undoId = typeof message.undoId === "string" && message.undoId
+        && message.undoId.length <= MAX_ANCHOR_ID_LENGTH
+        ? message.undoId : foundry.utils.randomID();
+
+      if (message.enabled) {
+        const hasMain = originalCard.anchors?.main?.kind === "main";
+        if (currentlyEnabled && hasMain) return; // already in the requested state
+        const anchors = ensureCanonicalMainAnchor(originalCard.anchors, page.system.authorId ?? senderUserId);
+        const nextAttachment = { ...storedAttachment, mainPinEnabled: true };
+        try {
+          if (JSON.stringify(anchors) !== JSON.stringify(originalCard.anchors ?? {})) {
+            await layout.update({ [`system.cards.${page.id}.anchors`]: anchors });
+          }
+          if (!currentlyEnabled || page.system.attachment?.mainPinEnabled !== true) {
+            await page.update({ "system.attachment": nextAttachment });
+          }
+        } catch (err) {
+          await layout.update({
+            [`system.cards.${page.id}.anchors`]: originalCard.anchors ?? {}
+          }).catch(() => {});
+          await page.update({ "system.attachment": storedAttachment }).catch(() => {});
+          console.error("Journalinator: enabling the main pin failed", err);
+        }
+        return;
+      }
+
+      // Disabling is destructive for endpoint references: redistribute them atomically.
+      const affected = mainPinAffectedLinks(shared, page.id);
+      if (!currentlyEnabled && affected.length === 0) return; // already in the requested state
+      const originalCards = layout.system.cards ?? {};
+      // Validate every affected page/card before generating or writing anything. A trashed source
+      // has no live layout card (delete stores it under `system.deleted.lastCard`); its links must
+      // still be redistributed so restoring the note cannot reattach them to a disabled main.
+      for (const item of affected) {
+        if (!item.sourcePage.system.deleted && !originalCards[item.sourcePage.id]) return;
+        if (item.sourceOnThis) {
+          const targetPage = shared.pages.get(item.link.targetId);
+          if (!isLiveSharedNotePage(targetPage) || !originalCards[targetPage.id]) return;
+        }
+      }
+
+      const workingCards = deepClone(originalCards);
+      const hubCard = workingCards[page.id];
+      const hubBox = cardBox(page, hubCard);
+      // The requesting canvas may know the real measured card size better than the stored card
+      // (auto-sized compact/extended cards often have no width/height). Trust only w/h, clamp
+      // them, and keep x/y/rotation server-authoritative.
+      const clientBox = sanitizeProjectionBox(message.box);
+      if (clientBox) {
+        hubBox.w = clientBox.w;
+        hubBox.h = clientBox.h;
+      }
+      const pageUpdates = new Map();
+      for (const item of affected) {
+        const current = pageUpdates.get(item.sourcePage.id) ?? [...(item.sourcePage.system.links ?? [])];
+        const index = current.findIndex(link => link.id === item.link.id);
+        if (index === -1) return;
+        const next = { ...current[index] };
+        if (item.routeOnThis) {
+          // Route A pin-off policy: keep the original link, drop only the waypoint.
+          next.routeAnchors = (next.routeAnchors ?? []).filter(entry =>
+            !(entry?.noteId === page.id && entry?.anchorId === MAIN_ANCHOR_ID));
+        }
+        if (item.sourceOnThis) {
+          const targetPage = shared.pages.get(next.targetId);
+          const targetCard = workingCards[targetPage.id];
+          const toward = endpointWorld(targetPage, targetCard, next, "target");
+          const replacement = chooseRedistributionAnchor(hubCard, hubBox, toward, page, senderUserId);
+          if (!replacement) return;
+          next.sourceAnchorId = replacement.anchorId;
+          next.sourcePoint = { x: replacement.anchor.x, y: replacement.anchor.y };
+          next.sourceSide = anchorSide(replacement.anchor, hubBox);
+          applyEndpointFallback(next, "target", targetPage, targetCard);
+        }
+        if (item.targetOnThis) {
+          const sourceCard = workingCards[item.sourcePage.id]
+            ?? item.sourcePage.system?.deleted?.lastCard ?? null;
+          const toward = endpointWorld(item.sourcePage, sourceCard, next, "source");
+          const replacement = chooseRedistributionAnchor(hubCard, hubBox, toward, page, senderUserId);
+          if (!replacement) return;
+          next.targetAnchorId = replacement.anchorId;
+          next.targetPoint = { x: replacement.anchor.x, y: replacement.anchor.y };
+          next.targetSide = anchorSide(replacement.anchor, hubBox);
+          applyEndpointFallback(next, "source", item.sourcePage, sourceCard);
+        }
+        current[index] = next;
+        pageUpdates.set(item.sourcePage.id, current);
+      }
+
+      const anchorsChanged =
+        JSON.stringify(hubCard.anchors ?? {}) !== JSON.stringify(originalCard.anchors ?? {});
+      const stateNoteIds = new Set([page.id, ...pageUpdates.keys()]);
+      // Capture the raw stored attachment, not resolved defaults: a partial/legacy attachment
+      // block must round-trip exactly on undo, including fields this phase does not understand.
+      const beforeNotes = [...stateNoteIds].map(noteId => {
+        const notePage = shared.pages.get(noteId);
+        return {
+          noteId,
+          links: deepClone(notePage.system.links ?? []),
+          ...rawAttachmentState(notePage)
+        };
+      });
+      const beforeAnchors = deepClone(originalCard.anchors ?? {});
+      const beforeCard = deepClone(originalCard);
+      const nextAttachment = { ...storedAttachment, mainPinEnabled: false };
+
+      try {
+        for (const [noteId, nextLinks] of pageUpdates) {
+          const notePage = shared.pages.get(noteId);
+          const changes = { "system.links": nextLinks };
+          if (noteId === page.id) changes["system.attachment"] = nextAttachment;
+          await notePage.update(changes);
+        }
+        if (!pageUpdates.has(page.id)) {
+          await page.update({ "system.attachment": nextAttachment });
+        }
+        if (anchorsChanged) {
+          await layout.update({ [`system.cards.${page.id}.anchors`]: hubCard.anchors });
+        }
+      } catch (err) {
+        // Restore the exact captured shared state; no link may be lost or half-redistributed.
+        for (const state of beforeNotes) {
+          await shared.pages.get(state.noteId)?.update({
+            "system.links": deepClone(state.links),
+            ...attachmentRestoreChanges(state)
+          }).catch(() => {});
+        }
+        await layout.update({
+          [`system.cards.${page.id}`]: deepClone(beforeCard)
+        }).catch(() => {});
+        console.error("Journalinator: disabling the main pin failed", err);
+        return;
+      }
+
+      // Fingerprints of exactly what this transaction writes. Undo is allowed only while the
+      // live links/attachment/anchors still match, so a later edit or re-enable cannot be
+      // silently clobbered by a stale Ctrl+Z.
+      const afterNotes = [...stateNoteIds].map(noteId => {
+        const notePage = shared.pages.get(noteId);
+        return {
+          noteId,
+          links: deepClone(notePage.system.links ?? []),
+          ...rawAttachmentState(notePage)
+        };
+      });
+      const afterAnchors = deepClone(layout.system.cards?.[page.id]?.anchors ?? {});
+      rememberPinUndo(undoId, {
+        noteId: page.id,
+        notes: beforeNotes,
+        layout: [{ noteId: page.id, anchors: beforeAnchors }],
+        after: { notes: afterNotes, anchors: afterAnchors }
+      });
+      // Acknowledge only after every write landed. The requester pushes its Ctrl+Z entry on this
+      // message, so a failed/rolled-back operation never consumes an undo step.
+      acknowledgeWriteApplied(senderUserId, { kind: "pin", undoId });
+      return;
+    }
+
+    case "undoPinChange": {
+      // Any client holding the undo id may restore it; the id is client-generated and never
+      // broadcast beyond the requesting client's own history stack.
+      if (typeof message.undoId !== "string" || !message.undoId) return;
+      const entry = pinUndoEntries.get(message.undoId);
+      if (!entry) return;
+      const layout = layoutPage(shared);
+      if (!layout) return;
+      for (const state of entry.notes) {
+        const notePage = shared.pages.get(state.noteId);
+        // A trashed owner is still restorable state; its links were part of the transaction.
+        if (!notePage || notePage.type !== `${MODULE_ID}.note`) return;
+      }
+
+      // Refuse a stale undo: if any link array, raw attachment or the hub anchor registry has
+      // changed since the disable operation, restoring would erase a newer edit or reattach a
+      // main pin the user explicitly re-enabled.
+      const afterNotes = new Map((entry.after?.notes ?? []).map(state => [state.noteId, state]));
+      for (const state of entry.notes) {
+        const notePage = shared.pages.get(state.noteId);
+        const after = afterNotes.get(state.noteId);
+        const currentLinks = notePage.system.links ?? [];
+        const currentAttachment = rawAttachmentState(notePage);
+        if (!after
+            || JSON.stringify(currentLinks) !== JSON.stringify(after.links)
+            || currentAttachment.attachmentPresent !== after.attachmentPresent
+            || JSON.stringify(currentAttachment.attachment) !== JSON.stringify(after.attachment)) {
+          notifyUser(senderUserId, t("JN.Pin.UndoStale"));
+          return;
+        }
+      }
+      const card = layout.system.cards?.[entry.noteId];
+      if (!card || JSON.stringify(card.anchors ?? {}) !== JSON.stringify(entry.after?.anchors ?? {})) {
+        notifyUser(senderUserId, t("JN.Pin.UndoStale"));
+        return;
+      }
+
+      try {
+        for (const state of entry.notes) {
+          const notePage = shared.pages.get(state.noteId);
+          await notePage.update({
+            "system.links": deepClone(state.links),
+            ...attachmentRestoreChanges(state)
+          });
+        }
+        for (const state of entry.layout) {
+          // Undo restores only the anchor registry it changed; geometry/labels stay untouched.
+          await layout.update({ [`system.cards.${state.noteId}.anchors`]: deepClone(state.anchors ?? {}) });
+        }
+        pinUndoEntries.delete(message.undoId);
+      } catch (err) {
+        console.error("Journalinator: pin undo failed", err);
+      }
+      return;
+    }
+
     case "createLink": {
       const page = shared.pages.get(message.sourceId);
       const target = shared.pages.get(message.targetId);
-      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
-      if (!target || target.type !== `${MODULE_ID}.note` || target.system.deleted) return;
-      if (message.sourceId === message.targetId) return;
+      if (!isLiveSharedNotePage(page) || !isLiveSharedNotePage(target)) return;
+      if (page.id === target.id) return;
+      const layout = layoutPage(shared);
+      const sourceCard = layout?.system.cards?.[page.id];
+      const targetCard = layout?.system.cards?.[target.id];
+      const allowCreate = pinsEnabled();
+      const sourcePlan = planAnchorEndpoint({
+        card: sourceCard, note: page, anchorId: message.sourceAnchorId, spec: message.sourceAnchor,
+        senderUserId, allowCreate
+      });
+      const targetPlan = planAnchorEndpoint({
+        card: targetCard, note: target, anchorId: message.targetAnchorId, spec: message.targetAnchor,
+        senderUserId, allowCreate
+      });
+      // Validate both endpoints and both cards before any write; a bad second endpoint must not
+      // leave a newly generated anchor or a half-written link behind.
+      if (sourcePlan === null || targetPlan === null) return;
+      if ((sourcePlan?.created || targetPlan?.created) && (!layout || !sourceCard || !targetCard)) return;
+
+      const fields = { ...linkAnchors(message) };
+      applyAnchorEndpoint(fields, "source", sourcePlan, cardBox(page, sourceCard));
+      applyAnchorEndpoint(fields, "target", targetPlan, cardBox(target, targetCard));
+
       const links = [...(page.system.links ?? [])];
-      const anchors = linkAnchors(message);
       const existing = links.findIndex(link => link.targetId === message.targetId);
+      const sourceHasEndpoint = !!fields.sourcePoint || !!sourcePlan?.anchor;
+      const targetHasEndpoint = !!fields.targetPoint || !!targetPlan?.anchor;
       if (existing !== -1) {
-        if (!anchors.sourcePoint || !anchors.targetPoint) return;
-        links[existing] = { ...links[existing], ...anchors, origin: "drawn", edited: true };
+        if (!sourceHasEndpoint || !targetHasEndpoint) return;
+        links[existing] = { ...links[existing], ...fields, origin: "drawn", edited: true };
+      } else {
+        links.push({
+          id: foundry.utils.randomID(),
+          targetId: message.targetId,
+          ...fields,
+          // Always store explicit endpoint references. Empty means "use point/side fallback".
+          sourceAnchorId: sourcePlan?.anchorId ?? "",
+          targetAnchorId: targetPlan?.anchorId ?? "",
+          ...defaultLinkCosmetics(),
+          // Route authoring is a Phase 6 transactional operation; a client-created link never
+          // carries route waypoints until then.
+          routeAnchors: [],
+          label: "",
+          direction: "one",
+          color: "",
+          lineStyle: "solid",
+          origin: "drawn",
+          edited: false,
+          createdBy: senderUserId
+        });
+      }
+
+      const layoutChanges = {};
+      const originalSourceAnchors = sourceCard?.anchors ?? {};
+      const originalTargetAnchors = targetCard?.anchors ?? {};
+      if (sourcePlan?.created) {
+        layoutChanges[`system.cards.${page.id}.anchors`] = {
+          ...originalSourceAnchors, [sourcePlan.anchorId]: sourcePlan.anchor
+        };
+      }
+      if (targetPlan?.created) {
+        layoutChanges[`system.cards.${target.id}.anchors`] = {
+          ...originalTargetAnchors, [targetPlan.anchorId]: targetPlan.anchor
+        };
+      }
+      const addedNewLink = existing === -1;
+      try {
+        if (Object.keys(layoutChanges).length) await layout.update(layoutChanges);
         await page.update({ "system.links": links });
+      } catch (err) {
+        // Roll the anchor registry back if the link write (or the layout write) failed.
+        const restore = {};
+        if (sourcePlan?.created) restore[`system.cards.${page.id}.anchors`] = originalSourceAnchors;
+        if (targetPlan?.created) restore[`system.cards.${target.id}.anchors`] = originalTargetAnchors;
+        if (Object.keys(restore).length) await layout.update(restore).catch(() => {});
+        console.error("Journalinator: link anchor write failed", err);
         return;
       }
-      links.push({
-        id: foundry.utils.randomID(),
-        targetId: message.targetId,
-        ...anchors,
-        ...defaultLinkCosmetics(),
-        // Route authoring is a Phase 6 transactional operation; a client-created link never
-        // carries route waypoints until then.
-        routeAnchors: [],
-        label: "",
-        direction: "one",
-        color: "",
-        lineStyle: "solid",
-        origin: "drawn",
-        edited: false,
-        createdBy: senderUserId
-      });
-      await page.update({ "system.links": links });
-      await recordActivity(senderUserId, { links: 1 });
+      if (addedNewLink) await recordActivity(senderUserId, { links: 1 });
       return;
     }
 
     case "updateLink": {
       const page = shared.pages.get(message.noteId);
-      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
+      if (!isLiveSharedNotePage(page)) return;
       const links = page.system.links ?? [];
       const existing = links.find(link => link.id === message.linkId);
       if (!existing) return;
+      const layout = layoutPage(shared);
+      const targetPage = shared.pages.get(existing.targetId);
+      const anchorContext = {
+        source: layout?.system.cards?.[page.id]?.anchors ?? {},
+        target: isLiveSharedNotePage(targetPage)
+          ? layout?.system.cards?.[targetPage.id]?.anchors ?? null : null
+      };
       const pins = moveThreadPin(existing.pins, message.fields?.pinMove);
-      const fields = pins ? { pins } : sanitizeLinkFields(message.fields);
+      const fields = pins ? { pins } : sanitizeLinkFields(message.fields, anchorContext);
       if (!fields) return;
-      const nextLinks = links.map(link =>
-        link.id === message.linkId ? { ...link, ...fields, edited: true } : link
-      );
+      // New endpoint choices may not select a main pin that the owning note has disabled.
+      // Existing links that already point there keep rendering; only changing to it is refused.
+      if (fields.sourceAnchorId === MAIN_ANCHOR_ID
+          && resolveAttachment(page).mainPinEnabled === false) return;
+      if (fields.targetAnchorId === MAIN_ANCHOR_ID
+          && targetPage && resolveAttachment(targetPage).mainPinEnabled === false) return;
+      const nextLinks = links.map(link => {
+        if (link.id !== message.linkId) return link;
+        const next = { ...link, ...fields, edited: true };
+        // Keep the hidden/declassify/legacy fallback in sync with a changed endpoint anchor.
+        // Without this, clearing an anchor leaves the old point/side and a later hide/restore
+        // would draw the thread at the wrong place.
+        if ("sourceAnchorId" in fields) {
+          applyEndpointFallback(next, "source", page, layout?.system.cards?.[page.id]);
+        }
+        if ("targetAnchorId" in fields) {
+          applyEndpointFallback(next, "target", targetPage, layout?.system.cards?.[targetPage?.id]);
+        }
+        return next;
+      });
       await page.update({ "system.links": nextLinks });
+      // Clearing or moving an endpoint may orphan a minor pin; never remove a main pin here.
+      if ("sourceAnchorId" in fields || "targetAnchorId" in fields) {
+        await pruneSharedAnchors(shared, layout);
+      }
       return;
     }
 
     case "deleteLink": {
       const page = shared.pages.get(message.noteId);
-      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
+      if (!isLiveSharedNotePage(page)) return;
       const links = (page.system.links ?? []).filter(link => link.id !== message.linkId);
       await page.update({ "system.links": links });
+      await pruneSharedAnchors(shared);
       return;
     }
 
@@ -1188,9 +1897,13 @@ async function handleMessage(message, senderUserId) {
         const restoredCard = lastCard
           ? { ...foundry.utils.deepClone(lastCard), x: spot.x, y: spot.y, ports: cardPorts(lastCard) }
           : { x: spot.x, y: spot.y, width: null, height: null, rotation: 0, ports: cardPorts(lastCard) };
-        restoredCard.anchors = addMainAnchor(
-          sanitizeCardAnchors(restoredCard.anchors), page.system.authorId ?? ""
-        );
+        // Restoring an old main pin must not reattach a main the note had deliberately disabled.
+        // Stored anchors (including a retained main) are copied; only a missing main is invented
+        // when the attachment still wants one.
+        const restoredAnchors = sanitizeCardAnchors(restoredCard.anchors);
+        restoredCard.anchors = resolveAttachment(page).mainPinEnabled
+          ? addMainAnchor(restoredAnchors, page.system.authorId ?? "")
+          : restoredAnchors;
         await layout.update({ [`system.cards.${message.noteId}`]: restoredCard });
       }
       return;
@@ -1206,6 +1919,9 @@ async function handleMessage(message, senderUserId) {
         .filter(([, label]) => trashedIds.has(label.noteId))
         .map(([id]) => [`system.labels.-=${id}`, null]));
       if (Object.keys(labelUpdates).length) await layout.update(labelUpdates);
+      // Permanent deletion can leave a live shared link pointing at a card that no longer exists;
+      // prune any minor anchors that lost their last reference. Soft delete keeps its stored card.
+      if (layout) await pruneSharedAnchors(shared, layout);
       const ids2 = getContainerIds();
       const historyPage = ids2?.historyPage ? game.journal.get(ids2.history)?.pages.get(ids2.historyPage) : null;
       if (historyPage) {
@@ -1320,6 +2036,10 @@ async function handleMessage(message, senderUserId) {
         ...defaultLinkCosmetics(),
         ...sanitizeLinkFields(message.link),
         ...linkAnchors(message.link),
+        // This path copies a GM-only/declassified link into public data. Its endpoint anchor ids
+        // may be legacy vault references that shared pruning cannot see; keep only the fallback.
+        sourceAnchorId: "",
+        targetAnchorId: "",
         routeAnchors: sanitizeSharedRouteAnchors(shared, message.link?.routeAnchors, page.id),
         origin: "drawn",
         edited: true,

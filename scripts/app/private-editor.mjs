@@ -1,4 +1,4 @@
-import { NOTE_FONT_KEYS, PICTURE_LAYOUTS, resolvePresentation } from "../presentation.mjs";
+import { NOTE_FONT_KEYS, PIN_STYLES, PICTURE_LAYOUTS, resolveAttachment, resolvePresentation } from "../presentation.mjs";
 import { noteImagePath } from "../image-url.mjs";
 import { promptImageSource } from "./image-dialog.mjs";
 import { applyMarkdownAutocomplete } from "../markdown-edit.mjs";
@@ -167,6 +167,68 @@ export default class PrivateNoteEditor {
     await this.callbacks.updateNote(noteId, { [key]: image });
   }
 
+  /** Private workspaces have a single writer, so attachment changes save directly. */
+  setNoteAttachment(noteId, fields) {
+    const note = this.callbacks.getNote(noteId);
+    if (!note || !fields || typeof fields !== "object") return;
+    const current = resolveAttachment(note);
+    const next = { ...current };
+    if (typeof fields.mainPinEnabled === "boolean") next.mainPinEnabled = fields.mainPinEnabled;
+    if (Number.isFinite(fields.mainSnapRadius)) next.mainSnapRadius = Math.min(64, Math.max(0, fields.mainSnapRadius));
+    if (Number.isFinite(fields.minorSnapRadius)) next.minorSnapRadius = Math.min(32, Math.max(0, fields.minorSnapRadius));
+    if (PIN_STYLES.includes(fields.pinStyle)) next.pinStyle = fields.pinStyle;
+    return this.callbacks.updateNote(noteId, { attachment: next });
+  }
+
+  setMainPinEnabled(noteId, enabled) {
+    if (typeof enabled !== "boolean") return;
+    // Route through the workspace so the same redistribution/qualification guard applies as to
+    // any other private pin toggle; never patch the attachment directly from the editor.
+    if (typeof this.callbacks.setMainPinEnabled === "function") {
+      return this.callbacks.setMainPinEnabled(noteId, enabled);
+    }
+    return this.setNoteAttachment(noteId, { mainPinEnabled: enabled });
+  }
+
+  #pinsEnabled() {
+    try {
+      return game.settings?.get?.("fvtt-journalinator", "pinsEnabled") !== false;
+    } catch {
+      return true;
+    }
+  }
+
+  #attachmentPanel(note) {
+    const attachment = resolveAttachment(note);
+    // Private workspaces cannot redistribute links, so removing a main pin that still has
+    // links is a shared-canvas-only action. Qualify the control instead of leaving a toggle
+    // that would silently strand those links.
+    const locked = this.callbacks.mainPinLocked?.(note.id) === true;
+    const lockHint = locked ? t("JN.Pin.PrivateSharedOnly") : "";
+    const styleOptions = PIN_STYLES.map(key => {
+      const labelKey = `JN.Pin.Styles.${key.charAt(0).toUpperCase()}${key.slice(1)}`;
+      return `<option value="${key}" ${attachment.pinStyle === key ? "selected" : ""}>${t(labelKey)}</option>`;
+    }).join("");
+    return `
+      <label class="jn-presentation-check" title="${esc(lockHint)}">
+        <input type="checkbox" class="journalinator-main-pin" ${attachment.mainPinEnabled ? "checked" : ""}
+          ${locked ? "disabled" : ""} title="${esc(lockHint)}">
+        ${t("JN.Pin.Enabled")}
+      </label>
+      ${locked ? `<small class="journalinator-meta">${esc(lockHint)}</small>` : ""}
+      <label class="jn-presentation-field">${t("JN.Pin.SnapMain")}
+        <input type="number" class="journalinator-main-snap" min="0" max="64" step="1"
+          value="${attachment.mainSnapRadius}" aria-label="${t("JN.Pin.SnapMain")}">
+      </label>
+      <label class="jn-presentation-field">${t("JN.Pin.SnapMinor")}
+        <input type="number" class="journalinator-minor-snap" min="0" max="32" step="1"
+          value="${attachment.minorSnapRadius}" aria-label="${t("JN.Pin.SnapMinor")}">
+      </label>
+      <label class="jn-presentation-field">${t("JN.Pin.Style")}
+        <select class="journalinator-pin-style" aria-label="${t("JN.Pin.Style")}">${styleOptions}</select>
+      </label>`;
+  }
+
   render() {
     const note = this.#note;
     if (!note) {
@@ -226,6 +288,7 @@ export default class PrivateNoteEditor {
         ${tool("fa-layer-group", t("JN.Editor.Type"), `
           <select class="journalinator-kind" aria-label="${t("JN.Editor.Type")}">${styleOptions}</select>`)}
         ${tool("fa-sliders", t("JN.Editor.Presentation"), presentationPanel)}
+        ${this.#pinsEnabled() ? tool("fa-thumbtack", t("JN.Pin.Style"), this.#attachmentPanel(note)) : ""}
         ${presentation.extendedStyle === "target" ? tool("fa-bullseye", t("JN.Style.Target"), `
           <input type="text" class="journalinator-target-heading" aria-label="${t("JN.Style.Target")}"
             value="${esc(presentation.heading)}" placeholder="${t("JN.Style.Target")}" maxlength="80">`) : ""}
@@ -307,6 +370,23 @@ export default class PrivateNoteEditor {
     });
     this.root.querySelector(".journalinator-torn")?.addEventListener("change", event => {
       this.callbacks.updateNote(noteId, { presentation: { torn: event.target.checked } });
+    });
+    this.root.querySelector(".journalinator-main-pin")?.addEventListener("change", event => {
+      this.setMainPinEnabled(noteId, event.target.checked);
+    });
+    const mainSnap = this.root.querySelector(".journalinator-main-snap");
+    const minorSnap = this.root.querySelector(".journalinator-minor-snap");
+    const pinStyle = this.root.querySelector(".journalinator-pin-style");
+    mainSnap?.addEventListener("change", () => {
+      const value = Number(mainSnap.value);
+      if (Number.isFinite(value)) this.setNoteAttachment(noteId, { mainSnapRadius: value });
+    });
+    minorSnap?.addEventListener("change", () => {
+      const value = Number(minorSnap.value);
+      if (Number.isFinite(value)) this.setNoteAttachment(noteId, { minorSnapRadius: value });
+    });
+    pinStyle?.addEventListener("change", () => {
+      this.setNoteAttachment(noteId, { pinStyle: pinStyle.value });
     });
 
     const heading = this.root.querySelector(".journalinator-target-heading");

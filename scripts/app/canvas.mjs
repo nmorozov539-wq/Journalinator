@@ -1,6 +1,7 @@
 import {
   CARD_SIDES, MAX_THREAD_PINS, THREAD_PIN_RADIUS, cardEdgeAt, cardPointAnchor, moveThreadPin, threadAttachment, validThreadPin
 } from "../card-ports.mjs";
+import { anchorWorld, cardNormalizedPoint, isMainAnchor, nearestAnchor, validAnchorId } from "../anchors.mjs";
 import { looseTails, pinnedThreadPath, threadLayerSpecs, ThreadMotion, THREAD_PRESETS } from "../link-thread.mjs";
 import { LINK_COLOR_SLOTS, normalizeLinkColor } from "../link-colors.mjs";
 import PatchNotesPanel from "./patch-notes.mjs";
@@ -8,7 +9,7 @@ import { noteImageSource } from "../image-url.mjs";
 import { hasAnyLock } from "../locks.mjs";
 import { renderMarkdown } from "../markdown.mjs";
 import { t } from "../i18n.mjs";
-import { classifyNote, resolveLinkCosmetics, resolvePresentation } from "../presentation.mjs";
+import { classifyNote, resolveAttachment, resolveLinkCosmetics, resolvePresentation } from "../presentation.mjs";
 import { tearPoints, tearPolygon, tearSeed } from "../tear.mjs";
 import { DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, STAMP_CORNERS, STAMP_IDS, stampUrl } from "../stamps.mjs";
 
@@ -62,6 +63,13 @@ export default class JournalCanvas {
     this.linkHitEls = new Map();
     this.maskShapeEls = new Map();
     this.toolbarDismiss = null;
+    this.pinDrag = null;
+    // Note attachment pins are DOM elements on the card, not SVG route pins. `anchorDrag` keeps
+    // a live minor-pin position between pointer frames without writing to the persisted layout.
+    this.anchorDrag = null;
+    this.pinsEnabled = null; // null = read the world setting; boolean lets JournalApp/tests override
+    this.pinTarget = null;
+    this.snappedPinEl = null;
     this.movingThreads = new Set();
     this.threadFrame = null;
     this.threadTime = null;
@@ -118,6 +126,9 @@ export default class JournalCanvas {
   update(notes, layout, { dimMatch, deferGeometry = false } = {}) {
     this.notes = notes;
     this.layout = layout ?? { cards: {}, labels: {} };
+    // A fresh layout is authoritative: any optimistic minor-pin override has either been
+    // committed by now or was superseded by another client.
+    this.anchorDrag = null;
     if (dimMatch) this.dimMatch = dimMatch;
     for (const id of this.selectedLabelIds) {
       if (!this.layout.labels?.[id]) this.selectedLabelIds.delete(id);
@@ -196,6 +207,9 @@ export default class JournalCanvas {
     this.zoomFrame = null;
     this.threads.clear();
     this.pinDrag = null;
+    this.anchorDrag = null;
+    this.pinTarget = null;
+    this.snappedPinEl = null;
     this.movingThreads.clear();
   }
 
@@ -234,6 +248,7 @@ export default class JournalCanvas {
             <div class="jn-card-text"><div class="jn-card-excerpt"></div></div>
           </div>
         </div>
+        <div class="jn-card-pins"></div>
         <span class="jn-card-signature" aria-hidden="true"></span>
         <span class="jn-card-status" hidden></span>
         <div class="jn-card-stamps"></div>
@@ -293,6 +308,9 @@ export default class JournalCanvas {
     signature.textContent = initial;
     signature.title = author?.name ?? "";
 
+    const attachment = resolveAttachment(note);
+    this.#renderCardPins(el, note, cardData, attachment);
+
     const image = el.querySelector(".jn-card-image");
     const portrait = image.querySelector("img");
     const imageButton = el.querySelector(".jn-card-image-button");
@@ -349,6 +367,97 @@ export default class JournalCanvas {
       image.draggable = false;
       statusSlot.replaceChildren(image);
     }
+  }
+
+  /** Pins are an experimental world feature; an unset legacy setting still means enabled. */
+  #pinsOn() {
+    if (typeof this.pinsEnabled === "boolean") return this.pinsEnabled;
+    try {
+      return game.settings?.get?.("fvtt-journalinator", "pinsEnabled") !== false;
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * Paper pins live outside `.jn-card-main`, so the torn clip-path, paper glow and selection
+   * outline never hide their hit areas. They are positioned in normalized card coordinates and
+   * therefore rotate/resize with the card without any per-frame JavaScript.
+   */
+  #renderCardPins(el, note, cardData, attachment) {
+    const container = el.querySelector(".jn-card-pins");
+    if (!container) return;
+    const anchors = cardData?.anchors && typeof cardData.anchors === "object" ? cardData.anchors : {};
+    const enabled = this.#pinsOn();
+    el.classList.toggle("jn-pins-disabled", !enabled);
+    el.dataset.pinStyle = attachment.pinStyle || "default";
+    if (!enabled) {
+      container.replaceChildren();
+      container.hidden = true;
+      return;
+    }
+    container.hidden = false;
+    const pins = [];
+    for (const [anchorId, anchor] of Object.entries(anchors)) {
+      if (!validAnchorId(anchorId)) continue;
+      if (!anchor || !Number.isFinite(anchor.x) || !Number.isFinite(anchor.y)) continue;
+      const main = isMainAnchor(anchor);
+      if (main && !attachment.mainPinEnabled) continue;
+      const styleKey = attachment.pinStyle || "default";
+      const style = styleKey === "default" ? "enamel" : styleKey;
+      const pin = document.createElement("button");
+      pin.type = "button";
+      pin.className = `jn-pin ${main ? "jn-pin-main" : "jn-pin-minor"} jn-pin-style-${style}`
+        + (styleKey === "default" ? " jn-pin-style-default" : "");
+      pin.dataset.noteId = note._id;
+      pin.dataset.anchorId = anchorId;
+      pin.dataset.anchorKind = main ? "main" : "minor";
+      pin.dataset.pinStyle = style;
+      pin.dataset.pinStyleKey = styleKey;
+      if (main && anchor.createdBy) {
+        const creator = game.users?.get?.(anchor.createdBy);
+        if (creator?.color) pin.style.setProperty("--jn-pin-color", creator.color);
+      }
+      const drag = this.anchorDrag;
+      const x = drag?.noteId === note._id && drag.anchorId === anchorId ? drag.x : anchor.x;
+      const y = drag?.noteId === note._id && drag.anchorId === anchorId ? drag.y : anchor.y;
+      pin.style.left = `${Math.min(1, Math.max(0, x)) * 100}%`;
+      pin.style.top = `${Math.min(1, Math.max(0, y)) * 100}%`;
+      const base = t(main ? "JN.Pin.Main" : "JN.Pin.Minor");
+      const label = main ? `${base} · ${t("JN.Pin.DragHint")}` : base;
+      pin.title = label;
+      pin.setAttribute("aria-label", label);
+      pins.push(pin);
+    }
+    container.replaceChildren(...pins);
+  }
+
+  /** Persisted anchor plus an in-progress minor-pin drag override. */
+  #cardAnchor(noteId, anchorId) {
+    if (!validAnchorId(anchorId)) return null;
+    const anchors = this.layout.cards?.[noteId]?.anchors;
+    const anchor = anchors && Object.hasOwn(anchors, anchorId) ? anchors[anchorId] : null;
+    if (!anchor) return null;
+    const drag = this.anchorDrag;
+    if (drag && drag.noteId === noteId && drag.anchorId === anchorId) {
+      return { ...anchor, x: drag.x, y: drag.y };
+    }
+    return anchor;
+  }
+
+  /** World attachment at an anchor's center with its outward normal, matching thread layout. */
+  #anchorWorldAttachment(box, anchor) {
+    const world = anchorWorld(box, anchor);
+    if (!world) return null;
+    return {
+      ...world,
+      x: world.x + world.nx * THREAD_PIN_RADIUS,
+      y: world.y + world.ny * THREAD_PIN_RADIUS
+    };
+  }
+
+  #anchorAttachment(noteId, box, anchorId) {
+    return this.#anchorWorldAttachment(box, this.#cardAnchor(noteId, anchorId));
   }
 
   #renderCardBlocks(excerpt, blocks) {
@@ -514,6 +623,11 @@ export default class JournalCanvas {
     };
   }
 
+  /** Public measured card box, e.g. for main-pin projection from the app/editor. */
+  cardBox(id) {
+    return this.#cardBox(id);
+  }
+
   #drawLinks() {
     const boxes = new Map([...this.cardEls.keys()].map(id => [id, this.#cardBox(id)]));
     const links = [];
@@ -632,8 +746,12 @@ export default class JournalCanvas {
 
   /** Resolves one link's endpoints, pins, cosmetics and reusable spring state. */
   #resolveThread({ note, link, sourceSide, targetSide }, boxes, animate) {
-    const p = threadAttachment(boxes.get(note._id), link.sourcePoint, sourceSide);
-    const r = threadAttachment(boxes.get(link.targetId), link.targetPoint, targetSide);
+    const sourceBox = boxes.get(note._id);
+    const targetBox = boxes.get(link.targetId);
+    const p = this.#anchorAttachment(note._id, sourceBox, link.sourceAnchorId)
+      ?? threadAttachment(sourceBox, link.sourcePoint, sourceSide);
+    const r = this.#anchorAttachment(link.targetId, targetBox, link.targetAnchorId)
+      ?? threadAttachment(targetBox, link.targetPoint, targetSide);
     const cosmetics = resolveLinkCosmetics(link);
     const motion = this.threads.get(link.id)?.motion ?? new ThreadMotion(p, r, cosmetics.slack);
     motion.retarget(p, r, animate, cosmetics.slack);
@@ -649,7 +767,13 @@ export default class JournalCanvas {
   #linkSignature(links, boxes, dimmedIds) {
     const cards = [];
     for (const [id, box] of boxes) {
-      cards.push(`${String(id)}:${this.cardEls.get(id)?.classList.contains("jn-torn") ? 1 : 0}`);
+      const card = this.layout.cards?.[id];
+      const anchors = card?.anchors && typeof card.anchors === "object" ? card.anchors : {};
+      const anchorKey = Object.keys(anchors).sort().map(anchorId => {
+        const anchor = anchors[anchorId];
+        return `${anchorId}:${anchor?.kind ?? ""}:${anchor?.x ?? ""}:${anchor?.y ?? ""}`;
+      }).join("|");
+      cards.push(`${String(id)}:${this.cardEls.get(id)?.classList.contains("jn-torn") ? 1 : 0}:${anchorKey}`);
     }
     const parts = links.map(({ note, link, sourceSide, targetSide }) => {
       const cosmetics = resolveLinkCosmetics(link);
@@ -660,7 +784,7 @@ export default class JournalCanvas {
         cosmetics.secondaryColor, cosmetics.material, cosmetics.thickness, cosmetics.pattern,
         cosmetics.ends, link.hidden ? 1 : 0, link.hint ? 1 : 0, link.label ?? "",
         savedPins.length, link.id === this.selectedLinkId ? 1 : 0, dimmed ? 1 : 0,
-        sourceSide, targetSide
+        sourceSide, targetSide, link.sourceAnchorId ?? "", link.targetAnchorId ?? ""
       ].join("\u0001");
     });
     return `${cards.join("\u0002")}\u0003${parts.join("\u0002")}`;
@@ -1276,6 +1400,10 @@ export default class JournalCanvas {
     this.svg.appendChild(this.edgePin);
     this.draftPins = document.createElementNS("http://www.w3.org/2000/svg", "g");
     this.svg.appendChild(this.draftPins);
+    this.pinTarget = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    this.pinTarget.setAttribute("class", "jn-pin-target");
+    this.pinTarget.style.display = "none";
+    this.svg.appendChild(this.pinTarget);
     this.root.focus({ preventScroll: true });
   }
 
@@ -1288,24 +1416,76 @@ export default class JournalCanvas {
     this.edgePin = null;
     this.draftPins.remove();
     this.draftPins = null;
+    this.pinTarget?.remove();
+    this.pinTarget = null;
+    this.#highlightSnappedPin(null, null);
     this.#endLinkPreview();
   }
 
-  #linkEdgeAt(ev, world) {
-    const card = ev.target.closest(".jn-card") ?? document.elementsFromPoint?.(ev.clientX, ev.clientY)
-      .map(element => element.closest(".jn-card")).find(element => element && this.world.contains(element));
-    if (!card) return;
+  #linkCardAt(ev) {
+    return ev.target.closest?.(".jn-card") ?? document.elementsFromPoint?.(ev.clientX, ev.clientY)
+      .map(element => element.closest(".jn-card")).find(element => element && this.world.contains(element)) ?? null;
+  }
+
+  #linkEdgeAt(card, world) {
+    if (!card) return null;
     const id = card.dataset.id;
     const box = this.#cardBox(id);
     const { point, distance } = cardEdgeAt(box, world);
     if (distance * this.view.k <= 16) return { id, box, point };
+    return null;
+  }
+
+  /** A rendered main/minor pin within its per-note screen-space magnet radius. */
+  #linkAnchorAt(card, world) {
+    if (!card || !this.#pinsOn()) return null;
+    const id = card.dataset.id;
+    const note = this.notes.find(item => item._id === id);
+    if (!note) return null;
+    const attachment = resolveAttachment(note);
+    const anchors = {};
+    for (const [anchorId, anchor] of Object.entries(this.layout.cards?.[id]?.anchors ?? {})) {
+      if (!validAnchorId(anchorId)) continue;
+      if (!anchor || !Number.isFinite(anchor.x) || !Number.isFinite(anchor.y)) continue;
+      // A disabled main pin is not rendered, so it must not secretly magnetize the cursor.
+      if (isMainAnchor(anchor) && !attachment.mainPinEnabled) continue;
+      anchors[anchorId] = anchor;
+    }
+    if (!Object.keys(anchors).length) return null;
+    const box = this.#cardBox(id);
+    const hit = nearestAnchor(box, anchors, world, {
+      zoom: this.view.k,
+      mainRadius: attachment.mainSnapRadius,
+      minorRadius: attachment.minorSnapRadius
+    });
+    if (!hit) return null;
+    return {
+      id, box, anchorId: hit.id, anchor: hit.anchor,
+      point: { x: hit.anchor.x, y: hit.anchor.y }
+    };
+  }
+
+  /** A fresh minor anchor for a click on the card interior, away from an edge or a pin. */
+  #linkInteriorAt(card, world) {
+    if (!card || !this.#pinsOn()) return null;
+    const id = card.dataset.id;
+    const box = this.#cardBox(id);
+    const { distance } = cardEdgeAt(box, world);
+    if (distance * this.view.k <= 16) return null;
+    const point = cardNormalizedPoint(box, world);
+    if (!point) return null;
+    return { id, box, point, anchor: { kind: "minor", x: point.x, y: point.y } };
   }
 
   #pickLinkPoint(ev) {
     const world = this.#toWorld(ev.clientX, ev.clientY);
-    const edge = this.#linkEdgeAt(ev, world);
+    const card = this.#linkCardAt(ev);
+    const anchorHit = this.#linkAnchorAt(card, world);
+    const edge = anchorHit ? null : this.#linkEdgeAt(card, world);
+    const interior = anchorHit || edge ? null : this.#linkInteriorAt(card, world);
+    const target = anchorHit ?? edge ?? interior;
     const { source, pins } = this.linkPlacement;
-    if (!edge) {
+    if (!target) {
       if (!source || pins.length >= MAX_THREAD_PINS || !validThreadPin(world)) return;
       pins.push(world);
       const marker = document.createElementNS("http://www.w3.org/2000/svg", "circle");
@@ -1316,29 +1496,103 @@ export default class JournalCanvas {
       this.#updateFreeLinkPreview(world);
       return;
     }
-    const { id, point } = edge;
+    const { id, point } = target;
     if (source && source.id !== id) {
+      const sourceNote = this.notes.find(item => item._id === source.id);
+      const targetNote = this.notes.find(item => item._id === id);
+      const secret = !!sourceNote?.secret || !!targetNote?.secret;
+      // Secret/hidden links keep plain points: their anchor registries live in different
+      // stores, so sharing anchor ids would let either side prune/redistribute the other.
+      const anchors = { sourcePoint: source.point, targetPoint: point, pins: [...pins] };
+      if (!secret) {
+        anchors.sourceAnchorId = source.anchorId ?? "";
+        anchors.targetAnchorId = target.anchorId ?? "";
+        if (!source.anchorId && source.anchor) anchors.sourceAnchor = source.anchor;
+        if (!target.anchorId && target.anchor) anchors.targetAnchor = target.anchor;
+      }
       this.cancelLinkTool();
-      const anchors = { sourcePoint: source.point, targetPoint: point, pins };
       this.callbacks.onCreateLink?.(source.id, id, anchors);
       return;
     }
-    this.linkPlacement.source = { id, point };
+    this.linkPlacement.source = target;
     this.linkPlacementHint.textContent = t("JN.Link.PickEnd");
     this.#endLinkPreview();
     this.#startLinkPreview();
     this.previewPin = document.createElementNS("http://www.w3.org/2000/svg", "circle");
     this.previewPin.setAttribute("class", "jn-thread-pin");
     this.svg.appendChild(this.previewPin);
-    this.#updateFreeLinkPreview(threadAttachment(edge.box, point));
+    this.#updateFreeLinkPreview(this.#sourceAttachment() ?? { ...world, nx: 0, ny: 0 });
+  }
+
+  #sourceAttachment() {
+    const source = this.linkPlacement?.source;
+    if (!source) return null;
+    const box = this.#cardBox(source.id);
+    if (source.anchorId) return this.#anchorAttachment(source.id, box, source.anchorId);
+    if (source.anchor) return this.#anchorWorldAttachment(box, source.anchor);
+    return threadAttachment(box, source.point);
   }
 
   #updateFreeLinkPreview(cursor) {
-    const { id, point } = this.linkPlacement.source;
-    const start = threadAttachment(this.#cardBox(id), point);
+    const start = this.#sourceAttachment();
+    if (!start || !this.previewPin || !this.previewPath) return;
     this.previewPin.setAttribute("cx", start.x - start.nx * THREAD_PIN_RADIUS);
     this.previewPin.setAttribute("cy", start.y - start.ny * THREAD_PIN_RADIUS);
     this.previewPath.setAttribute("d", pinnedThreadPath(start, cursor, this.linkPlacement.pins).path);
+  }
+
+  #pinElement(noteId, anchorId) {
+    for (const pin of this.cardEls.get(noteId)?.querySelectorAll(".jn-pin") ?? []) {
+      if (pin.dataset.anchorId === anchorId) return pin;
+    }
+    return null;
+  }
+
+  #highlightSnappedPin(cardId, anchorId) {
+    if (this.snappedPinEl && (this.snappedPinEl.dataset.noteId !== cardId
+        || this.snappedPinEl.dataset.anchorId !== anchorId)) {
+      this.snappedPinEl.classList.remove("jn-pin-snap");
+      this.snappedPinEl = null;
+    }
+    if (!cardId || !anchorId) return;
+    const pin = this.#pinElement(cardId, anchorId);
+    if (!pin || pin === this.snappedPinEl) return;
+    this.snappedPinEl?.classList.remove("jn-pin-snap");
+    pin.classList.add("jn-pin-snap");
+    this.snappedPinEl = pin;
+  }
+
+  /** Live link-tool magnet preview: an existing pin or the proposed new minor point. */
+  #updateLinkTargetPreview(ev, world) {
+    if (!this.linkPlacement || !this.pinTarget) return;
+    const card = this.#linkCardAt(ev);
+    const anchorHit = this.#linkAnchorAt(card, world);
+    const interior = anchorHit ? null : this.#linkInteriorAt(card, world);
+    if (!anchorHit && !interior) {
+      this.pinTarget.style.display = "none";
+      this.#highlightSnappedPin(null, null);
+      return;
+    }
+    const hit = anchorHit ?? interior;
+    const worldPoint = anchorHit
+      ? anchorWorld(anchorHit.box, anchorHit.anchor)
+      : cardPointAnchor(hit.box, hit.point);
+    if (!worldPoint) {
+      this.pinTarget.style.display = "none";
+      this.#highlightSnappedPin(null, null);
+      return;
+    }
+    const main = !!anchorHit && isMainAnchor(anchorHit.anchor);
+    this.pinTarget.style.display = "";
+    this.pinTarget.classList.toggle("jn-pin-target-main", main);
+    this.pinTarget.classList.toggle("jn-pin-target-minor", !!anchorHit && !main);
+    this.pinTarget.classList.toggle("jn-pin-target-new", !anchorHit);
+    this.pinTarget.setAttribute("cx", worldPoint.x);
+    this.pinTarget.setAttribute("cy", worldPoint.y);
+    this.pinTarget.setAttribute("r", String((main ? 12 : anchorHit ? 7 : 6) / this.view.k));
+    if (anchorHit) this.pinTarget.dataset.anchorId = anchorHit.anchorId;
+    else delete this.pinTarget.dataset.anchorId;
+    this.#highlightSnappedPin(anchorHit ? hit.id : null, anchorHit?.anchorId ?? null);
   }
 
   #stampColor(color) {
@@ -1387,6 +1641,7 @@ export default class JournalCanvas {
       this.contextMenu.innerHTML = `
         <button type="button" data-action="card-stamp">${t("JN.Stamp.Add")}</button>
         <button type="button" data-action="card-background">${t("JN.Editor.ChangeBackground")}</button>
+        ${this.#pinsOn() && !note?.secret ? `<button type="button" data-action="add-minor-pin">${t("JN.Pin.AddMinor")}</button>` : ""}
         ${actorItems}`;
     } else this.contextMenu.innerHTML = `
       <button type="button" data-action="note">${t("JN.Context.NewNote")}</button>
@@ -1414,6 +1669,13 @@ export default class JournalCanvas {
         if (action === "card-background") {
           this.#closeContextMenu();
           this.callbacks.onEditCardBackground?.(noteId);
+          return;
+        }
+        if (action === "add-minor-pin") {
+          if (!noteId) return;
+          const anchor = cardNormalizedPoint(this.#cardBox(noteId), point);
+          this.#closeContextMenu();
+          if (anchor) this.callbacks.onAddCardAnchor?.(noteId, { kind: "minor", x: anchor.x, y: anchor.y });
           return;
         }
         if (action === "delete-private") {
@@ -1598,6 +1860,7 @@ export default class JournalCanvas {
       const stampId = this.readOnly ? null : ev.target.closest("[data-stamp-label-id]")?.dataset.stampLabelId;
       const linkHit = ev.target.closest(".jn-link-hit");
       const pin = this.readOnly ? null : ev.target.closest("[data-pin-index]");
+      const notePin = ev.target.closest(".jn-pin-minor");
       if (ev.button !== 0 || cardEl || labelEl || linkHit) lastBoardClick = null;
 
       // Middle mouse always pans, even when the pointer starts over a card, handle, or link.
@@ -1621,6 +1884,14 @@ export default class JournalCanvas {
         const id = resizeHandle.closest(".jn-card").dataset.id;
         const el = this.cardEls.get(id);
         drag = { type: "resize", id, sx: ev.clientX, sy: ev.clientY, ow: el.offsetWidth, oh: el.offsetHeight, moved: 0 };
+      } else if (notePin) {
+        // Minor pins move themselves; they never start a card drag. A main pin deliberately
+        // falls through to the card branch, so dragging it moves the whole note.
+        const card = notePin.closest(".jn-card");
+        drag = {
+          type: "note-pin", id: card.dataset.id, anchorId: notePin.dataset.anchorId,
+          sx: ev.clientX, sy: ev.clientY, moved: 0, readOnly: this.readOnly
+        };
       } else if (cardEl) {
         const initialLabelIds = [...this.selectedLabelIds];
         this.#highlightLabels([]);
@@ -1663,7 +1934,8 @@ export default class JournalCanvas {
     this.root.addEventListener("pointermove", ev => {
       if (this.linkPlacement) {
         const world = this.#toWorld(ev.clientX, ev.clientY);
-        const edge = this.#linkEdgeAt(ev, world);
+        const card = this.#linkCardAt(ev);
+        const edge = this.#linkEdgeAt(card, world);
         this.edgePin.style.display = edge ? "" : "none";
         if (edge) {
           const { x, y } = cardPointAnchor(edge.box, edge.point);
@@ -1671,9 +1943,17 @@ export default class JournalCanvas {
           this.edgePin.setAttribute("cy", y);
         }
         if (this.linkPlacement.source) {
-          const end = edge ? threadAttachment(edge.box, edge.point) : { ...world, nx: 0, ny: 0 };
+          const anchorHit = this.#linkAnchorAt(card, world);
+          const interior = anchorHit ? null : this.#linkInteriorAt(card, world);
+          let end = { ...world, nx: 0, ny: 0 };
+          if (anchorHit) end = this.#anchorWorldAttachment(anchorHit.box, anchorHit.anchor) ?? end;
+          else if (interior) {
+            const point = cardPointAnchor(interior.box, interior.point);
+            end = { ...point, nx: 0, ny: 0 };
+          } else if (edge) end = threadAttachment(edge.box, edge.point);
           this.#updateFreeLinkPreview(end);
         }
+        this.#updateLinkTargetPreview(ev, world);
       }
       if (!drag) return;
       const dx = ev.clientX - (drag.sx ?? ev.clientX), dy = ev.clientY - (drag.sy ?? ev.clientY);
@@ -1687,6 +1967,18 @@ export default class JournalCanvas {
         el.style.minHeight = `${h}px`;
         el.classList.add("jn-sized");
         this.cardSizes.delete(drag.id);
+        this.#queueLinkDraw();
+      } else if (drag.type === "note-pin" && drag.moved > DRAG_THRESHOLD) {
+        if (drag.readOnly) return;
+        const world = this.#toWorld(ev.clientX, ev.clientY);
+        const point = cardNormalizedPoint(this.#cardBox(drag.id), world);
+        if (!point) return;
+        this.anchorDrag = { noteId: drag.id, anchorId: drag.anchorId, x: point.x, y: point.y };
+        const pin = this.#pinElement(drag.id, drag.anchorId);
+        if (pin) {
+          pin.style.left = `${point.x * 100}%`;
+          pin.style.top = `${point.y * 100}%`;
+        }
         this.#queueLinkDraw();
       } else if (drag.type === "card") {
         if (drag.readOnly) return;
@@ -1745,7 +2037,34 @@ export default class JournalCanvas {
       const wasClick = drag.moved <= DRAG_THRESHOLD;
       if ((drag.type === "card" || drag.type === "resize") && !wasClick) this.#flushLinkDraw();
 
-      if (drag.type === "pin") {
+      if (drag.type === "note-pin") {
+        const move = this.anchorDrag;
+        if (wasClick) {
+          this.#setSelection([drag.id], drag.id);
+        } else if (move && !drag.readOnly && ev.type === "pointerup") {
+          const noteId = drag.id, anchorId = drag.anchorId;
+          const write = this.callbacks.onMoveCardAnchor?.(noteId, anchorId, move.x, move.y);
+          // Drop the optimistic override immediately. On rejection/false we also put the pin
+          // element back to the stored point, so a failed write cannot leave a fake moved pin.
+          this.anchorDrag = null;
+          const restorePin = () => {
+            const stored = this.layout.cards?.[noteId]?.anchors?.[anchorId];
+            const pin = this.#pinElement(noteId, anchorId);
+            if (stored && pin) {
+              pin.style.left = `${stored.x * 100}%`;
+              pin.style.top = `${stored.y * 100}%`;
+            }
+            this.#flushLinkDraw();
+          };
+          Promise.resolve(write).then(result => {
+            if (result === false) restorePin();
+            else this.#flushLinkDraw();
+          }).catch(restorePin);
+        } else if (!wasClick) {
+          this.anchorDrag = null;
+          this.#flushLinkDraw();
+        }
+      } else if (drag.type === "pin") {
         const move = this.pinDrag;
         this.pinDrag = null;
         const link = this.linksById.get(drag.id);

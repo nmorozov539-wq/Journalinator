@@ -186,6 +186,48 @@ test("format 1 vaults deep-normalize to format 2 and drop unknown fields", () =>
   assert.equal(card.anchors.bad, undefined, "anchors outside 0..1 are dropped");
 });
 
+test("legacy vault links lose shared anchor references on read/import", () => {
+  const vault = normalizeVault({
+    format: 2,
+    notes: {
+      secret: {
+        id: "secret",
+        name: "GM-ABCD Secret",
+        blocks: [{ blockId: "b1", text: "secret" }],
+        links: [{
+          id: "secret-link", targetId: "shared",
+          sourceAnchorId: "main", targetAnchorId: "minor-1",
+          routeAnchors: [{ noteId: "shared", anchorId: "main" }],
+          sourcePoint: { x: 0.1, y: 0 }, targetSide: "left"
+        }]
+      }
+    },
+    hiddenLinks: {
+      shared: [{
+        id: "hidden-link", targetId: "shared-target",
+        sourceAnchorId: "main", targetAnchorId: "minor-2",
+        routeAnchors: [{ noteId: "shared", anchorId: "main" }],
+        sourceSide: "right", targetPoint: { x: 1, y: 0.5 }
+      }]
+    }
+  });
+
+  const secretLink = vault.notes.secret.links[0];
+  assert.equal(secretLink.sourceAnchorId, "");
+  assert.equal(secretLink.targetAnchorId, "");
+  assert.deepEqual(secretLink.routeAnchors, []);
+  assert.deepEqual(secretLink.sourcePoint, { x: 0.1, y: 0 },
+    "the point fallback is preserved");
+  assert.equal(secretLink.targetSide, "left");
+
+  const hidden = vault.hiddenLinks.shared[0];
+  assert.equal(hidden.sourceAnchorId, "");
+  assert.equal(hidden.targetAnchorId, "");
+  assert.deepEqual(hidden.routeAnchors, []);
+  assert.equal(hidden.sourceSide, "right", "the side fallback is preserved");
+  assert.deepEqual(hidden.targetPoint, { x: 1, y: 0.5 });
+});
+
 test("vault notes receive label, presentation and attachment defaults", () => {
   const vault = normalizeVault({
     format: 1,

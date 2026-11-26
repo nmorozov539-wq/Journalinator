@@ -35,6 +35,13 @@ Hooks.once("init", () => {
   game.settings.register(MODULE_ID, "boardTheme", {
     scope: "client", config: false, type: String, default: "stylized"
   });
+  // Experimental pin system. World-scoped so every client agrees about whether shared anchors may
+  // be created; turning it off never removes stored pins, anchors or links.
+  game.settings.register(MODULE_ID, "pinsEnabled", {
+    name: t("JN.Settings.PinsEnabled"),
+    hint: t("JN.Settings.PinsEnabledHint"),
+    scope: "world", config: true, type: Boolean, default: true
+  });
   game.settings.register(MODULE_ID, "customThemes", {
     scope: "client", config: false, type: Object, default: {}
   });

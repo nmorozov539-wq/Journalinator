@@ -310,6 +310,44 @@ test("private normalization rejects unsafe link and label colors and bounds anch
   });
 });
 
+test("private anchor normalization uses the shared cap and rejects hostile ids", () => {
+  const anchors = JSON.parse(`{
+    "constructor": {"kind":"minor","x":0.1,"y":0.1},
+    "__proto__": {"kind":"minor","x":0.1,"y":0.1},
+    "a.b": {"kind":"minor","x":0.1,"y":0.1},
+    "legacyMain": {"kind":"main","x":0.9,"y":0.9,"createdBy":"u"},
+    "safe": {"kind":"minor","x":0.2,"y":0.3,"createdBy":"u"}
+  }`);
+  for (let i = 0; i < 300; i++) anchors[`m${i}`] = { kind: "minor", x: 0.5, y: 0.5 };
+  const workspace = normalizeWorkspace({
+    format: 2,
+    notes: { note: legacyNote("note", "Capped", "memo") },
+    layout: { cards: { note: { x: 0, y: 0, anchors } }, labels: {}, viewport: null },
+    trash: []
+  });
+  const clean = workspace.layout.cards.note.anchors;
+  assert.equal(Object.keys(clean).length, 256, "the shared 256-anchor cap applies");
+  assert.ok(clean.main, "the legacy main folded to the canonical key");
+  assert.equal(clean.main.x, 0.5);
+  assert.equal(clean.main.y, 0);
+  assert.equal(Object.hasOwn(clean, "constructor"), false);
+  assert.equal(Object.hasOwn(clean, "a.b"), false);
+  assert.equal(Object.hasOwn(clean, "__proto__"), false);
+});
+
+test("the private editor routes main-pin changes through the workspace guard", async () => {
+  globalThis.foundry.applications = { api: { DialogV2: {} } };
+  const { default: PrivateNoteEditor } = await import("../scripts/app/private-editor.mjs");
+  const editor = Object.create(PrivateNoteEditor.prototype);
+  const calls = [];
+  editor.callbacks = {
+    setMainPinEnabled: (id, enabled) => { calls.push([id, enabled]); return "guarded"; },
+    updateNote: () => { throw new Error("the editor must not patch the attachment directly"); }
+  };
+  assert.equal(editor.setMainPinEnabled("note1", false), "guarded");
+  assert.deepEqual(calls, [["note1", false]]);
+});
+
 test("makeNote seeds schema fields, ports and a main anchor", () => {
   const named = privateStore.makeNote({ title: "A real title", style: "document", cards: {} });
   assert.equal(named.note.label, "A real title");

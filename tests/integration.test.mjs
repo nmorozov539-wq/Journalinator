@@ -19,7 +19,7 @@ const containers = await makeContainers(env);
 const { vaultStore } = await import("../scripts/secrets/vault-store.mjs");
 const { notesStore } = await import("../scripts/store/notes-store.mjs");
 const secrets = await import("../scripts/secrets/secret-actions.mjs");
-const { registerSocket, requestWrite } = await import("../scripts/socket.mjs");
+const { registerSocket, requestWrite, sanitizeProjectionBox } = await import("../scripts/socket.mjs");
 const { resolvePresentation } = await import("../scripts/presentation.mjs");
 const { noteMatchesQuery, noteSearchLabel, noteFilterKey } = await import("../scripts/app/note-search.mjs");
 const { noteCreationPresentation, noteCreationStyle } = await import("../scripts/app/note-dialog.mjs");
@@ -33,6 +33,18 @@ const settle = () => new Promise(r => setTimeout(r, 60));
 const shared = () => containers.shared;
 const sharedByName = name => [...shared().pages.values()].find(p => p.name === name);
 const fromPlayer = async message => { env.deliver(message, player.id); await settle(); };
+const sharedCard = noteId => notesStore.getSharedLayout()?.cards?.[noteId];
+const minorAnchors = noteId => Object.entries(sharedCard(noteId)?.anchors ?? {})
+  .filter(([, anchor]) => anchor.kind === "minor");
+
+/** Creates a note and pins its card to an exact geometry, so redistribution is deterministic. */
+async function createNoteAt(title, x, y) {
+  await fromPlayer({ type: "createNote", title, x, y });
+  const page = sharedByName(title);
+  await requestWrite({ type: "moveCard", noteId: page.id, x, y });
+  await requestWrite({ type: "resizeCard", noteId: page.id, width: 200, height: 100 });
+  return page;
+}
 
 /** Everything a player's browser would hold: all world documents plus socket traffic from this GM. */
 function playerVisibleDump() {
@@ -373,7 +385,7 @@ test("declassifying a note refuses a taken title, then publishes with the same i
   assert.ok(layout.cards[vexId], "card moved to the shared layout");
 });
 
-test("declassifying a routed link drops waypoints through still-secret notes", async () => {
+test("hidden link edits clear route waypoints before declassification can publish them", async () => {
   const waypointId = await secrets.createSecretNote({ title: "Waypoint Secret", x: 0, y: 0 });
   const routedId = await secrets.createSecretNote({ title: "Routed Secret", x: 100, y: 0 });
   await secrets.addHiddenLink(routedId, tavernId, { sourceSide: "right", targetSide: "left" });
@@ -384,12 +396,17 @@ test("declassifying a routed link drops waypoints through still-secret notes", a
       { noteId: tavernId, anchorId: "main" }
     ]
   });
+  const edited = vaultStore.data.notes[routedId].links.find(link => link.id === hidden.id);
+  assert.deepEqual(edited.routeAnchors, [],
+    "vault links never keep shared route anchors that shared pruning cannot see");
+  assert.deepEqual([edited.sourceSide, edited.targetSide], ["right", "left"],
+    "the point/side fallback survives");
 
   assert.equal(await secrets.declassifyNote(routedId, "Published Route"), true);
   const page = shared().pages.get(routedId);
   const link = page.system.links.find(item => item.targetId === tavernId);
-  assert.deepEqual(link.routeAnchors.map(anchor => anchor.noteId), [tavernId],
-    "only the live shared waypoint is published");
+  assert.deepEqual(link.routeAnchors, [],
+    "declassification cannot publish a waypoint the hidden link no longer stores");
 
   const dump = playerVisibleDump();
   assert.ok(!dump.includes(waypointId), "a still-secret waypoint id must not leave the vault");
@@ -552,12 +569,24 @@ test("presentation, label and attachment handlers roundtrip and reject invalid b
 
   await fromPlayer({
     type: "setNoteAttachment", noteIds: [note.id],
-    fields: { mainPinEnabled: false, mainSnapRadius: 99, minorSnapRadius: 4, pinStyle: "brass" }
+    fields: { mainSnapRadius: 99, minorSnapRadius: 4, pinStyle: "brass" }
   });
-  assert.equal(note.system.attachment.mainPinEnabled, false);
+  assert.equal(note.system.attachment.mainPinEnabled, true,
+    "the generic attachment path does not touch main-pin visibility");
   assert.equal(note.system.attachment.mainSnapRadius, 64);
   assert.equal(note.system.attachment.minorSnapRadius, 4);
   assert.equal(note.system.attachment.pinStyle, "brass");
+
+  // Visibility changes use the dedicated destructive/undoable operation.
+  await fromPlayer({ type: "setMainPinEnabled", noteId: note.id, enabled: false });
+  assert.equal(note.system.attachment.mainPinEnabled, false);
+
+  // The generic path cannot bypass redistribution by toggling mainPinEnabled.
+  await fromPlayer({
+    type: "setNoteAttachment", noteIds: [note.id], fields: { mainPinEnabled: true }
+  });
+  assert.equal(note.system.attachment.mainPinEnabled, false,
+    "setNoteAttachment {mainPinEnabled} is rejected as an unknown field");
 
   // Unknown keys, bad enums and one invalid id reject the whole batch before any write.
   await fromPlayer({
@@ -826,7 +855,7 @@ test("restoring a note copies the whole stored card, including its anchor regist
   assert.deepEqual([restored.x, restored.y], [before.x, before.y]);
 });
 
-test("declassification preserves label, presentation, attachment, anchors and link ids", async () => {
+test("declassification preserves label, presentation, attachment and link ids but clears legacy anchors", async () => {
   const noteId = "Declassify000001";
   const blockId = "BlockDeclass0001";
   const linkId = "LinkDeclass00001";
@@ -891,8 +920,10 @@ test("declassification preserves label, presentation, attachment, anchors and li
   assert.equal(link.slack, 0.25);
   assert.equal(link.pattern, "alternating");
   assert.equal(link.secondaryColor, "link3");
-  assert.deepEqual(link.routeAnchors, [{ noteId: tavernId, anchorId: "main" }]);
-  assert.equal(link.sourceAnchorId, "main");
+  assert.deepEqual(link.routeAnchors, [],
+    "legacy route waypoints are not published with a declassified link");
+  assert.equal(link.sourceAnchorId, "", "legacy source anchor ids are not published");
+  assert.equal(link.targetAnchorId, "");
   const card = notesStore.getSharedLayout().cards[noteId];
   assert.deepEqual(card.anchors, {
     main: { kind: "main", x: 0.5, y: 0, createdBy: gmUser.id },
@@ -953,6 +984,983 @@ test("shared-world migration is idempotent and adds missing main anchors", async
     JSON.stringify({ system: legacy.system, card: layout.system.cards[legacy.id] }),
     snapshot
   );
+});
+
+test("minor anchors are added, moved and removed with bounds and reference checks", async () => {
+  const note = await createNoteAt("Pin CRUD", 1400, 100);
+  const target = await createNoteAt("Pin CRUD Target", 1700, 100);
+
+  await fromPlayer({ type: "addCardAnchor", noteId: note.id, kind: "minor", x: 0.25, y: 0.75 });
+  const [anchorId, anchor] = minorAnchors(note.id)[0];
+  assert.equal(anchor.kind, "minor");
+  assert.equal(anchor.createdBy, player.id, "the sender is recorded, never a client-supplied author");
+
+  const count = () => minorAnchors(note.id).length;
+  await fromPlayer({ type: "addCardAnchor", noteId: note.id, kind: "minor", x: 1.2, y: 0.2 });
+  await fromPlayer({ type: "addCardAnchor", noteId: note.id, kind: "main", x: 0.2, y: 0.2 });
+  await fromPlayer({ type: "addCardAnchor", noteId: note.id, kind: "minor", x: 0.2, y: Number.NaN });
+  await fromPlayer({ type: "addCardAnchor", noteId: "MissingAnchor001", kind: "minor", x: 0.2, y: 0.2 });
+  assert.equal(count(), 1, "invalid or missing targets add nothing");
+
+  await fromPlayer({ type: "moveCardAnchor", noteId: note.id, anchorId, x: 0.4, y: 0.6 });
+  let current = sharedCard(note.id).anchors[anchorId];
+  assert.deepEqual([current.x, current.y, current.kind, current.createdBy],
+    [0.4, 0.6, "minor", player.id]);
+  await fromPlayer({ type: "moveCardAnchor", noteId: note.id, anchorId: "main", x: 0.1, y: 0.1 });
+  await fromPlayer({ type: "moveCardAnchor", noteId: note.id, anchorId, x: -0.1, y: 0.5 });
+  await fromPlayer({ type: "moveCardAnchor", noteId: note.id, anchorId: "missing", x: 0.5, y: 0.5 });
+  current = sharedCard(note.id).anchors[anchorId];
+  assert.deepEqual([current.x, current.y], [0.4, 0.6], "main and invalid moves are rejected");
+
+  await fromPlayer({
+    type: "createLink", sourceId: note.id, targetId: target.id,
+    sourceAnchorId: anchorId, targetPoint: { x: 0, y: 0.5 }
+  });
+  const link = sharedByName("Pin CRUD").system.links.find(item => item.targetId === target.id);
+  assert.ok(link);
+  await fromPlayer({ type: "removeCardAnchor", noteId: note.id, anchorId });
+  assert.ok(sharedCard(note.id).anchors[anchorId], "a referenced minor anchor is not removed");
+
+  await fromPlayer({ type: "deleteLink", noteId: note.id, linkId: link.id });
+  assert.equal(sharedCard(note.id).anchors[anchorId], undefined,
+    "the last reference removal prunes the minor anchor");
+
+  await fromPlayer({ type: "addCardAnchor", noteId: note.id, kind: "minor", x: 0.6, y: 0.2 });
+  const orphanId = minorAnchors(note.id)[0][0];
+  await fromPlayer({ type: "removeCardAnchor", noteId: note.id, anchorId: orphanId });
+  assert.equal(count(), 0, "an unreferenced minor anchor can be removed directly");
+  assert.ok(sharedCard(note.id).anchors.main, "the main anchor is never removed");
+});
+
+test("a shared card is capped at 256 anchors", async () => {
+  const note = await createNoteAt("Pin Anchor Cap", 1600, 200);
+  const layout = shared().pages.get(containers.ids.layoutPage);
+  const bulk = {};
+  for (let i = 0; i < 255; i++) {
+    bulk[`system.cards.${note.id}.anchors.a${i}`] = {
+      kind: "minor", x: 0.5, y: 0.5, createdBy: player.id
+    };
+  }
+  await layout.update(bulk);
+  assert.equal(Object.keys(sharedCard(note.id).anchors).length, 256);
+
+  await fromPlayer({ type: "addCardAnchor", noteId: note.id, kind: "minor", x: 0.1, y: 0.1 });
+  assert.equal(Object.keys(sharedCard(note.id).anchors).length, 256, "the cap is enforced");
+  assert.ok(sharedCard(note.id).anchors.main, "the generated main anchor counts toward the cap");
+});
+
+test("createLink stores validated new anchors on both cards and reuses existing ones", async () => {
+  const a = await createNoteAt("Pin Link A", 1400, 300);
+  const b = await createNoteAt("Pin Link B", 1700, 300);
+  const c = await createNoteAt("Pin Link C", 2000, 300);
+
+  // A bad second endpoint rejects the whole request before either card is touched.
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: b.id,
+    sourceAnchor: { kind: "minor", x: 0.2, y: 0.3 },
+    targetAnchor: { kind: "minor", x: 2, y: 0.5 }
+  });
+  assert.equal(sharedByName("Pin Link A").system.links.length, 0);
+  assert.equal(minorAnchors(a.id).length, 0);
+  assert.equal(minorAnchors(b.id).length, 0);
+
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: b.id,
+    sourceAnchor: { kind: "minor", x: 0.2, y: 0.3, createdBy: "spoofed" },
+    targetAnchor: { kind: "minor", x: 0.8, y: 0.7 }
+  });
+  const first = sharedByName("Pin Link A").system.links.find(link => link.targetId === b.id);
+  assert.ok(first.sourceAnchorId && first.sourceAnchorId !== "main");
+  assert.ok(first.targetAnchorId && first.targetAnchorId !== "main");
+  assert.equal(sharedCard(a.id).anchors[first.sourceAnchorId].createdBy, player.id);
+  assert.equal(sharedCard(b.id).anchors[first.targetAnchorId].createdBy, player.id);
+  assert.deepEqual(first.sourcePoint, { x: 0.2, y: 0.3 });
+  assert.deepEqual(first.targetPoint, { x: 0.8, y: 0.7 });
+  assert.ok(["top", "right", "bottom", "left"].includes(first.sourceSide));
+  assert.ok(["top", "right", "bottom", "left"].includes(first.targetSide));
+
+  // Updating cosmetics keeps the generated anchor ids stable.
+  await fromPlayer({
+    type: "updateLink", noteId: a.id, linkId: first.id, fields: { label: "steady anchor" }
+  });
+  const updated = sharedByName("Pin Link A").system.links.find(link => link.id === first.id);
+  assert.equal(updated.sourceAnchorId, first.sourceAnchorId);
+  assert.equal(updated.targetAnchorId, first.targetAnchorId);
+
+  // Another link may share the same target anchor; no new anchor is generated on b.
+  const bAnchorCount = Object.keys(sharedCard(b.id).anchors).length;
+  await fromPlayer({
+    type: "createLink", sourceId: c.id, targetId: b.id,
+    sourcePoint: { x: 0.5, y: 0.5 }, targetAnchorId: first.targetAnchorId
+  });
+  const cLink = sharedByName("Pin Link C").system.links.find(link => link.targetId === b.id);
+  assert.equal(cLink.targetAnchorId, first.targetAnchorId);
+  assert.equal(Object.keys(sharedCard(b.id).anchors).length, bAnchorCount,
+    "reusing an existing anchor does not duplicate it");
+
+  // Existing source anchors are accepted by id as well.
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: c.id,
+    sourceAnchorId: first.sourceAnchorId, targetPoint: { x: 0, y: 0.5 }
+  });
+  const second = sharedByName("Pin Link A").system.links.find(link => link.targetId === c.id);
+  assert.equal(second.sourceAnchorId, first.sourceAnchorId);
+});
+
+test("updateLink accepts only existing anchors on the correct cards", async () => {
+  const a = await createNoteAt("Pin Update A", 1400, 400);
+  const b = await createNoteAt("Pin Update B", 1700, 400);
+  await fromPlayer({ type: "addCardAnchor", noteId: a.id, kind: "minor", x: 0.1, y: 0.2 });
+  await fromPlayer({ type: "addCardAnchor", noteId: b.id, kind: "minor", x: 0.9, y: 0.8 });
+  const aAnchor = minorAnchors(a.id)[0][0];
+  const bAnchor = minorAnchors(b.id)[0][0];
+
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: b.id,
+    sourcePoint: { x: 0, y: 0.5 }, targetPoint: { x: 1, y: 0.5 }
+  });
+  const link = sharedByName("Pin Update A").system.links.find(item => item.targetId === b.id);
+  const sourceIdOf = () => sharedByName("Pin Update A").system.links
+    .find(item => item.id === link.id).sourceAnchorId ?? "";
+
+  await fromPlayer({
+    type: "updateLink", noteId: a.id, linkId: link.id,
+    fields: { label: "must not apply", sourceAnchorId: bAnchor }
+  });
+  assert.equal(sourceIdOf(), "", "a source anchor from the target card is rejected");
+  assert.equal(sharedByName("Pin Update A").system.links.find(item => item.id === link.id).label, "",
+    "the invalid patch never partially applies");
+
+  await fromPlayer({
+    type: "updateLink", noteId: a.id, linkId: link.id,
+    fields: { sourceAnchorId: "MissingAnchor01" }
+  });
+  assert.equal(sourceIdOf(), "", "a missing anchor id is rejected");
+
+  await fromPlayer({
+    type: "updateLink", noteId: a.id, linkId: link.id,
+    fields: { sourceAnchorId: aAnchor, targetAnchorId: bAnchor }
+  });
+  const anchored = sharedByName("Pin Update A").system.links.find(item => item.id === link.id);
+  assert.equal(anchored.sourceAnchorId, aAnchor);
+  assert.equal(anchored.targetAnchorId, bAnchor);
+
+  await fromPlayer({
+    type: "updateLink", noteId: a.id, linkId: link.id, fields: { sourceAnchorId: "" }
+  });
+  const cleared = sharedByName("Pin Update A").system.links.find(item => item.id === link.id);
+  assert.equal(cleared.sourceAnchorId, "");
+  assert.equal(sharedCard(a.id).anchors[aAnchor], undefined, "the orphaned minor is pruned");
+  assert.ok(sharedCard(b.id).anchors[bAnchor], "the still-referenced target anchor survives");
+});
+
+test("minor anchors survive while any live link or route references them", async () => {
+  const a = await createNoteAt("Pin Prune A", 1400, 600);
+  const b = await createNoteAt("Pin Prune B", 1700, 600);
+  const c = await createNoteAt("Pin Prune C", 2000, 600);
+  await fromPlayer({ type: "addCardAnchor", noteId: a.id, kind: "minor", x: 0.1, y: 0.1 });
+  await fromPlayer({ type: "addCardAnchor", noteId: a.id, kind: "minor", x: 0.9, y: 0.9 });
+  await fromPlayer({ type: "addCardAnchor", noteId: b.id, kind: "minor", x: 0.5, y: 0.5 });
+  const [a1, a2] = minorAnchors(a.id).map(([id]) => id);
+  const [b1] = minorAnchors(b.id).map(([id]) => id);
+
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: b.id,
+    sourceAnchorId: a1, targetAnchorId: b1
+  });
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: c.id,
+    sourceAnchorId: a1, targetPoint: { x: 0, y: 0.5 }
+  });
+  const ab = sharedByName("Pin Prune A").system.links.find(link => link.targetId === b.id);
+  const ac = sharedByName("Pin Prune A").system.links.find(link => link.targetId === c.id);
+
+  await fromPlayer({
+    type: "updateLink", noteId: a.id, linkId: ab.id,
+    fields: { label: "prune now", sourceAnchorId: a1 }
+  });
+  assert.equal(sharedCard(a.id).anchors[a2], undefined, "an unreferenced minor is pruned");
+  assert.ok(sharedCard(a.id).anchors[a1], "an anchor shared by two links survives");
+  assert.ok(sharedCard(b.id).anchors[b1]);
+  assert.ok(sharedCard(a.id).anchors.main, "main is never pruned");
+
+  await fromPlayer({ type: "deleteLink", noteId: a.id, linkId: ab.id });
+  assert.equal(sharedCard(b.id).anchors[b1], undefined, "the last reference to b1 was removed");
+  assert.ok(sharedCard(a.id).anchors[a1], "a1 is still referenced by a-c");
+
+  await fromPlayer({ type: "deleteLink", noteId: a.id, linkId: ac.id });
+  assert.equal(sharedCard(a.id).anchors[a1], undefined, "a1 loses its last reference");
+  assert.ok(sharedCard(a.id).anchors.main);
+});
+
+test("disabling the main pin redistributes every live reference and undo restores it exactly", async () => {
+  const hub = await createNoteAt("Pin Toggle Hub", 3000, 500);
+  const inbound = await createNoteAt("Pin Toggle Inbound", 2700, 500);
+  const outbound = await createNoteAt("Pin Toggle Outbound", 3300, 500);
+  const routeSource = await createNoteAt("Pin Toggle Route Source", 3000, 800);
+  const routeTarget = await createNoteAt("Pin Toggle Route Target", 3000, 1000);
+
+  await fromPlayer({ type: "addCardAnchor", noteId: hub.id, kind: "minor", x: 0, y: 0.5 });
+  const [reuseId] = minorAnchors(hub.id).map(([id]) => id);
+
+  await fromPlayer({
+    type: "createLink", sourceId: inbound.id, targetId: hub.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetAnchorId: "main"
+  });
+  await fromPlayer({
+    type: "createLink", sourceId: hub.id, targetId: outbound.id,
+    sourceAnchorId: "main", targetPoint: { x: 0, y: 0.5 }
+  });
+  await requestWrite({
+    type: "gmAddLink", sourceId: routeSource.id,
+    link: { targetId: routeTarget.id, routeAnchors: [{ noteId: hub.id, anchorId: "main" }] }
+  });
+
+  const before = {
+    hubLinks: structuredClone(sharedByName("Pin Toggle Hub").system.links),
+    inboundLinks: structuredClone(sharedByName("Pin Toggle Inbound").system.links),
+    routeLinks: structuredClone(sharedByName("Pin Toggle Route Source").system.links),
+    hubAnchors: structuredClone(sharedCard(hub.id).anchors)
+  };
+  const inboundLinkId = before.inboundLinks[0].id;
+  const outboundLinkId = before.hubLinks[0].id;
+  const routeLinkId = before.routeLinks[0].id;
+  const undoId = "PinUndoToggle001";
+
+  await fromPlayer({ type: "setMainPinEnabled", noteId: hub.id, enabled: false, undoId });
+  assert.equal(sharedByName("Pin Toggle Hub").system.attachment.mainPinEnabled, false);
+  assert.equal(sharedByName("Pin Toggle Inbound").system.links.length, 1, "inbound link survives");
+  assert.equal(sharedByName("Pin Toggle Hub").system.links.length, 1, "outbound link survives");
+  assert.equal(sharedByName("Pin Toggle Route Source").system.links.length, 1, "route link survives");
+  assert.equal(sharedByName("Pin Toggle Inbound").system.links[0].id, inboundLinkId);
+  assert.equal(sharedByName("Pin Toggle Hub").system.links[0].id, outboundLinkId);
+  assert.equal(sharedByName("Pin Toggle Route Source").system.links[0].id, routeLinkId);
+
+  const inboundLink = sharedByName("Pin Toggle Inbound").system.links[0];
+  assert.equal(inboundLink.targetAnchorId, reuseId, "the nearby minor anchor is reused");
+  assert.deepEqual(inboundLink.targetPoint, { x: 0, y: 0.5 });
+  assert.equal(inboundLink.targetSide, "left");
+
+  const outboundLink = sharedByName("Pin Toggle Hub").system.links[0];
+  assert.notEqual(outboundLink.sourceAnchorId, "main");
+  assert.ok(sharedCard(hub.id).anchors[outboundLink.sourceAnchorId],
+    "a projected replacement minor was created");
+  assert.deepEqual(outboundLink.sourcePoint, { x: 1, y: 0.5 });
+  assert.equal(outboundLink.sourceSide, "right");
+
+  assert.deepEqual(sharedByName("Pin Toggle Route Source").system.links[0].routeAnchors, [],
+    "only the pin-off route waypoint is dropped");
+  assert.ok(sharedCard(hub.id).anchors.main, "the main anchor itself is retained for re-enable");
+
+  await requestWrite({ type: "undoPinChange", undoId });
+  assert.deepEqual(sharedByName("Pin Toggle Hub").system.links, before.hubLinks);
+  assert.deepEqual(sharedByName("Pin Toggle Inbound").system.links, before.inboundLinks);
+  assert.deepEqual(sharedByName("Pin Toggle Route Source").system.links, before.routeLinks);
+  assert.deepEqual(sharedCard(hub.id).anchors, before.hubAnchors);
+  assert.equal(sharedByName("Pin Toggle Hub").system.attachment.mainPinEnabled, true);
+
+  // Re-enabling outside undo restores the pin only; redistributed links stay put.
+  await fromPlayer({ type: "setMainPinEnabled", noteId: hub.id, enabled: false, undoId: "PinUndoToggle002" });
+  const redistributed = {
+    hubLinks: structuredClone(sharedByName("Pin Toggle Hub").system.links),
+    inboundLinks: structuredClone(sharedByName("Pin Toggle Inbound").system.links)
+  };
+  await fromPlayer({ type: "setMainPinEnabled", noteId: hub.id, enabled: true });
+  assert.equal(sharedByName("Pin Toggle Hub").system.attachment.mainPinEnabled, true);
+  assert.ok(sharedCard(hub.id).anchors.main, "re-enabling ensures the canonical main anchor");
+  assert.deepEqual(sharedByName("Pin Toggle Hub").system.links, redistributed.hubLinks,
+    "re-enable does not reattach links");
+  assert.deepEqual(sharedByName("Pin Toggle Inbound").system.links, redistributed.inboundLinks);
+});
+
+test("a failed pin redistribution write rolls the captured state back", async () => {
+  const hub = await createNoteAt("Pin Rollback Hub", 3000, 600);
+  const inbound = await createNoteAt("Pin Rollback Inbound", 2700, 600);
+  await fromPlayer({
+    type: "createLink", sourceId: inbound.id, targetId: hub.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetAnchorId: "main"
+  });
+
+  const before = {
+    hubLinks: structuredClone(sharedByName("Pin Rollback Hub").system.links),
+    inboundLinks: structuredClone(sharedByName("Pin Rollback Inbound").system.links),
+    hubAnchors: structuredClone(sharedCard(hub.id).anchors)
+  };
+
+  const originalUpdate = hub.update.bind(hub);
+  let calls = 0;
+  hub.update = async function update(changes) {
+    calls += 1;
+    if (calls === 1) throw new Error("injected pin write failure");
+    return originalUpdate(changes);
+  };
+  try {
+    await fromPlayer({
+      type: "setMainPinEnabled", noteId: hub.id, enabled: false, undoId: "PinUndoFail0001"
+    });
+  } finally {
+    hub.update = originalUpdate;
+  }
+
+  assert.deepEqual(sharedByName("Pin Rollback Inbound").system.links, before.inboundLinks,
+    "the already-written inbound page was restored");
+  assert.deepEqual(sharedByName("Pin Rollback Hub").system.links, before.hubLinks);
+  assert.deepEqual(sharedCard(hub.id).anchors, before.hubAnchors);
+  assert.equal(sharedByName("Pin Rollback Hub").system.attachment.mainPinEnabled, true);
+
+  // No undo entry was recorded for a failed operation.
+  await requestWrite({ type: "undoPinChange", undoId: "PinUndoFail0001" });
+  assert.deepEqual(sharedByName("Pin Rollback Inbound").system.links, before.inboundLinks);
+});
+
+test("pinsEnabled off blocks new anchors while preserving existing ones", async () => {
+  const note = await createNoteAt("Pin Setting Off", 3600, 600);
+  const target = await createNoteAt("Pin Setting Off Target", 3900, 600);
+  await fromPlayer({ type: "addCardAnchor", noteId: note.id, kind: "minor", x: 0.3, y: 0.4 });
+  const [anchorId] = minorAnchors(note.id).map(([id]) => id);
+  const beforeAnchors = structuredClone(sharedCard(note.id).anchors);
+
+  await game.settings.set("fvtt-journalinator", "pinsEnabled", false);
+  try {
+    await fromPlayer({ type: "addCardAnchor", noteId: note.id, kind: "minor", x: 0.1, y: 0.1 });
+    assert.deepEqual(sharedCard(note.id).anchors, beforeAnchors, "no new anchor is added");
+
+    await fromPlayer({
+      type: "createLink", sourceId: note.id, targetId: target.id,
+      sourceAnchor: { kind: "minor", x: 0.5, y: 0.5 }, targetPoint: { x: 0, y: 0.5 }
+    });
+    assert.equal(sharedByName("Pin Setting Off").system.links.length, 0,
+      "a new anchor spec is rejected while pins are off");
+    assert.deepEqual(sharedCard(note.id).anchors, beforeAnchors);
+
+    await fromPlayer({
+      type: "createLink", sourceId: note.id, targetId: target.id,
+      sourceAnchorId: anchorId, targetPoint: { x: 0, y: 0.5 }
+    });
+    const link = sharedByName("Pin Setting Off").system.links.find(item => item.targetId === target.id);
+    assert.equal(link.sourceAnchorId, anchorId, "existing anchors remain reusable data");
+    assert.deepEqual(sharedCard(note.id).anchors, beforeAnchors, "existing render data is preserved");
+  } finally {
+    await game.settings.set("fvtt-journalinator", "pinsEnabled", true);
+  }
+});
+
+test("hidden links never store shared anchor or route references", async () => {
+  const target = await createNoteAt("Hidden Anchor Target", 3600, 800);
+  await secrets.addHiddenLink(tavernId, target.id, {
+    sourceAnchorId: "main",
+    targetAnchorId: "main",
+    routeAnchors: [{ noteId: tavernId, anchorId: "main" }],
+    sourceSide: "right",
+    targetSide: "left",
+    sourcePoint: { x: 1, y: 0.5 },
+    targetPoint: { x: 0, y: 0.5 }
+  });
+  const hidden = vaultStore.data.hiddenLinks[tavernId].find(link => link.targetId === target.id);
+  assert.equal(hidden.sourceAnchorId, "");
+  assert.equal(hidden.targetAnchorId, "");
+  assert.deepEqual(hidden.routeAnchors, []);
+  assert.deepEqual([hidden.sourceSide, hidden.targetSide], ["right", "left"],
+    "point/side fallback is preserved");
+
+  await secrets.updateHiddenLink(tavernId, hidden.id, {
+    label: "hidden anchor edit",
+    sourceAnchorId: "main",
+    targetAnchorId: "main",
+    routeAnchors: [{ noteId: tavernId, anchorId: "main" }]
+  });
+  const updated = vaultStore.data.hiddenLinks[tavernId].find(link => link.id === hidden.id);
+  assert.equal(updated.label, "hidden anchor edit");
+  assert.equal(updated.sourceAnchorId, "");
+  assert.equal(updated.targetAnchorId, "");
+  assert.deepEqual(updated.routeAnchors, []);
+  assert.deepEqual([updated.sourceSide, updated.targetSide], ["right", "left"]);
+
+  // Hiding a shared link is the other storage path, and must clear anchors too.
+  const secondTarget = await createNoteAt("Hidden Anchor Target 2", 3600, 1000);
+  await requestWrite({
+    type: "createLink", sourceId: tavernId, targetId: secondTarget.id,
+    sourceAnchorId: "main", sourcePoint: { x: 0.5, y: 0 }, targetPoint: { x: 0, y: 0.5 }
+  });
+  const sharedLink = sharedByName("Tavern").system.links.find(link => link.targetId === secondTarget.id);
+  assert.equal(sharedLink.sourceAnchorId, "main");
+  assert.equal(await secrets.hideSharedLink(tavernId, sharedLink.id), true);
+  const hiddenShared = vaultStore.data.hiddenLinks[tavernId]
+    .find(link => link.targetId === secondTarget.id);
+  assert.equal(hiddenShared.sourceAnchorId, "");
+  assert.equal(hiddenShared.targetAnchorId, "");
+  assert.deepEqual(hiddenShared.routeAnchors, []);
+  assert.equal(hiddenShared.sourceSide, "top", "the point/side fallback is preserved");
+});
+
+test("hostile anchor ids never reach dotted updates; pasted/declassified/restored mains are trusted", async () => {
+  const note = await createNoteAt("Anchor Hostile", 4200, 1600);
+  const layout = shared().pages.get(containers.ids.layoutPage);
+  const hostileAnchors = JSON.parse(`{
+    "main": {"kind":"main","x":0.1,"y":0.1,"createdBy":"spoof"},
+    "constructor": {"kind":"minor","x":0.2,"y":0.2,"createdBy":"spoof"},
+    "__proto__": {"kind":"minor","x":0.3,"y":0.3,"createdBy":"spoof"},
+    "a.b": {"kind":"minor","x":0.4,"y":0.4,"createdBy":"spoof"},
+    "safe": {"kind":"minor","x":0.5,"y":0.5,"createdBy":"u"}
+  }`);
+  await layout.update({ [`system.cards.${note.id}.anchors`]: hostileAnchors });
+  const before = JSON.stringify(sharedCard(note.id).anchors);
+  for (const anchorId of ["constructor", "__proto__", "a.b"]) {
+    await fromPlayer({ type: "moveCardAnchor", noteId: note.id, anchorId, x: 0.9, y: 0.9 });
+    await fromPlayer({ type: "removeCardAnchor", noteId: note.id, anchorId });
+  }
+  assert.equal(JSON.stringify(sharedCard(note.id).anchors), before,
+    "invalid/prototype/path ids are rejected before any whole-registry write");
+
+  await fromPlayer({
+    type: "pasteNote", title: "Pasted Anchor Spoof", autoTitle: false,
+    blocks: ["body"],
+    card: {
+      anchors: {
+        legacyMain: { kind: "main", x: 0.1, y: 0.1, createdBy: "spoof" },
+        secondMain: { kind: "main", x: 0.9, y: 0.9, createdBy: "spoof" },
+        copied: { kind: "minor", x: 0.2, y: 0.3, createdBy: "original-minor-author" },
+        constructor: { kind: "minor", x: 0.4, y: 0.4 }
+      }
+    }
+  });
+  const pasted = sharedByName("Pasted Anchor Spoof");
+  const pastedAnchors = sharedCard(pasted.id).anchors;
+  assert.deepEqual(pastedAnchors.main, {
+    kind: "main", x: 0.5, y: 0, createdBy: player.id
+  }, "a pasted non-canonical main folds to main and takes the sender as creator");
+  assert.equal(pastedAnchors.legacyMain, undefined);
+  assert.equal(pastedAnchors.secondMain, undefined);
+  assert.equal(Object.hasOwn(pastedAnchors, "constructor"), false);
+  assert.equal(pastedAnchors.copied.createdBy, "original-minor-author",
+    "copied minor anchors may keep their original creator");
+
+  await requestWrite({
+    type: "gmCreateNote",
+    noteId: "DeclassSpoof0001",
+    title: "Declassified Anchor Spoof",
+    blocks: [{ blockId: "BlockSpoof000001", text: "public" }],
+    card: {
+      x: 4000, y: 1700,
+      anchors: {
+        main: { kind: "main", x: 0.2, y: 0.8, createdBy: "spoof" },
+        copied: { kind: "minor", x: 0.2, y: 0.3, createdBy: "original" }
+      }
+    }
+  });
+  assert.deepEqual(sharedCard("DeclassSpoof0001").anchors.main, {
+    kind: "main", x: 0.5, y: 0, createdBy: gmUser.id
+  }, "declassification stamps the main creator from the GM sender");
+
+  const restored = await createNoteAt("Restore Anchor Spoof", 4200, 1800);
+  await layout.update({
+    [`system.cards.${restored.id}.anchors`]: {
+      main: { kind: "main", x: 0.3, y: 0.7, createdBy: "spoof" },
+      copied: { kind: "minor", x: 0.1, y: 0.2, createdBy: "original" }
+    }
+  });
+  await requestWrite({ type: "deleteNote", noteId: restored.id });
+  await requestWrite({ type: "restoreNote", noteId: restored.id });
+  assert.deepEqual(sharedCard(restored.id).anchors.main, {
+    kind: "main", x: 0.5, y: 0, createdBy: player.id
+  }, "restore stamps the main creator from the note author, not stored spoof data");
+});
+
+test("pruning counts references from trashed note pages, so restore reconnects", async () => {
+  const owner = await createNoteAt("Trash Ref Owner", 4500, 1600);
+  const trashed = await createNoteAt("Trash Ref Source", 4500, 1800);
+  const unrelated = await createNoteAt("Trash Ref Noise A", 4500, 2000);
+  const unrelatedTarget = await createNoteAt("Trash Ref Noise B", 4700, 2000);
+  await fromPlayer({ type: "addCardAnchor", noteId: owner.id, kind: "minor", x: 0.77, y: 0.22 });
+  const [anchorId] = minorAnchors(owner.id).map(([id]) => id);
+  await fromPlayer({
+    type: "createLink", sourceId: trashed.id, targetId: owner.id,
+    sourcePoint: { x: 0, y: 0.5 }, targetAnchorId: anchorId
+  });
+  await fromPlayer({
+    type: "createLink", sourceId: unrelated.id, targetId: unrelatedTarget.id,
+    sourcePoint: { x: 0, y: 0.5 }, targetPoint: { x: 1, y: 0.5 }
+  });
+  const noise = sharedByName("Trash Ref Noise A").system.links[0];
+
+  await requestWrite({ type: "deleteNote", noteId: trashed.id });
+  assert.ok(shared().pages.get(trashed.id).system.deleted, "the link's owner is soft-deleted");
+
+  await fromPlayer({ type: "deleteLink", noteId: unrelated.id, linkId: noise.id });
+  assert.ok(sharedCard(owner.id).anchors[anchorId],
+    "a prune triggered elsewhere keeps an anchor referenced only by a trashed note");
+
+  await fromPlayer({ type: "removeCardAnchor", noteId: owner.id, anchorId });
+  assert.ok(sharedCard(owner.id).anchors[anchorId],
+    "direct removal also respects a trashed note's returning reference");
+
+  await requestWrite({ type: "restoreNote", noteId: trashed.id });
+  const restoredLink = sharedByName("Trash Ref Source").system.links[0];
+  assert.equal(restoredLink.targetAnchorId, anchorId, "the restored link still resolves");
+  assert.ok(sharedCard(owner.id).anchors[anchorId]);
+});
+
+test("updateLink refreshes the endpoint point/side fallback when anchors change", async () => {
+  const a = await createNoteAt("Fallback Link A", 4500, 2300);
+  const b = await createNoteAt("Fallback Link B", 4800, 2300);
+  await fromPlayer({ type: "addCardAnchor", noteId: a.id, kind: "minor", x: 0.8, y: 0.1 });
+  await fromPlayer({ type: "addCardAnchor", noteId: b.id, kind: "minor", x: 0.2, y: 0.9 });
+  const [aAnchor] = minorAnchors(a.id).map(([id]) => id);
+  const [bAnchor] = minorAnchors(b.id).map(([id]) => id);
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: b.id,
+    sourcePoint: { x: 0, y: 0.5 }, sourceSide: "left",
+    targetPoint: { x: 1, y: 0.5 }, targetSide: "right"
+  });
+  const link = sharedByName("Fallback Link A").system.links[0];
+
+  await fromPlayer({
+    type: "updateLink", noteId: a.id, linkId: link.id,
+    fields: { sourceAnchorId: aAnchor, targetAnchorId: bAnchor }
+  });
+  let updated = sharedByName("Fallback Link A").system.links[0];
+  assert.deepEqual(updated.sourcePoint, { x: 0.8, y: 0.1 });
+  assert.equal(updated.sourceSide, "top", "source side follows the new anchor");
+  assert.deepEqual(updated.targetPoint, { x: 0.2, y: 0.9 });
+  assert.equal(updated.targetSide, "bottom", "target side follows the new anchor");
+
+  await fromPlayer({
+    type: "updateLink", noteId: a.id, linkId: link.id, fields: { sourceAnchorId: "" }
+  });
+  updated = sharedByName("Fallback Link A").system.links[0];
+  assert.equal(updated.sourceAnchorId, "");
+  assert.deepEqual(updated.sourcePoint, { x: 0.8, y: 0.1 },
+    "clearing an anchor keeps the last released point as the hidden/legacy fallback");
+  assert.equal(updated.sourceSide, "top");
+});
+
+test("main-pin redistribution uses the clamped measured box and compact/extended fallbacks", async () => {
+  // Stored card is 200x100, but the client reports a narrow/tall measured box. The same target
+  // projects to the bottom edge with the stored box and to the right edge with the reported one.
+  const hub = await createNoteAt("Pin Box Hub", 5000, 1000);
+  const target = await createNoteAt("Pin Box Target", 5050, 1150);
+  await fromPlayer({
+    type: "createLink", sourceId: hub.id, targetId: target.id,
+    sourceAnchorId: "main", targetPoint: { x: 0, y: 0.5 }
+  });
+  await fromPlayer({
+    type: "setMainPinEnabled", noteId: hub.id, enabled: false, undoId: "PinBoxUndo0001",
+    box: { w: 40, h: 1000, x: -999999, rotation: 45 }
+  });
+  const outbound = sharedByName("Pin Box Hub").system.links[0];
+  assert.equal(outbound.sourceSide, "right",
+    "client w/h drive projection while x/rotation are ignored");
+  assert.equal(outbound.sourcePoint.x, 1);
+  assert.ok(sharedCard(hub.id).anchors[outbound.sourceAnchorId]);
+
+  // No stored width/height: compact and extended cards still get a usable fallback box.
+  await fromPlayer({ type: "createNote", title: "Pin Box Compact", x: 5200, y: 1000 });
+  const compact = sharedByName("Pin Box Compact");
+  await fromPlayer({ type: "createNote", title: "Pin Box Extended", x: 5200, y: 1200 });
+  const extended = sharedByName("Pin Box Extended");
+  await requestWrite({
+    type: "setNotePresentation", noteIds: [extended.id], fields: { forceExtended: true }
+  });
+  for (const [source, label] of [[compact, "compact"], [extended, "extended"]]) {
+    const targetNote = await createNoteAt(`Pin Box ${label} Target`, 5400, source === compact ? 1000 : 1200);
+    await fromPlayer({
+      type: "createLink", sourceId: source.id, targetId: targetNote.id,
+      sourceAnchorId: "main", targetPoint: { x: 0, y: 0.5 }
+    });
+    await fromPlayer({
+      type: "setMainPinEnabled", noteId: source.id, enabled: false,
+      undoId: `PinBox${label}Undo`.slice(0, 100)
+    });
+    const link = sharedByName(source.name).system.links[0];
+    assert.notEqual(link.sourceAnchorId, "main", `${label} redistribution creates a minor`);
+    assert.ok(sharedCard(source.id).anchors[link.sourceAnchorId]);
+    assert.ok(["top", "right", "bottom", "left"].includes(link.sourceSide));
+  }
+});
+
+test("stale pin undo refuses to clobber later edits or a re-enabled main pin", async () => {
+  const hub = await createNoteAt("Pin Stale Hub", 5600, 1000);
+  const inbound = await createNoteAt("Pin Stale Inbound", 5400, 1000);
+  await fromPlayer({
+    type: "createLink", sourceId: inbound.id, targetId: hub.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetAnchorId: "main"
+  });
+
+  // A label edit is outside the undo's write set, so it survives while links are restored.
+  await fromPlayer({ type: "setMainPinEnabled", noteId: hub.id, enabled: false, undoId: "PinStaleLabel01" });
+  await fromPlayer({ type: "setNoteLabel", noteId: hub.id, label: "Edited after pin-off" });
+  await requestWrite({ type: "undoPinChange", undoId: "PinStaleLabel01" });
+  assert.equal(sharedByName("Pin Stale Hub").system.label, "Edited after pin-off");
+  assert.equal(sharedByName("Pin Stale Hub").system.attachment.mainPinEnabled, true);
+
+  // Disable, then re-enable: the old undo entry is stale and must not reattach the main pin.
+  await fromPlayer({ type: "setMainPinEnabled", noteId: hub.id, enabled: false, undoId: "PinStaleEnable01" });
+  const redistributed = structuredClone(sharedByName("Pin Stale Inbound").system.links);
+  await fromPlayer({ type: "setMainPinEnabled", noteId: hub.id, enabled: true });
+  env.notifications.length = 0;
+  await requestWrite({ type: "undoPinChange", undoId: "PinStaleEnable01" });
+  assert.equal(sharedByName("Pin Stale Hub").system.attachment.mainPinEnabled, true,
+    "a stale undo does not switch the main pin off again");
+  assert.deepEqual(sharedByName("Pin Stale Inbound").system.links, redistributed,
+    "a stale undo does not reattach the old main endpoint");
+  assert.ok(env.notifications.some(([, message]) => message.includes("can no longer be undone")),
+    "the requester is told why the undo was refused");
+
+  // A later link edit makes an otherwise current undo stale as well.
+  const link = sharedByName("Pin Stale Inbound").system.links[0];
+  await fromPlayer({
+    type: "updateLink", noteId: inbound.id, linkId: link.id, fields: { label: "newer edit" }
+  });
+  await requestWrite({ type: "undoPinChange", undoId: "PinStaleEnable01" });
+  assert.equal(sharedByName("Pin Stale Inbound").system.links[0].label, "newer edit");
+});
+
+test("pin undo restores a partial raw attachment exactly", async () => {
+  const hub = await createNoteAt("Pin Raw Attachment", 5800, 1000);
+  const raw = { mainSnapRadius: 12, customFutureField: { keep: true } };
+  await requestWrite({
+    type: "setNoteAttachment", noteIds: [hub.id], fields: { pinStyle: "wax" }
+  });
+  const page = sharedByName("Pin Raw Attachment");
+  await page.update({ "system.attachment": structuredClone(raw) });
+  assert.equal(page.system.attachment.mainPinEnabled, undefined, "raw fixture has no resolved defaults");
+
+  await fromPlayer({ type: "setMainPinEnabled", noteId: hub.id, enabled: false, undoId: "PinRawUndo0001" });
+  assert.deepEqual(page.system.attachment, { ...raw, mainPinEnabled: false });
+  await requestWrite({ type: "undoPinChange", undoId: "PinRawUndo0001" });
+  assert.deepEqual(page.system.attachment, raw,
+    "undo restores the stored attachment block byte-for-byte, not resolved defaults");
+});
+
+test("setMainPinEnabled is a no-op for missing notes/cards and the dedicated path still works", async () => {
+  await fromPlayer({ type: "setMainPinEnabled", noteId: "MissingNote00001", enabled: false });
+  const note = await createNoteAt("Pin No Card", 6000, 1000);
+  const layout = shared().pages.get(containers.ids.layoutPage);
+  const card = structuredClone(layout.system.cards[note.id]);
+  await layout.update({ [`system.cards.-=${note.id}`]: null });
+  await fromPlayer({ type: "setMainPinEnabled", noteId: note.id, enabled: false, undoId: "PinNoCardUndo01" });
+  assert.equal(sharedByName("Pin No Card").system.attachment.mainPinEnabled, true,
+    "a missing layout card is a no-op");
+  await layout.update({ [`system.cards.${note.id}`]: card });
+  await fromPlayer({ type: "setMainPinEnabled", noteId: note.id, enabled: false, undoId: "PinNoCardUndo02" });
+  assert.equal(sharedByName("Pin No Card").system.attachment.mainPinEnabled, false);
+  await fromPlayer({ type: "setMainPinEnabled", noteId: note.id, enabled: true });
+  assert.equal(sharedByName("Pin No Card").system.attachment.mainPinEnabled, true);
+});
+
+test("projection box sanitizer rejects non-finite/string values and clamps extremes", () => {
+  assert.equal(sanitizeProjectionBox(null), null);
+  assert.equal(sanitizeProjectionBox({ w: Infinity, h: 100 }), null);
+  assert.equal(sanitizeProjectionBox({ w: 100, h: Number.NaN }), null);
+  assert.equal(sanitizeProjectionBox({ w: "40", h: 100 }), null, "strings are not measurements");
+  assert.deepEqual(sanitizeProjectionBox({ w: -50, h: -50 }), { w: 40, h: 40 });
+  assert.deepEqual(sanitizeProjectionBox({ w: 1e12, h: 1e12 }), { w: 2000, h: 2000 });
+  assert.deepEqual(sanitizeProjectionBox({ w: 200, h: 100, x: 1e12, rotation: 45 }),
+    { w: 200, h: 100 }, "only client w/h are read");
+});
+
+test("disabling the main pin redistributes a trashed inbound link; restore and undo stay correct", async () => {
+  const hub = await createNoteAt("Pin Trash Hub", 6500, 1400);
+  const source = await createNoteAt("Pin Trash Source", 6200, 1400);
+  await fromPlayer({
+    type: "createLink", sourceId: source.id, targetId: hub.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetAnchorId: "main"
+  });
+  const before = {
+    sourceLinks: structuredClone(sharedByName("Pin Trash Source").system.links),
+    hubAnchors: structuredClone(sharedCard(hub.id).anchors)
+  };
+  await requestWrite({ type: "deleteNote", noteId: source.id });
+  assert.ok(shared().pages.get(source.id).system.deleted);
+
+  const undoId = "PinTrashUndo001";
+  await fromPlayer({ type: "setMainPinEnabled", noteId: hub.id, enabled: false, undoId });
+  assert.equal(sharedByName("Pin Trash Hub").system.attachment.mainPinEnabled, false);
+  const trashedLink = shared().pages.get(source.id).system.links[0];
+  assert.equal(trashedLink.id, before.sourceLinks[0].id, "the trashed link survives");
+  assert.notEqual(trashedLink.targetAnchorId, "main",
+    "a trashed link is redistributed too, not left dangling on main");
+  assert.ok(trashedLink.targetAnchorId === ""
+    || sharedCard(hub.id).anchors[trashedLink.targetAnchorId], "its replacement resolves");
+
+  await requestWrite({ type: "restoreNote", noteId: source.id });
+  const restoredLink = sharedByName("Pin Trash Source").system.links[0];
+  assert.notEqual(restoredLink.targetAnchorId, "main", "restore does not reattach to the disabled main");
+  assert.equal(sharedByName("Pin Trash Hub").system.attachment.mainPinEnabled, false);
+
+  await requestWrite({ type: "undoPinChange", undoId });
+  assert.deepEqual(sharedByName("Pin Trash Source").system.links, before.sourceLinks);
+  assert.deepEqual(sharedCard(hub.id).anchors, before.hubAnchors);
+  assert.equal(sharedByName("Pin Trash Hub").system.attachment.mainPinEnabled, true);
+});
+
+test("redistribution at the anchor cap drops new pins but keeps a valid link fallback", async () => {
+  const hub = await createNoteAt("Pin Cap Hub", 6500, 1600);
+  const inbound = await createNoteAt("Pin Cap Inbound", 6200, 1600);
+  const layout = shared().pages.get(containers.ids.layoutPage);
+  const anchors = {
+    main: { kind: "main", x: 0.5, y: 0, createdBy: player.id }
+  };
+  for (let i = 0; i < 255; i++) {
+    anchors[`m${i}`] = { kind: "minor", x: 0.1, y: 0.1, createdBy: player.id };
+  }
+  await layout.update({ [`system.cards.${hub.id}.anchors`]: anchors });
+  await fromPlayer({
+    type: "createLink", sourceId: inbound.id, targetId: hub.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetAnchorId: "main"
+  });
+
+  await fromPlayer({
+    type: "setMainPinEnabled", noteId: hub.id, enabled: false, undoId: "PinCapUndo0001"
+  });
+  assert.equal(Object.keys(sharedCard(hub.id).anchors).length, 256,
+    "redistribution cannot exceed the shared anchor cap");
+  const link = sharedByName("Pin Cap Inbound").system.links[0];
+  assert.ok(link, "the inbound link is not lost");
+  assert.equal(link.targetAnchorId, "", "no over-cap pin id is invented");
+  assert.deepEqual(link.targetPoint, { x: 0, y: 0.5 }, "the projected fallback is stored");
+  assert.ok(["top", "right", "bottom", "left"].includes(link.targetSide));
+  assert.equal(sharedByName("Pin Cap Hub").system.attachment.mainPinEnabled, false);
+});
+
+test("disabled main pins cannot be chosen as new link endpoints, but legacy links still work", async () => {
+  const hub = await createNoteAt("Disabled Main Hub", 6500, 1800);
+  const source = await createNoteAt("Disabled Main Source", 6200, 1800);
+  await fromPlayer({
+    type: "setMainPinEnabled", noteId: hub.id, enabled: false, undoId: "PinDisabledUndo01"
+  });
+  await fromPlayer({
+    type: "setMainPinEnabled", noteId: source.id, enabled: false, undoId: "PinDisabledUndo02"
+  });
+
+  await fromPlayer({
+    type: "createLink", sourceId: source.id, targetId: hub.id,
+    sourcePoint: { x: 1, y: 0.5 }, targetAnchorId: "main"
+  });
+  assert.equal(sharedByName("Disabled Main Source").system.links.length, 0,
+    "a new target choice cannot select a disabled main");
+
+  await fromPlayer({
+    type: "createLink", sourceId: source.id, targetId: hub.id,
+    sourceAnchorId: "main", targetPoint: { x: 0, y: 0.5 }
+  });
+  assert.equal(sharedByName("Disabled Main Source").system.links.length, 0,
+    "a new source choice cannot select a disabled main");
+
+  const legacyId = "LegacyMainLink01";
+  await sharedByName("Disabled Main Source").update({
+    "system.links": [{
+      id: legacyId, targetId: hub.id, label: "", direction: "one", color: "", lineStyle: "solid",
+      origin: "drawn", edited: false, createdBy: player.id, hint: false,
+      sourceAnchorId: "main", targetAnchorId: "main",
+      sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 }
+    }]
+  });
+  await fromPlayer({
+    type: "updateLink", noteId: source.id, linkId: legacyId, fields: { label: "legacy renders" }
+  });
+  let legacy = sharedByName("Disabled Main Source").system.links[0];
+  assert.equal(legacy.label, "legacy renders", "an existing link may still be edited");
+  assert.equal(legacy.targetAnchorId, "main", "legacy anchor data is preserved for rendering");
+
+  await fromPlayer({
+    type: "updateLink", noteId: source.id, linkId: legacyId,
+    fields: { label: "must not apply", targetAnchorId: "main" }
+  });
+  legacy = sharedByName("Disabled Main Source").system.links[0];
+  assert.equal(legacy.label, "legacy renders", "re-selecting the disabled main is rejected");
+});
+
+test("moving a minor anchor refreshes fallbacks used by hide and reveal", async () => {
+  const a = await createNoteAt("Move Anchor A", 6500, 2000);
+  const b = await createNoteAt("Move Anchor B", 6800, 2000);
+  await fromPlayer({ type: "addCardAnchor", noteId: a.id, kind: "minor", x: 0.2, y: 0.2 });
+  const [anchorId] = minorAnchors(a.id).map(([id]) => id);
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: b.id,
+    sourceAnchorId: anchorId, sourcePoint: { x: 0.2, y: 0.2 }, sourceSide: "top",
+    targetPoint: { x: 0, y: 0.5 }
+  });
+  const link = sharedByName("Move Anchor A").system.links[0];
+
+  await fromPlayer({ type: "moveCardAnchor", noteId: a.id, anchorId, x: 0.85, y: 0.85 });
+  let moved = sharedByName("Move Anchor A").system.links[0];
+  assert.deepEqual([moved.sourcePoint.x, moved.sourcePoint.y], [0.85, 0.85]);
+  assert.equal(moved.sourceSide, "bottom");
+
+  assert.equal(await secrets.hideSharedLink(a.id, link.id), true);
+  const hidden = vaultStore.data.hiddenLinks[a.id].find(item => item.targetId === b.id);
+  assert.ok(hidden);
+  assert.deepEqual([hidden.sourcePoint.x, hidden.sourcePoint.y], [0.85, 0.85],
+    "hiding stores the refreshed fallback");
+  assert.equal(hidden.sourceSide, "bottom");
+
+  assert.equal(await secrets.revealLink(a.id, hidden.id), true);
+  const revealed = sharedByName("Move Anchor A").system.links.find(item => item.targetId === b.id);
+  assert.equal(revealed.sourceAnchorId, "");
+  assert.deepEqual([revealed.sourcePoint.x, revealed.sourcePoint.y], [0.85, 0.85],
+    "revealing keeps the new fallback position");
+  assert.equal(revealed.sourceSide, "bottom");
+});
+
+test("a referenced non-canonical main folds to the canonical main instead of keeping two", async () => {
+  const note = await createNoteAt("Non Canonical Main", 6500, 2200);
+  const target = await createNoteAt("Non Canonical Target", 6800, 2200);
+  const noise = await createNoteAt("Non Canonical Noise", 7000, 2200);
+  const noiseTarget = await createNoteAt("Non Canonical Noise Target", 7200, 2200);
+  const layout = shared().pages.get(containers.ids.layoutPage);
+  await layout.update({
+    [`system.cards.${note.id}.anchors`]: {
+      main: { kind: "main", x: 0.9, y: 0.9, createdBy: player.id },
+      legacyMain: { kind: "main", x: 0.1, y: 0.2, createdBy: player.id },
+      keep: { kind: "minor", x: 0.3, y: 0.4, createdBy: player.id }
+    }
+  });
+  await fromPlayer({
+    type: "createLink", sourceId: note.id, targetId: target.id,
+    sourceAnchorId: "legacyMain", targetPoint: { x: 0, y: 0.5 }
+  });
+  await fromPlayer({
+    type: "createLink", sourceId: noise.id, targetId: noiseTarget.id,
+    sourcePoint: { x: 0, y: 0.5 }, targetPoint: { x: 1, y: 0.5 }
+  });
+  const noiseLink = sharedByName("Non Canonical Noise").system.links[0];
+  await fromPlayer({ type: "deleteLink", noteId: noise.id, linkId: noiseLink.id });
+
+  const anchors = sharedCard(note.id).anchors;
+  assert.deepEqual(anchors.main, {
+    kind: "main", x: 0.5, y: 0, createdBy: player.id
+  }, "the surviving main is folded to the canonical position");
+  assert.equal(anchors.legacyMain, undefined);
+  assert.equal(Object.values(anchors).filter(anchor => anchor.kind === "main").length, 1,
+    "pruning never preserves two mains");
+  const link = sharedByName("Non Canonical Main").system.links[0];
+  assert.equal(link.sourceAnchorId, "main", "the link follows the folded main id");
+});
+
+test("pin undo restores null and absent raw attachments exactly", async () => {
+  const nullHub = await createNoteAt("Pin Raw Null", 6500, 2400);
+  const nullPage = sharedByName("Pin Raw Null");
+  await nullPage.update({ "system.attachment": null });
+  assert.equal(nullPage.system.attachment, null);
+  await fromPlayer({
+    type: "setMainPinEnabled", noteId: nullHub.id, enabled: false, undoId: "PinRawNull0001"
+  });
+  assert.deepEqual(nullPage.system.attachment, { mainPinEnabled: false });
+  await requestWrite({ type: "undoPinChange", undoId: "PinRawNull0001" });
+  assert.equal(nullPage.system.attachment, null, "null round-trips as null, not resolved defaults");
+
+  const absentHub = await createNoteAt("Pin Raw Absent", 6500, 2600);
+  const absentPage = sharedByName("Pin Raw Absent");
+  await absentPage.update({ "system.-=attachment": null });
+  assert.equal(Object.hasOwn(absentPage.system, "attachment"), false);
+  await fromPlayer({
+    type: "setMainPinEnabled", noteId: absentHub.id, enabled: false, undoId: "PinRawAbsent01"
+  });
+  assert.deepEqual(absentPage.system.attachment, { mainPinEnabled: false });
+  await requestWrite({ type: "undoPinChange", undoId: "PinRawAbsent01" });
+  assert.equal(Object.hasOwn(absentPage.system, "attachment"), false,
+    "an absent attachment stays absent after undo");
+});
+
+test("successful pin writes are acknowledged, failed ones are not", async () => {
+  const hub = await createNoteAt("Pin Ack Hub", 6500, 2800);
+  const undoId = "PinAckUndo0001";
+  const before = env.socketLog.length;
+  await fromPlayer({ type: "setMainPinEnabled", noteId: hub.id, enabled: false, undoId });
+  const acks = env.socketLog.slice(before).map(entry => entry.message)
+    .filter(message => message.type === "writeApplied");
+  assert.deepEqual(acks, [{
+    type: "writeApplied", forUserId: player.id, kind: "pin", undoId
+  }]);
+
+  const seen = [];
+  const hookId = Hooks.on("journalinatorWriteApplied", message => seen.push(message));
+  try {
+    env.deliver({ type: "writeApplied", forUserId: player.id, kind: "pin", undoId }, gmUser.id);
+    assert.equal(seen.length, 0, "another client's acknowledgement is ignored");
+    env.deliver({ type: "writeApplied", forUserId: gmUser.id, kind: "pin", undoId }, gmUser.id);
+    assert.equal(seen.length, 1, "the active GM acknowledgement emits the hook");
+    assert.equal(seen[0].undoId, undoId);
+    env.deliver({ type: "writeApplied", forUserId: gmUser.id, kind: "pin", undoId: "Spoof" }, player.id);
+    assert.equal(seen.length, 1, "a non-GM sender cannot forge an acknowledgement");
+  } finally {
+    Hooks.off("journalinatorWriteApplied", hookId);
+  }
+
+  const failedHub = await createNoteAt("Pin Ack Fail", 6500, 3000);
+  const originalUpdate = failedHub.update.bind(failedHub);
+  failedHub.update = async () => { throw new Error("injected acknowledgement failure"); };
+  const beforeFailure = env.socketLog.length;
+  try {
+    await fromPlayer({
+      type: "setMainPinEnabled", noteId: failedHub.id, enabled: false, undoId: "PinAckFail0001"
+    });
+  } finally {
+    failedHub.update = originalUpdate;
+  }
+  assert.equal(env.socketLog.slice(beforeFailure).some(entry =>
+    entry.message.type === "writeApplied" && entry.message.undoId === "PinAckFail0001"), false,
+  "a rolled-back write sends no acknowledgement and consumes no Ctrl+Z entry");
+  assert.equal(sharedByName("Pin Ack Fail").system.attachment.mainPinEnabled, true);
+});
+
+test("declassifying a note clears legacy anchors from links that stay secret", async () => {
+  const sourceId = await secrets.createSecretNote({ title: "Legacy Anchor Source", x: 7300, y: 3000 });
+  const targetId = await secrets.createSecretNote({ title: "Legacy Anchor Target", x: 7500, y: 3000 });
+  await vaultStore.mutate(vault => {
+    vault.notes[sourceId].links = [{
+      id: "LegacyHiddenLink1", targetId,
+      sourceAnchorId: "main", targetAnchorId: "minor-legacy",
+      routeAnchors: [{ noteId: tavernId, anchorId: "main" }],
+      sourceSide: "right", targetSide: "left",
+      sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 }
+    }];
+  });
+  assert.equal(await secrets.declassifyNote(sourceId, "Published Legacy Anchor"), true);
+  const kept = vaultStore.data.hiddenLinks[sourceId].find(link => link.targetId === targetId);
+  assert.ok(kept, "the still-secret link is retained in the vault");
+  assert.equal(kept.sourceAnchorId, "");
+  assert.equal(kept.targetAnchorId, "");
+  assert.deepEqual(kept.routeAnchors, []);
+  assert.equal(kept.sourceSide, "right", "the point/side fallback still renders");
+  assert.ok(vaultStore.data.notes[targetId], "the target note stays secret");
+});
+
+test("the pin undo register evicts its oldest entry at 20", async () => {
+  const hubs = [];
+  for (let i = 0; i < 21; i++) {
+    const title = `Pin Undo Cap ${i}`;
+    await requestWrite({ type: "createNote", title, x: 6500 + i * 220, y: 3200 });
+    hubs.push(sharedByName(title));
+  }
+  for (let i = 0; i < hubs.length; i++) {
+    await requestWrite({
+      type: "setMainPinEnabled", noteId: hubs[i].id, enabled: false,
+      undoId: `PinUndoCap${String(i).padStart(3, "0")}`
+    });
+  }
+  await requestWrite({ type: "undoPinChange", undoId: "PinUndoCap000" });
+  assert.equal(sharedByName("Pin Undo Cap 0").system.attachment.mainPinEnabled, false,
+    "the oldest entry has been evicted");
+  await requestWrite({ type: "undoPinChange", undoId: "PinUndoCap001" });
+  assert.equal(sharedByName("Pin Undo Cap 1").system.attachment.mainPinEnabled, true,
+    "the next entry is still available");
+});
+
+test("restoring a note with a disabled main pin does not invent a main anchor", async () => {
+  const note = await createNoteAt("Restore Disabled Main", 12000, 1000);
+  const layout = shared().pages.get(containers.ids.layoutPage);
+  await layout.update({ [`system.cards.${note.id}.anchors`]: {} });
+  await fromPlayer({
+    type: "setMainPinEnabled", noteId: note.id, enabled: false, undoId: "RestoreDisabled01"
+  });
+  assert.equal(sharedByName("Restore Disabled Main").system.attachment.mainPinEnabled, false);
+  await requestWrite({ type: "deleteNote", noteId: note.id });
+  await requestWrite({ type: "restoreNote", noteId: note.id });
+  assert.equal(sharedByName("Restore Disabled Main").system.attachment.mainPinEnabled, false);
+  assert.equal(sharedCard(note.id).anchors.main, undefined,
+    "restore only adds a main anchor when the note still wants one");
 });
 
 test("final player-visible dump still excludes the remaining secret notes", () => {

@@ -168,6 +168,21 @@ test("card anchor sanitizing enforces bounds and the main-anchor convention", ()
   const many = Object.fromEntries(Array.from({ length: 300 }, (_, i) =>
     [`a${i}`, { kind: "minor", x: 0.5, y: 0.5 }]));
   assert.equal(Object.keys(sanitizeCardAnchors(many)).length, 256);
+
+  // Non-canonical mains fold to the single `main` key; the following mains are dropped.
+  assert.deepEqual(sanitizeCardAnchors({
+    legacyMain: { kind: "main", x: 0.1, y: 0.1, createdBy: "first" },
+    anotherMain: { kind: "main", x: 0.9, y: 0.9, createdBy: "second" },
+    minor: { kind: "minor", x: 0.2, y: 0.3, createdBy: "u" }
+  }), {
+    minor: { kind: "minor", x: 0.2, y: 0.3, createdBy: "u" },
+    main: { kind: "main", x: 0.5, y: 0, createdBy: "first" }
+  });
+  // Hostile prototype/path keys never become registry entries.
+  const hostile = JSON.parse('{"constructor":{"kind":"minor","x":0.1,"y":0.1},"a.b":{"kind":"minor","x":0.1,"y":0.1},"ok":{"kind":"minor","x":0.1,"y":0.1}}');
+  assert.deepEqual(sanitizeCardAnchors(hostile), {
+    ok: { kind: "minor", x: 0.1, y: 0.1, createdBy: "" }
+  });
 });
 
 test("card anchor migration adds a main anchor without losing minors", () => {

@@ -106,6 +106,9 @@ export default class JournalApp extends ApplicationV2 {
   #focusedCanvasRenders = new WeakSet();
   #lastAppliedTheme = null;
   #deletionHistory = [];
+  // Client-side pin undo ids only. The active GM keeps the authoritative before/after
+  // fingerprints and refuses a stale id, so we do not need to chase every later write here.
+  #pinHistory = [];
   #clipboard = [];
   #replacingHTML = false;
   #editor = new NoteEditor({
@@ -116,7 +119,8 @@ export default class JournalApp extends ApplicationV2 {
       if (slot && this.#selectedNoteId === id) this.#editor.editBoardBlock(id, blockId, slot);
     },
     onFocusNote: id => this.#canvas.focusNote(id),
-    onSelectNote: id => { this.#selectedNoteId = id; this.render(); }
+    onSelectNote: id => { this.#selectedNoteId = id; this.render(); },
+    onSetMainPinEnabled: (id, enabled) => this.#setMainPinEnabled(id, enabled)
   });
   // Every canvas action is routed by what it touches: GM-only things go to the vault in this
   // client, everything else is a normal shared write request (spec §14).
@@ -189,6 +193,9 @@ export default class JournalApp extends ApplicationV2 {
     onDeleteLink: (noteId, linkId) => notesStore.isHiddenLink(noteId, linkId)
       ? gm(() => secrets.deleteHiddenLink(noteId, linkId))
       : requestWrite({ type: "deleteLink", noteId, linkId }),
+    onAddCardAnchor: (noteId, anchor) => this.#addCardAnchor(noteId, anchor),
+    onMoveCardAnchor: (noteId, anchorId, x, y) => this.#moveCardAnchor(noteId, anchorId, x, y),
+    onRemoveCardAnchor: (noteId, anchorId) => this.#removeCardAnchor(noteId, anchorId),
     onHideLink: (noteId, linkId) => gm(() => secrets.hideSharedLink(noteId, linkId)),
     onRevealLink: (noteId, linkId) => gm(() => secrets.revealLink(noteId, linkId)),
     onToggleLinkHint: (noteId, linkId, hint) => requestWrite({ type: "gmSetLinkHint", noteId, linkId, hint }),
@@ -209,6 +216,57 @@ export default class JournalApp extends ApplicationV2 {
   #removeLabel(labelId) {
     if (notesStore.isHiddenLabel(labelId)) return gm(() => secrets.removeHiddenLabel(labelId));
     return requestWrite({ type: "removeLabel", labelId });
+  }
+
+  /** Main-pin removal is undoable; enabling only reveals the pin again. */
+  #setMainPinEnabled(noteId, enabled) {
+    if (typeof enabled !== "boolean") return;
+    // Projection uses the real measured card size, which is more accurate than stored geometry
+    // for auto-sized cards. Only w/h are sent; the server keeps x/y/rotation authoritative.
+    const measured = this.#canvas.cardBox(noteId);
+    const box = measured ? { w: measured.w, h: measured.h } : undefined;
+    if (!enabled) {
+      const undoId = foundry.utils.randomID();
+      // The active GM acknowledges the successful write; only then does it become an undo step.
+      // A rejected/failed request must not consume Ctrl+Z.
+      return requestWrite({ type: "setMainPinEnabled", noteId, enabled: false, undoId, box });
+    }
+    return requestWrite({ type: "setMainPinEnabled", noteId, enabled: true, box });
+  }
+
+  /**
+   * Secret helpers may not expose card-anchor writes; skip rather than falling back to a shared
+   * request that cannot resolve a vault note. Normal shared notes use the GM-mediated handlers.
+   */
+  #addCardAnchor(noteId, anchor) {
+    if (!anchor || anchor.kind !== "minor"
+        || !Number.isFinite(anchor.x) || !Number.isFinite(anchor.y)) return;
+    if (notesStore.isSecretNote(noteId)) {
+      return typeof secrets.addSecretCardAnchor === "function"
+        ? gm(() => secrets.addSecretCardAnchor(noteId, anchor)) : undefined;
+    }
+    return requestWrite({
+      type: "addCardAnchor", noteId, kind: "minor", x: anchor.x, y: anchor.y
+    });
+  }
+
+  #moveCardAnchor(noteId, anchorId, x, y) {
+    if (typeof anchorId !== "string" || !anchorId
+        || !Number.isFinite(x) || !Number.isFinite(y)) return;
+    if (notesStore.isSecretNote(noteId)) {
+      return typeof secrets.moveSecretCardAnchor === "function"
+        ? gm(() => secrets.moveSecretCardAnchor(noteId, anchorId, x, y)) : undefined;
+    }
+    return requestWrite({ type: "moveCardAnchor", noteId, anchorId, x, y });
+  }
+
+  #removeCardAnchor(noteId, anchorId) {
+    if (typeof anchorId !== "string" || !anchorId) return;
+    if (notesStore.isSecretNote(noteId)) {
+      return typeof secrets.removeSecretCardAnchor === "function"
+        ? gm(() => secrets.removeSecretCardAnchor(noteId, anchorId)) : undefined;
+    }
+    return requestWrite({ type: "removeCardAnchor", noteId, anchorId });
   }
 
   /** True when any visible note watches this base actor (synthetic token actors included). */
@@ -409,6 +467,13 @@ export default class JournalApp extends ApplicationV2 {
     this.#hookIds.push(["journalinatorLocksChanged", Hooks.on("journalinatorLocksChanged", rerender)]);
     this.#hookIds.push(["journalinatorVaultChanged", Hooks.on("journalinatorVaultChanged", rerender)]);
     this.#hookIds.push(["journalinatorThemeRegistered", Hooks.on("journalinatorThemeRegistered", rerender)]);
+    this.#hookIds.push(["journalinatorWriteApplied", Hooks.on("journalinatorWriteApplied", message => {
+      // Commit client-side undo only after the active GM confirms the write actually landed.
+      if (message?.forUserId !== game.user.id) return;
+      if (message.kind !== "pin" || typeof message.undoId !== "string" || !message.undoId) return;
+      this.#pinHistory.push({ kind: "pin", undoId: message.undoId });
+      if (this.#pinHistory.length > 20) this.#pinHistory.shift();
+    })]);
     const rerenderForScene = () => {
       if ((game.settings.get("fvtt-journalinator", "boardTheme") ?? "stylized") !== SCENE_THEME_ID) return;
       clearSceneThemeCache();
@@ -529,6 +594,11 @@ export default class JournalApp extends ApplicationV2 {
           && (ev.code === "KeyZ" || ev.key.toLowerCase() === "z")) {
         consume();
         if (ev.repeat) return;
+        const pinUndo = this.#pinHistory.pop();
+        if (pinUndo) {
+          requestWrite({ type: "undoPinChange", undoId: pinUndo.undoId });
+          return;
+        }
         const deleted = this.#deletionHistory.pop();
         if (!deleted) return;
         for (const noteId of deleted.noteIds) requestWrite({ type: "restoreNote", noteId, undoId: deleted.undoId });
@@ -559,6 +629,14 @@ export default class JournalApp extends ApplicationV2 {
     if (!q) return true;
     const author = game.users.get(note.system.authorId)?.name ?? "";
     return noteMatchesQuery(note, q, author);
+  }
+
+  #pinsEnabled() {
+    try {
+      return game.settings?.get?.("fvtt-journalinator", "pinsEnabled") !== false;
+    } catch {
+      return true;
+    }
   }
 
   #matchesFilters(note) {
@@ -727,6 +805,7 @@ export default class JournalApp extends ApplicationV2 {
       this.#private.setPage(privatePage);
       if (privatePage) {
         this.#private.canvas.setTheme(context.themeObj);
+        this.#private.canvas.pinsEnabled = this.#pinsEnabled();
         this.#private.renderInto(root.querySelector(".journalinator-canvas-slot"), root.querySelector(".journalinator-editor"));
         this.#private.setDimMatch(note => this.#matchesQuery(note, context.query) && this.#matchesFilters(note));
         if (document.activeElement === this.#private.canvas.root) this.#focusedCanvasRenders.add(root);
@@ -740,6 +819,7 @@ export default class JournalApp extends ApplicationV2 {
     this.#editor.suspendBlur();
     this.#canvas.readOnly = offline;
     this.#editor.readOnly = offline;
+    this.#canvas.pinsEnabled = this.#pinsEnabled();
     this.#canvas.setTheme(context.themeObj);
     this.#canvas.mount(root.querySelector(".journalinator-canvas-slot"));
     this.#canvas.selectedNoteId = this.#selectedNoteId;

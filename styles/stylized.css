@@ -804,3 +804,200 @@
     transition: none;
   }
 }
+
+/* --- Attachment pins (main handle + minor thread anchors) ---------------------------------- */
+
+/* Pins are DOM buttons on the card root, outside the torn paper clip. Normalized left/top
+   coordinates mean resizing and rotation are already handled by the transform hierarchy. */
+.jn-canvas .jn-card .jn-card-pins {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+.jn-canvas .jn-card .jn-card-pins[hidden],
+.jn-canvas .jn-card.jn-pins-disabled .jn-card-pins {
+  display: none;
+}
+.jn-canvas .jn-card .jn-pin {
+  --jn-pin-color: #8d8d97;
+  position: absolute;
+  /* The card lives inside the zoom-scaled world. --jn-zoom-comp = 1/k, so multiplying the DOM
+     size keeps the *screen* diameter/target at 20px for the main pin and ~14px for a minor pin
+     across k=0.5..2 (the visual pins therefore stay screen-constant too). */
+  width: calc(20px * var(--jn-zoom-comp, 1));
+  height: calc(20px * var(--jn-zoom-comp, 1));
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  appearance: none;
+  -webkit-appearance: none;
+  transform: translate(-50%, -50%);
+  cursor: grab;
+  pointer-events: auto;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.jn-canvas .jn-card .jn-pin-main {
+  --jn-pin-color: var(--jn-author-color, #8d8d97);
+}
+.jn-canvas .jn-card .jn-pin-minor {
+  width: calc(9px * var(--jn-zoom-comp, 1));
+  height: calc(9px * var(--jn-zoom-comp, 1));
+  --jn-pin-color: var(--jn-sc-pin-minor, #7d7466);
+}
+/* The visual head may be only ~9 screen px; the transparent pseudo-element keeps a ~14px screen
+   target at every zoom (main inherits its 20px head). */
+.jn-canvas .jn-card .jn-pin::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: max(calc(14px * var(--jn-zoom-comp, 1)), 100%);
+  height: max(calc(14px * var(--jn-zoom-comp, 1)), 100%);
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+}
+.jn-canvas .jn-card .jn-pin::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
+  border-radius: inherit;
+  transition: outline-color .12s ease, filter .12s ease, transform .12s ease;
+}
+.jn-canvas .jn-card .jn-pin:active {
+  cursor: grabbing;
+}
+.jn-canvas .jn-card .jn-pin:hover::before,
+.jn-canvas .jn-card .jn-pin:focus-visible::before {
+  outline: 2px solid var(--jn-sc-pin-ring, #f6dfae);
+  outline-offset: 2px;
+  filter: brightness(1.08);
+}
+.jn-canvas .jn-card .jn-pin.jn-pin-snap::before {
+  outline: 3px solid var(--jn-sc-pin-ring, #ffe2a1);
+  outline-offset: 3px;
+}
+
+/* Enamel is the default look: author-coloured head with a dark, legible metal rim. */
+.jn-canvas .jn-card .jn-pin-style-enamel::before,
+.jn-canvas .jn-card .jn-pin-style-default::before {
+  background:
+    radial-gradient(circle at 32% 26%, rgba(255, 255, 255, .82), transparent 34%),
+    radial-gradient(circle at 50% 52%,
+      color-mix(in srgb, var(--jn-pin-color) 86%, #fff 10%),
+      color-mix(in srgb, var(--jn-pin-color) 64%, #120b06) 78%);
+  border: 2px solid color-mix(in srgb, var(--jn-pin-color) 28%, #18110b);
+  box-shadow:
+    0 2px 4px rgba(0, 0, 0, .48),
+    inset 0 0 0 1px rgba(255, 255, 255, .38),
+    inset 0 -2px 3px rgba(0, 0, 0, .3);
+}
+.jn-canvas .jn-card .jn-pin-minor.jn-pin-style-enamel::before,
+.jn-canvas .jn-card .jn-pin-minor.jn-pin-style-default::before {
+  border-width: 1.5px;
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, .5),
+    inset 0 0 0 1px rgba(255, 255, 255, .28);
+}
+
+/* Brass: warm polished metal. */
+.jn-canvas .jn-card .jn-pin-style-brass::before {
+  background:
+    radial-gradient(circle at 32% 26%, rgba(255, 250, 213, .9), transparent 34%),
+    radial-gradient(circle at 52% 58%, #d9b467, #936d28 68%, #5f4416 100%);
+  border: 2px solid #594015;
+  box-shadow:
+    0 2px 4px rgba(0, 0, 0, .45),
+    inset 0 0 0 1px rgba(255, 241, 189, .42);
+}
+.jn-canvas .jn-card .jn-pin-minor.jn-pin-style-brass::before {
+  border-width: 1.5px;
+}
+
+/* Iron: a square tack rotated as a diamond. */
+.jn-canvas .jn-card .jn-pin-style-iron::before {
+  border-radius: 2px;
+  transform: rotate(45deg);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, .4), transparent 42%),
+    linear-gradient(135deg, #8b9093, #3b3f42 68%, #232628);
+  border: 2px solid #1d1f21;
+  box-shadow:
+    0 2px 4px rgba(0, 0, 0, .5),
+    inset 0 0 0 1px rgba(255, 255, 255, .2);
+}
+.jn-canvas .jn-card .jn-pin-minor.jn-pin-style-iron::before {
+  border-width: 1.5px;
+}
+
+/* Wood: turned wooden head with a visible grain. */
+.jn-canvas .jn-card .jn-pin-style-wood::before {
+  background:
+    repeating-linear-gradient(102deg, rgba(54, 30, 12, .3) 0 1px, transparent 1px 4px),
+    radial-gradient(circle at 34% 28%, #c8935d, #7a4d29 62%, #53331b 100%);
+  border: 2px solid #472b17;
+  box-shadow:
+    0 2px 4px rgba(0, 0, 0, .46),
+    inset 0 0 0 1px rgba(255, 230, 196, .24);
+}
+.jn-canvas .jn-card .jn-pin-minor.jn-pin-style-wood::before {
+  border-width: 1.5px;
+}
+
+/* Decorative: stamped rosette / brass medal. */
+.jn-canvas .jn-card .jn-pin-style-decorative::before {
+  background:
+    conic-gradient(from 18deg, #b8893d, #f1d488, #8d6527, #e8c978, #a97c34),
+    radial-gradient(circle, #f5e2ad, #8d6527);
+  border: 2px solid #4d3614;
+  box-shadow:
+    0 2px 4px rgba(0, 0, 0, .48),
+    inset 0 0 0 2px rgba(72, 49, 16, .78),
+    inset 0 0 0 3px rgba(255, 240, 186, .36);
+}
+.jn-canvas .jn-card .jn-pin-minor.jn-pin-style-decorative::before {
+  border-width: 1.5px;
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, .5),
+    inset 0 0 0 1px rgba(72, 49, 16, .7);
+}
+
+/* Wax: an irregular sealing-wax blob, deliberately not a perfect circle. */
+.jn-canvas .jn-card .jn-pin-style-wax::before {
+  border-radius: 48% 52% 56% 44% / 50% 44% 56% 50%;
+  transform: rotate(-8deg);
+  background:
+    radial-gradient(circle at 34% 28%, rgba(255, 255, 255, .42), transparent 36%),
+    radial-gradient(circle at 52% 58%, #b23f2d, #7a1f13 64%, #4d0e08 100%);
+  border: 1px solid #430d07;
+  box-shadow:
+    0 2px 4px rgba(0, 0, 0, .46),
+    inset 0 0 0 1px rgba(255, 191, 170, .2);
+}
+
+/* Board route pins are a distinct control; 12px visual diameter, still zoom-compensated. */
+.jn-canvas .jn-links .jn-board-pin[data-pin-index] {
+  r: calc(6px * var(--jn-zoom-comp, 1));
+}
+
+/* Link-tool magnet preview. The SVG radius is set in screen pixels by canvas.mjs. */
+.jn-canvas .jn-pin-target {
+  fill: color-mix(in srgb, var(--jn-sc-pin-ring, #f6dfae) 24%, transparent);
+  stroke: var(--jn-sc-pin-ring, #f6dfae);
+  stroke-width: 1.5px;
+  pointer-events: none;
+}
+.jn-canvas .jn-pin-target-new {
+  fill: color-mix(in srgb, var(--jn-sc-pin-ring, #f6dfae) 13%, transparent);
+  stroke-dasharray: 3 3;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jn-canvas .jn-card .jn-pin::before {
+    transition: none;
+  }
+}

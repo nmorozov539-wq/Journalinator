@@ -63,10 +63,6 @@ export function normalizeVaultCard(card, mainPinEnabled = true, createdBy = "") 
   };
 }
 
-function anchorId(value) {
-  return typeof value === "string" ? value.slice(0, MAX_ANCHOR_ID_LENGTH) : "";
-}
-
 export function normalizeRouteAnchors(list) {
   if (!Array.isArray(list)) return [];
   const seen = new Set();
@@ -103,9 +99,11 @@ export function normalizeVaultLink(link) {
     edited: link.edited === true,
     createdBy: typeof link.createdBy === "string" ? link.createdBy : "",
     hint: link.hint === true,
-    sourceAnchorId: anchorId(link.sourceAnchorId),
-    targetAnchorId: anchorId(link.targetAnchorId),
-    routeAnchors: normalizeRouteAnchors(link.routeAnchors),
+    // Vault-only links are invisible to shared anchor pruning, so they must never keep references
+    // into a shared card registry. Legacy data may contain them; drop them on every read/import.
+    sourceAnchorId: "",
+    targetAnchorId: "",
+    routeAnchors: [],
     material: cosmetics.material,
     thickness: cosmetics.thickness,
     slack: cosmetics.slack,

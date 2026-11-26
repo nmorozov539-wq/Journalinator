@@ -3,9 +3,10 @@ import PrivateNoteEditor from "./private-editor.mjs";
 import { privateStore, MAX_TITLE_LENGTH } from "../store/private-store.mjs";
 import { CARD_STYLES } from "../styles/registry.mjs";
 import { linkAnchors, moveThreadPin } from "../card-ports.mjs";
+import { anchorSide, validAnchorId } from "../anchors.mjs";
 import { isLinkColor, normalizeLinkColor } from "../link-colors.mjs";
 import {
-  LINK_ENDS, LINK_MATERIALS, LINK_PATTERNS, LINK_SLACK, LINK_THICKNESS,
+  LINK_ENDS, LINK_MATERIALS, LINK_PATTERNS, LINK_SLACK, LINK_THICKNESS, MAX_CARD_ANCHORS,
   NOTE_FONT_KEYS, PICTURE_LAYOUTS, PRESENTATION_STYLES,
   defaultLinkCosmetics, isGeneratedTitle, legacyStylePresentation, resolveAttachment,
   resolvePresentation, sanitizeCardAnchors, stripSecretPrefix
@@ -17,7 +18,6 @@ import { t } from "../i18n.mjs";
 
 const { DialogV2 } = foundry.applications.api;
 const esc = text => foundry.utils.escapeHTML(String(text ?? ""));
-const MAX_LINK_ANCHOR_ID_LENGTH = 64;
 
 /** The private tab's canvas, editor, selection, trash, and clipboard actions. */
 export default class PrivateWorkspace {
@@ -72,7 +72,10 @@ export default class PrivateWorkspace {
       onStampColor: (id, color) => this.updateLabel(id, { color }),
       onCreateLink: (sourceId, targetId, ports) => this.createLink(sourceId, targetId, ports),
       onUpdateLink: (noteId, linkId, fields) => this.updateLink(noteId, linkId, fields),
-      onDeleteLink: (noteId, linkId) => this.deleteLink(noteId, linkId)
+      onDeleteLink: (noteId, linkId) => this.deleteLink(noteId, linkId),
+      onAddCardAnchor: (noteId, anchor) => this.addCardAnchor(noteId, anchor),
+      onMoveCardAnchor: (noteId, anchorId, x, y) => this.moveCardAnchor(noteId, anchorId, x, y),
+      onRemoveCardAnchor: (noteId, anchorId) => this.removeCardAnchor(noteId, anchorId)
     });
 
     this.editor = new PrivateNoteEditor({
@@ -80,7 +83,11 @@ export default class PrivateWorkspace {
       updateNote: (id, patch) => this.updateNote(id, patch),
       deleteNote: id => this.deleteNotes([id]),
       getBacklinks: id => this.getBacklinks(id),
-      onFocusNote: id => this.focusNote(id)
+      onFocusNote: id => this.focusNote(id),
+      // Private main-pin disabling is shared-canvas-only: links cannot be redistributed locally,
+      // so the toggle is qualified/disabled while any private link references this main pin.
+      mainPinLocked: id => this.#mainPinReferenced(id),
+      setMainPinEnabled: (id, enabled) => this.setMainPinEnabled(id, enabled)
     });
   }
 
@@ -132,6 +139,11 @@ export default class PrivateWorkspace {
     this.canvas.selectedNoteId = this.selectedNoteId;
     this.canvas.gmMode = false;
     this.canvas.readOnly = false;
+    try {
+      this.canvas.pinsEnabled = game.settings?.get?.("fvtt-journalinator", "pinsEnabled") !== false;
+    } catch {
+      this.canvas.pinsEnabled = true;
+    }
     this.canvas.update(this.notes(), this.layout(), {
       deferGeometry: true,
       dimMatch: this.dimMatch
@@ -258,6 +270,13 @@ export default class PrivateWorkspace {
       }
       if ("image" in patch) note.image = patch.image;
       if ("backgroundImage" in patch) note.backgroundImage = patch.backgroundImage;
+      if (patch.attachment && typeof patch.attachment === "object" && !Array.isArray(patch.attachment)) {
+        const current = resolveAttachment({ system: { attachment: note.attachment } });
+        note.attachment = resolveAttachment({
+          system: { attachment: { ...current, ...patch.attachment } }
+        });
+        note.schemaVersion = 1;
+      }
       if (Array.isArray(patch.blocks) && patch.blocks.length) note.blocks = patch.blocks;
       note.updatedAt = Date.now();
     });
@@ -343,20 +362,106 @@ export default class PrivateWorkspace {
     });
   }
 
+  #anchorPoint(value) {
+    return Math.min(1, Math.max(0, value));
+  }
+
+  /** Pins are an optional world feature; an unset legacy setting still means enabled. */
+  #pinsEnabled() {
+    try {
+      return game.settings?.get?.("fvtt-journalinator", "pinsEnabled") !== false;
+    } catch {
+      return true;
+    }
+  }
+
+  /** Own/valid anchor on a private card, never a prototype or dotted-path lookup. */
+  #cardAnchor(card, anchorId) {
+    return validAnchorId(anchorId) && card?.anchors && Object.hasOwn(card.anchors, anchorId)
+      ? card.anchors[anchorId] : null;
+  }
+
+  /**
+   * True when any private link (including a trashed note's link, which returns on restore)
+   * references this note's canonical main anchor as an endpoint or route waypoint.
+   */
+  #mainPinReferenced(noteId, data = this.workspace) {
+    if (!data || !noteId) return false;
+    const owners = [
+      ...Object.values(data.notes ?? {}),
+      ...(data.trash ?? []).map(entry => entry?.note).filter(Boolean)
+    ];
+    for (const note of owners) {
+      for (const link of note.links ?? []) {
+        if (note.id === noteId && link.sourceAnchorId === "main") return true;
+        if (link.targetId === noteId && link.targetAnchorId === "main") return true;
+        if ((link.routeAnchors ?? []).some(entry =>
+          entry?.noteId === noteId && entry?.anchorId === "main")) return true;
+      }
+    }
+    return false;
+  }
+
+  /** A minor anchor is safe to delete only when no private link still names it. */
+  #anchorReferenced(noteId, anchorId, data) {
+    const owners = [
+      ...Object.values(data.notes ?? {}),
+      ...(data.trash ?? []).map(entry => entry?.note).filter(Boolean)
+    ];
+    for (const note of owners) {
+      for (const link of note.links ?? []) {
+        if (note.id === noteId && link.sourceAnchorId === anchorId) return true;
+        if (link.targetId === noteId && link.targetAnchorId === anchorId) return true;
+        if ((link.routeAnchors ?? []).some(entry =>
+          entry?.noteId === noteId && entry?.anchorId === anchorId)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Applies one anchor reference/spec pair from a canvas link gesture. Existing ids win; a new
+   * minor spec is materialized locally because private workspaces have no GM write authority
+   * round-trip. Returns the anchor id (or "" when neither is usable).
+   */
+  #linkAnchor(data, noteId, anchorId, spec) {
+    const card = data.layout.cards[noteId];
+    if (!card) return "";
+    if (validAnchorId(anchorId) && this.#cardAnchor(card, anchorId)) return anchorId;
+    // With pins disabled, existing anchors remain usable render data but a link gesture must not
+    // silently materialize a new minor. The plain point/side fallback is used instead.
+    if (!this.#pinsEnabled()) return "";
+    if (spec?.kind !== "minor" || !Number.isFinite(spec.x) || !Number.isFinite(spec.y)) return "";
+    const anchors = { ...(card.anchors ?? {}) };
+    if (Object.keys(anchors).length >= MAX_CARD_ANCHORS) return "";
+    const id = `minor-${foundry.utils.randomID()}`;
+    anchors[id] = {
+      kind: "minor",
+      x: this.#anchorPoint(spec.x),
+      y: this.#anchorPoint(spec.y),
+      createdBy: this.page ? privateStore.ownerId(this.page) || "" : ""
+    };
+    card.anchors = anchors;
+    return id;
+  }
+
   async createLink(sourceId, targetId, ports) {
     if (sourceId === targetId) return;
     return this.#save(data => {
       const source = data.notes[sourceId];
       if (!source || !data.notes[targetId]) return;
       const anchors = linkAnchors(ports);
+      const sourceAnchorId = this.#linkAnchor(data, sourceId, ports?.sourceAnchorId, ports?.sourceAnchor);
+      const targetAnchorId = this.#linkAnchor(data, targetId, ports?.targetAnchorId, ports?.targetAnchor);
+      const external = { sourceAnchorId, targetAnchorId };
       const existing = source.links.find(link => link.targetId === targetId);
       if (existing) {
         if (!anchors.sourcePoint || !anchors.targetPoint) return;
-        Object.assign(existing, anchors, { origin: "drawn", edited: true });
+        Object.assign(existing, anchors, external, { origin: "drawn", edited: true });
         return;
       }
       source.links.push({
-        id: foundry.utils.randomID(), targetId, ...anchors,
+        id: foundry.utils.randomID(), targetId, ...anchors, ...external,
         ...defaultLinkCosmetics(), routeAnchors: [],
         label: "", direction: "one", color: "", lineStyle: "solid",
         origin: "drawn", edited: false, createdBy: this.page ? privateStore.ownerId(this.page) || "" : ""
@@ -364,10 +469,101 @@ export default class PrivateWorkspace {
     });
   }
 
+  async addCardAnchor(noteId, anchor = {}) {
+    const card = this.workspace?.layout?.cards?.[noteId];
+    if (!card) return null;
+    if (anchor.kind !== "minor" || !Number.isFinite(anchor.x) || !Number.isFinite(anchor.y)) return null;
+    if (Object.keys(card.anchors ?? {}).length >= MAX_CARD_ANCHORS) return null;
+    const id = `minor-${foundry.utils.randomID()}`;
+    const ok = await this.#save(data => {
+      const target = data.layout.cards[noteId];
+      if (!target) return;
+      const anchors = { ...(target.anchors ?? {}) };
+      if (Object.keys(anchors).length >= MAX_CARD_ANCHORS) return;
+      anchors[id] = {
+        kind: "minor",
+        x: this.#anchorPoint(anchor.x),
+        y: this.#anchorPoint(anchor.y),
+        createdBy: this.page ? privateStore.ownerId(this.page) || "" : ""
+      };
+      target.anchors = anchors;
+    });
+    return ok ? id : null;
+  }
+
+  async moveCardAnchor(noteId, anchorId, x, y) {
+    if (!validAnchorId(anchorId) || !Number.isFinite(x) || !Number.isFinite(y)) return false;
+    return this.#save(data => {
+      const card = data.layout.cards[noteId];
+      const anchor = this.#cardAnchor(card, anchorId);
+      if (!anchor || anchor.kind === "main") return;
+      const moved = { ...anchor, x: this.#anchorPoint(x), y: this.#anchorPoint(y) };
+      const anchors = { ...(card.anchors ?? {}) };
+      anchors[anchorId] = moved;
+      card.anchors = anchors;
+      const side = anchorSide(moved, { w: card.width ?? 190, h: card.height ?? 90 });
+      // Keep every private link (including a trashed owner's, which returns on restore) pointing
+      // at the moved anchor through its normalized point/side fallback.
+      const owners = [
+        ...Object.values(data.notes ?? {}),
+        ...(data.trash ?? []).map(entry => entry?.note).filter(Boolean)
+      ];
+      for (const owner of owners) {
+        for (const link of owner.links ?? []) {
+          if (owner.id === noteId && link.sourceAnchorId === anchorId) {
+            link.sourcePoint = { x: moved.x, y: moved.y };
+            if (side) link.sourceSide = side;
+          }
+          if (link.targetId === noteId && link.targetAnchorId === anchorId) {
+            link.targetPoint = { x: moved.x, y: moved.y };
+            if (side) link.targetSide = side;
+          }
+        }
+      }
+    });
+  }
+
+  async removeCardAnchor(noteId, anchorId) {
+    if (!validAnchorId(anchorId) || !this.workspace?.layout?.cards?.[noteId]) return false;
+    if (this.#anchorReferenced(noteId, anchorId, this.workspace)) return false;
+    return this.#save(data => {
+      const card = data.layout.cards[noteId];
+      const anchor = this.#cardAnchor(card, anchorId);
+      if (!card || !anchor || anchor.kind === "main") return;
+      if (this.#anchorReferenced(noteId, anchorId, data)) return;
+      const anchors = { ...(card.anchors ?? {}) };
+      delete anchors[anchorId];
+      card.anchors = anchors;
+    });
+  }
+
+  async setMainPinEnabled(noteId, enabled) {
+    if (typeof enabled !== "boolean" || !this.workspace?.notes?.[noteId]) return false;
+    if (!this.#pinsEnabled()) return false;
+    // Private workspaces have no link-redistribution engine. Disabling while links still point
+    // at `main` would leave them dangling forever, so this remains a shared-canvas-only action;
+    // the editor qualifies the toggle instead of pretending it works here.
+    if (!enabled && this.#mainPinReferenced(noteId)) {
+      ui.notifications?.warn(t("JN.Pin.PrivateSharedOnly"));
+      return false;
+    }
+    return this.updateNote(noteId, { attachment: { mainPinEnabled: enabled } });
+  }
+
   async updateLink(noteId, linkId, fields = {}) {
     return this.#save(data => {
       const link = data.notes[noteId]?.links.find(item => item.id === linkId);
       if (!link) return;
+      const sourceCard = data.layout.cards[noteId];
+      const targetCard = data.layout.cards[link.targetId];
+      const sourceAnchorChange = typeof fields.sourceAnchorId === "string";
+      const targetAnchorChange = typeof fields.targetAnchorId === "string";
+      // Reject a dotted/prototype/malformed id before any cosmetic field is applied. A valid id
+      // that simply has no local pin yet is kept as legacy data (its fallback point/side stays).
+      if (sourceAnchorChange && fields.sourceAnchorId !== ""
+          && !validAnchorId(fields.sourceAnchorId)) return;
+      if (targetAnchorChange && fields.targetAnchorId !== ""
+          && !validAnchorId(fields.targetAnchorId)) return;
       if (typeof fields.label === "string") link.label = fields.label.slice(0, 200);
       if (["none", "one", "two"].includes(fields.direction)) link.direction = fields.direction;
       if (isLinkColor(fields.color)) link.color = normalizeLinkColor(fields.color);
@@ -390,12 +586,27 @@ export default class PrivateWorkspace {
         link.secondaryColor = isLinkColor(fields.secondaryColor)
           ? normalizeLinkColor(fields.secondaryColor) : "";
       }
-      // Anchor ids are cosmetic attachment points; link identity and target are never editable here.
-      if (typeof fields.sourceAnchorId === "string") {
-        link.sourceAnchorId = fields.sourceAnchorId.slice(0, MAX_LINK_ANCHOR_ID_LENGTH);
+      // Anchor ids are cosmetic attachment points; link identity and target are never editable
+      // here. A changed anchor also refreshes its point/side fallback for hidden/later exports.
+      if (sourceAnchorChange) {
+        link.sourceAnchorId = fields.sourceAnchorId;
+        const anchor = this.#cardAnchor(sourceCard, fields.sourceAnchorId);
+        if (anchor) {
+          link.sourcePoint = { x: anchor.x, y: anchor.y };
+          link.sourceSide = anchorSide(anchor, {
+            w: sourceCard.width ?? 190, h: sourceCard.height ?? 90
+          });
+        }
       }
-      if (typeof fields.targetAnchorId === "string") {
-        link.targetAnchorId = fields.targetAnchorId.slice(0, MAX_LINK_ANCHOR_ID_LENGTH);
+      if (targetAnchorChange) {
+        link.targetAnchorId = fields.targetAnchorId;
+        const anchor = this.#cardAnchor(targetCard, fields.targetAnchorId);
+        if (anchor) {
+          link.targetPoint = { x: anchor.x, y: anchor.y };
+          link.targetSide = anchorSide(anchor, {
+            w: targetCard.width ?? 190, h: targetCard.height ?? 90
+          });
+        }
       }
       const pins = moveThreadPin(link.pins, fields.pinMove);
       if (pins) link.pins = pins;
@@ -615,7 +826,14 @@ export default class PrivateWorkspace {
           note.schemaVersion = entry.schemaVersion;
         }
         const pastedAnchors = sanitizeCardAnchors(entry?.card?.anchors ?? entry?.anchors);
-        if (Object.keys(pastedAnchors).length) card.anchors = { ...card.anchors, ...pastedAnchors };
+        if (Object.keys(pastedAnchors).length) {
+          // Copied minors may keep their creator; the main pin is local identity and is stamped
+          // from the private owner, never from pasted client data.
+          if (pastedAnchors.main) {
+            pastedAnchors.main = { ...pastedAnchors.main, createdBy: privateStore.ownerId(this.page) || "" };
+          }
+          card.anchors = { ...card.anchors, ...pastedAnchors };
+        }
         data.notes[note.id] = note;
         data.layout.cards[note.id] = card;
         ids.push(note.id);

@@ -142,3 +142,18 @@ Delivered:
 - Tests: **267 pass / 0 fail**; syntax pass; browser probes confirm layer widths/offsets, fade on rotated/torn note, toolbar.
 
 Deferred/manual: real Foundry drag/hover and multiplayer fade; per-torn-card drop-shadow cost remains a Phase 8 stress item.
+
+### Phase 5 — optional pin system
+
+Implementation agents: `ses_de754a80fffejrEBKWnGNZ7JYO` (data/socket), `ses_de754a80effeHDRQqfLi0pQS1d` (canvas/UI); fixes `ses_de730c436ffegU3biOjU7e54IF`, `ses_de7114b4affeyS0TMYQAnfvmfa`.
+Validation: `ses_de74273adffe7ZkBCUIz70a4zg`, re-check `ses_de71f3de0ffej1zhE12dsyGxbl`.
+
+Delivered:
+- Stable layout-card anchors (`main` + minor), strict ID grammar/reserved-key rejection, canonical single main, server-derived creators; link endpoints reference anchor IDs with point/side fallback. Rotation/resize/promotion project correctly.
+- Main pin (author-colored, 20px, drag handle/link target), minor pins (9px visual, zoom-compensated hit area), board route pins distinct; candidate styles enamel/brass/iron/wood/decorative/wax; pins outside torn clip. World setting `pinsEnabled` (default true); off hides pin UI but existing anchor links still render.
+- Link tool snaps to main/minor using per-note screen radii, reuses nearby pins, creates a new minor spec on card-interior clicks; multiple links can share an anchor. Minor pins draggable; context-menu add pin; shared editors expose toggle/snap/style; private/secret equivalents.
+- Prune unreferenced minors after link changes, counting trashed-note refs; main never pruned; shared anchors survive multiple links; hidden links cannot reference shared minors.
+- Main-pin disable is an atomic GM-queued redistribution across inbound/outbound/route links using nearest minors/projected edges; route waypoints drop while links remain; exact undo via active-GM in-memory store (cap 20), stale undo refused, writeApplied acknowledgement prevents dead Ctrl+Z entries; re-enable only shows pin, no reattach.
+- Tests: **320 pass / 0 fail**; syntax pass. Browser probes confirm pin geometry/hit areas at k=0.5/2, six styles, snapping, pin-off rendering.
+
+Known limitations: pin undo is active-GM in-memory (lost on reload/failover, cap 20, stale refused); private main-pin disable with links is shared-canvas-only and the control is qualified; legacy hidden/declassified links have anchor/route fields cleared by design.

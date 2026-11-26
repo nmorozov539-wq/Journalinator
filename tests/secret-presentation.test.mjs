@@ -39,9 +39,9 @@ test("hidden-link cosmetics use the shared validation rules", () => {
   assert.equal(clean.pattern, "alternating");
   assert.equal(clean.ends, "loose");
   assert.equal(clean.secondaryColor, "link2");
-  assert.equal(clean.sourceAnchorId, "main");
+  assert.equal(clean.sourceAnchorId, undefined, "hidden links never keep shared anchor references");
   assert.equal(clean.targetAnchorId, undefined);
-  assert.deepEqual(clean.routeAnchors, [{ noteId: "n1", anchorId: "main" }]);
+  assert.equal(clean.routeAnchors, undefined, "hidden links never keep shared route waypoints");
   assert.equal(clean.id, undefined, "link identity is never cosmetic-editable");
   assert.equal(clean.targetId, undefined, "link targets are never cosmetic-editable");
   assert.equal(clean.origin, undefined);
@@ -65,7 +65,7 @@ test("legacy lineStyle and the pattern vocabulary stay in sync", () => {
   assert.deepEqual(badSecondary, { secondaryColor: "" }, "a bad secondary dye degrades to none");
 });
 
-test("declassified payload preserves label, presentation, attachment, anchors and link ids", () => {
+test("declassified payload preserves presentation, link ids and fallbacks but clears legacy anchors", () => {
   const note = {
     id: "secret-note-1",
     name: "GM-ABCD Lord Vex",
@@ -153,13 +153,13 @@ test("declassified payload preserves label, presentation, attachment, anchors an
   assert.equal(first.slack, 0.25);
   assert.equal(first.ends, "loose");
   assert.equal(first.secondaryColor, "link3");
-  assert.equal(first.sourceAnchorId, "main");
-  assert.equal(first.targetAnchorId, "minor-1");
-  assert.deepEqual(first.routeAnchors, [
-    { noteId: "shared-a", anchorId: "main" },
-    { noteId: "secret-note-1", anchorId: "main" }
-  ], "route waypoints through still-secret notes are dropped, self is kept");
-  assert.deepEqual(first.sourcePoint, { x: 0.1, y: 0 });
+  assert.equal(first.sourceAnchorId, "",
+    "legacy vault anchor ids never become public shared references");
+  assert.equal(first.targetAnchorId, "");
+  assert.deepEqual(first.routeAnchors, [],
+    "legacy route anchors are dropped along with still-secret waypoints");
+  assert.deepEqual(first.sourcePoint, { x: 0.1, y: 0 },
+    "the point/side fallback keeps the thread where the GM drew it");
   assert.deepEqual(first.pins, undefined);
   assert.deepEqual(payload.formerNames, ["GM-ABCD Old Vex", "x".repeat(200)],
     "former names are bounded strings");

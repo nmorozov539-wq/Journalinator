@@ -21,6 +21,12 @@ export const MAIN_SNAP_RADIUS = 24;
 export const MINOR_SNAP_RADIUS = 6;
 export const MAX_CARD_ANCHORS = 256;
 export const MAX_CARD_ANCHOR_ID_LENGTH = 100;
+const ANCHOR_ID_RE = /^[A-Za-z0-9_-]{1,100}$/;
+const RESERVED_ANCHOR_IDS = new Set(["__proto__", "prototype", "constructor"]);
+
+function validAnchorId(value) {
+  return typeof value === "string" && ANCHOR_ID_RE.test(value) && !RESERVED_ANCHOR_IDS.has(value);
+}
 
 export const LEGACY_STYLE_MAP = Object.freeze({
   sticky: "memo",
@@ -58,26 +64,44 @@ export function legacyStylePresentation(style) {
 }
 
 /**
- * Keeps a card's anchor registry bounded and safe. Invalid entries are dropped; a main anchor
- * always sits at the canonical top-centre point, while minor anchors keep their clamped point.
+ * Keeps a card's anchor registry bounded and safe. Dotted/slashed, over-long and prototype
+ * names are rejected, and there is exactly one canonical `main` key: any `kind:"main"` entry is
+ * folded to `{ x: 0.5, y: 0 }` under `main` (the first valid main wins, later mains are dropped).
+ * Minor anchors keep their clamped point. A minor may never occupy the reserved `main` key.
  */
 export function sanitizeCardAnchors(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  const clean = {};
-  for (const [id, anchor] of Object.entries(value).slice(0, MAX_CARD_ANCHORS)) {
-    if (typeof id !== "string" || !id || id.length > MAX_CARD_ANCHOR_ID_LENGTH) continue;
+  const minors = [];
+  let main = null;
+  for (const [id, anchor] of Object.entries(value)) {
+    if (!validAnchorId(id)) continue;
     if (!anchor || typeof anchor !== "object" || Array.isArray(anchor)) continue;
     const kind = anchor.kind === "main" || anchor.kind === "minor" ? anchor.kind : null;
     if (!kind || !Number.isFinite(anchor.x) || anchor.x < 0 || anchor.x > 1) continue;
     if (!Number.isFinite(anchor.y) || anchor.y < 0 || anchor.y > 1) continue;
-    clean[id] = {
-      kind,
-      x: kind === "main" ? MAIN_PIN.x : anchor.x,
-      y: kind === "main" ? MAIN_PIN.y : anchor.y,
+    if (kind === "main") {
+      if (main) continue; // drop duplicate/legacy mains; only the first becomes canonical
+      main = {
+        kind: "main", x: MAIN_PIN.x, y: MAIN_PIN.y,
+        createdBy: typeof anchor.createdBy === "string"
+          ? anchor.createdBy.slice(0, MAX_CARD_ANCHOR_ID_LENGTH) : ""
+      };
+      continue;
+    }
+    if (id === "main") continue; // `main` is reserved for the canonical main anchor
+    if (minors.length >= MAX_CARD_ANCHORS) continue;
+    minors.push([id, {
+      kind: "minor",
+      x: anchor.x,
+      y: anchor.y,
       createdBy: typeof anchor.createdBy === "string"
         ? anchor.createdBy.slice(0, MAX_CARD_ANCHOR_ID_LENGTH) : ""
-    };
+    }]);
   }
+  const clean = {};
+  const budget = main ? MAX_CARD_ANCHORS - 1 : MAX_CARD_ANCHORS;
+  for (const [id, anchor] of minors.slice(0, budget)) clean[id] = anchor;
+  if (main) clean.main = main;
   return clean;
 }
 
@@ -89,7 +113,12 @@ export function sanitizeCardAnchors(value) {
  */
 export function sanitizeCardAnchorsWithMain(value, mainPinEnabled = true, createdBy = "") {
   const anchors = sanitizeCardAnchors(value);
-  if (!mainPinEnabled || Object.values(anchors).some(anchor => anchor.kind === "main")) return anchors;
+  if (!mainPinEnabled || Object.hasOwn(anchors, "main")) return anchors;
+  // Keep the registry within the shared cap when it already holds the maximum number of minors.
+  if (Object.keys(anchors).length >= MAX_CARD_ANCHORS) {
+    const overflow = Object.keys(anchors).length - (MAX_CARD_ANCHORS - 1);
+    for (const id of Object.keys(anchors).slice(0, overflow)) delete anchors[id];
+  }
   return {
     ...anchors,
     main: {

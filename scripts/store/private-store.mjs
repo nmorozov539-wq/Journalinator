@@ -4,6 +4,7 @@ import {
   CARD_SIDES, DEFAULT_CARD_PORTS, MAX_THREAD_PINS, validCardPorts, validLinkPoint, validThreadPin
 } from "../card-ports.mjs";
 import { normalizeLinkColor } from "../link-colors.mjs";
+import { validAnchorId } from "../anchors.mjs";
 import { DEFAULT_STAMP_CORNER, STAMP_COLORS, isStampCorner, stampUrl } from "../stamps.mjs";
 import {
   resolveAttachment, resolveLinkCosmetics, resolvePresentation, sanitizeCardAnchorsWithMain
@@ -43,7 +44,7 @@ function normalizeBlock(block) {
 }
 
 function anchorId(value) {
-  return typeof value === "string" ? value.slice(0, MAX_ANCHOR_ID_LENGTH) : "";
+  return validAnchorId(value) ? value : "";
 }
 
 function normalizeRouteAnchors(list) {
@@ -52,13 +53,13 @@ function normalizeRouteAnchors(list) {
   const anchors = [];
   for (const anchor of list) {
     if (typeof anchor?.noteId !== "string" || !anchor.noteId) continue;
-    if (typeof anchor?.anchorId !== "string" || !anchor.anchorId) continue;
+    if (!validAnchorId(anchor?.anchorId)) continue;
     const key = `${anchor.noteId}:${anchor.anchorId}`;
     if (seen.has(key)) continue;
     seen.add(key);
     anchors.push({
       noteId: anchor.noteId.slice(0, MAX_ANCHOR_ID_LENGTH),
-      anchorId: anchor.anchorId.slice(0, MAX_ANCHOR_ID_LENGTH)
+      anchorId: anchor.anchorId
     });
     if (anchors.length >= MAX_ROUTE_ANCHORS) break;
   }

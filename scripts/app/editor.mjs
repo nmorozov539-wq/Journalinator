@@ -1,7 +1,7 @@
 import { notesStore } from "../store/notes-store.mjs";
 import { requestWrite } from "../socket.mjs";
 import { requestLock, releaseLock, sendHeartbeat, requestLockState, getLock, isHeldByMe } from "../locks.mjs";
-import { NOTE_FONT_KEYS, PICTURE_LAYOUTS, resolvePresentation } from "../presentation.mjs";
+import { NOTE_FONT_KEYS, PIN_STYLES, PICTURE_LAYOUTS, resolveAttachment, resolvePresentation } from "../presentation.mjs";
 import { noteImagePath } from "../image-url.mjs";
 import { promptImageSource } from "./image-dialog.mjs";
 import * as secrets from "../secrets/secret-actions.mjs";
@@ -223,6 +223,85 @@ export default class NoteEditor {
       : requestWrite({ type: "setNoteKind", noteId, kind });
   }
 
+  /** Snap radii and pin appearance. Main-pin removal has its own undoable request below. */
+  setNoteAttachment(noteId, fields) {
+    if (this.readOnly) return this.#warnReadOnly();
+    const note = notesStore.getNote(noteId);
+    if (!note || note.system.deleted || !fields || typeof fields !== "object") return;
+    const clean = {};
+    if (Number.isFinite(fields.mainSnapRadius)) {
+      clean.mainSnapRadius = Math.min(64, Math.max(0, fields.mainSnapRadius));
+    }
+    if (Number.isFinite(fields.minorSnapRadius)) {
+      clean.minorSnapRadius = Math.min(32, Math.max(0, fields.minorSnapRadius));
+    }
+    if (PIN_STYLES.includes(fields.pinStyle)) clean.pinStyle = fields.pinStyle;
+    const sharedPinToggle = !note.secret && typeof fields.mainPinEnabled === "boolean"
+      ? fields.mainPinEnabled : null;
+    if (note.secret && typeof fields.mainPinEnabled === "boolean") {
+      // Secret vault notes have no shared link redistribution; the direct vault path is fine.
+      clean.mainPinEnabled = fields.mainPinEnabled;
+    }
+    if (sharedPinToggle !== null) {
+      // Never let the generic batch path bypass redistribution/undo on the shared canvas.
+      const result = this.setMainPinEnabled(noteId, sharedPinToggle);
+      if (!Object.keys(clean).length) return result;
+    }
+    if (!Object.keys(clean).length) return;
+    return note.secret ? gm(() => secrets.setSecretNoteAttachment(noteId, clean))
+      : requestWrite({ type: "setNoteAttachment", noteIds: [noteId], fields: clean });
+  }
+
+  /**
+   * Main-pin visibility. Removal is a normal history transaction (Ctrl+Z restores the exact
+   * arrangement); re-enabling only shows the canonical pin and never reattaches links. Secret
+   * notes are GM-local and use the vault attachment path directly.
+   */
+  setMainPinEnabled(noteId, enabled) {
+    if (this.readOnly) return this.#warnReadOnly();
+    const note = notesStore.getNote(noteId);
+    if (!note || note.system.deleted || typeof enabled !== "boolean") return;
+    if (note.secret) return gm(() => secrets.setSecretNoteAttachment(noteId, { mainPinEnabled: enabled }));
+    if (this.callbacks.onSetMainPinEnabled) return this.callbacks.onSetMainPinEnabled(noteId, enabled);
+    if (!enabled) {
+      return requestWrite({ type: "setMainPinEnabled", noteId, enabled: false, undoId: foundry.utils.randomID() });
+    }
+    return requestWrite({ type: "setMainPinEnabled", noteId, enabled: true });
+  }
+
+  /** Experimental world setting; an unset legacy value still means enabled. */
+  #pinsEnabled() {
+    try {
+      return game.settings?.get?.("fvtt-journalinator", "pinsEnabled") !== false;
+    } catch {
+      return true;
+    }
+  }
+
+  #attachmentPanel(note) {
+    const attachment = resolveAttachment(note);
+    const styleOptions = PIN_STYLES.map(key => {
+      const labelKey = `JN.Pin.Styles.${key.charAt(0).toUpperCase()}${key.slice(1)}`;
+      return `<option value="${key}" ${attachment.pinStyle === key ? "selected" : ""}>${t(labelKey)}</option>`;
+    }).join("");
+    return `
+      <label class="jn-presentation-check">
+        <input type="checkbox" class="journalinator-main-pin" ${attachment.mainPinEnabled ? "checked" : ""}>
+        ${t("JN.Pin.Enabled")}
+      </label>
+      <label class="jn-presentation-field">${t("JN.Pin.SnapMain")}
+        <input type="number" class="journalinator-main-snap" min="0" max="64" step="1"
+          value="${attachment.mainSnapRadius}" aria-label="${t("JN.Pin.SnapMain")}">
+      </label>
+      <label class="jn-presentation-field">${t("JN.Pin.SnapMinor")}
+        <input type="number" class="journalinator-minor-snap" min="0" max="32" step="1"
+          value="${attachment.minorSnapRadius}" aria-label="${t("JN.Pin.SnapMinor")}">
+      </label>
+      <label class="jn-presentation-field">${t("JN.Pin.Style")}
+        <select class="journalinator-pin-style" aria-label="${t("JN.Pin.Style")}">${styleOptions}</select>
+      </label>`;
+  }
+
   async editNoteImage(noteId, background = false) {
     if (this.readOnly) return this.#warnReadOnly();
     const note = notesStore.getNote(noteId);
@@ -365,6 +444,7 @@ export default class NoteEditor {
         ${tool("fa-link", t("JN.Editor.RelatedNotes"), `<div class="journalinator-chips">${backlinks}</div>`)}
         ${tool("fa-layer-group", t("JN.Editor.Type"), type)}
         ${tool("fa-sliders", t("JN.Editor.Presentation"), presentationPanel)}
+        ${this.#pinsEnabled() ? tool("fa-thumbtack", t("JN.Pin.Style"), this.#attachmentPanel(note)) : ""}
         ${presentation.extendedStyle === "target" ? tool("fa-bullseye", t("JN.Style.Target"), `
           <input type="text" class="journalinator-target-heading" aria-label="${t("JN.Style.Target")}"
             value="${esc(presentation.heading)}" placeholder="${t("JN.Style.Target")}" maxlength="80">`) : ""}
@@ -538,6 +618,23 @@ export default class NoteEditor {
     });
     this.root.querySelector(".journalinator-torn")?.addEventListener("change", ev => {
       this.setNotePresentation(noteId, { torn: ev.target.checked });
+    });
+    this.root.querySelector(".journalinator-main-pin")?.addEventListener("change", ev => {
+      this.setMainPinEnabled(noteId, ev.target.checked);
+    });
+    const mainSnap = this.root.querySelector(".journalinator-main-snap");
+    const minorSnap = this.root.querySelector(".journalinator-minor-snap");
+    const pinStyle = this.root.querySelector(".journalinator-pin-style");
+    mainSnap?.addEventListener("change", () => {
+      const value = Number(mainSnap.value);
+      if (Number.isFinite(value)) this.setNoteAttachment(noteId, { mainSnapRadius: value });
+    });
+    minorSnap?.addEventListener("change", () => {
+      const value = Number(minorSnap.value);
+      if (Number.isFinite(value)) this.setNoteAttachment(noteId, { minorSnapRadius: value });
+    });
+    pinStyle?.addEventListener("change", () => {
+      this.setNoteAttachment(noteId, { pinStyle: pinStyle.value });
     });
 
     const targetHeading = this.root.querySelector(".journalinator-target-heading");

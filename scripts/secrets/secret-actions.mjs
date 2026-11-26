@@ -14,8 +14,7 @@ import {
 import { canUseGmTier } from "./access.mjs";
 import {
   makeSecretTitle, stripSecretPrefix, hasSecretPrefix, mergeBlocks, orderOf, declassifyAnchor,
-  resolveSecretTitle, findFreeSpot, normalizeRouteAnchors, normalizeVaultCard, normalizeVaultLink,
-  randomVaultId
+  resolveSecretTitle, findFreeSpot, normalizeVaultCard, normalizeVaultLink, randomVaultId
 } from "./model.mjs";
 import { t } from "../i18n.mjs";
 import { attachedStampIds, DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, stampUrl } from "../stamps.mjs";
@@ -594,8 +593,11 @@ export function buildDeclassifiedNote(note, title, sharedIds = new Set()) {
     if (link?.origin === "typed" || !sharedIds.has(link?.targetId)) continue;
     if (link.targetId === note.id) continue;
     const clean = normalizeVaultLink(link);
-    // Never publish a waypoint that names a still-secret note: the id alone would reveal that
-    // hidden content exists. Self waypoints and live shared notes are safe.
+    // Shared anchor ids on a vault link are legacy/untrusted: shared pruning cannot see the
+    // vault, so publishing one could point at a pin that no longer exists. The point/side
+    // fallback is kept, and still-secret waypoints are never published either.
+    clean.sourceAnchorId = "";
+    clean.targetAnchorId = "";
     clean.routeAnchors = (clean.routeAnchors ?? [])
       .filter(anchor => anchor.noteId === note.id || sharedIds.has(anchor.noteId));
     if (seen.has(clean.id)) clean.id = randomVaultId();
@@ -687,20 +689,24 @@ export function addHiddenLink(sourceId, targetId, ports) {
     if (previous && (!anchors.sourcePoint || !anchors.targetPoint)) return;
     const links = previous
       ? existing.map(link => link === previous
-        ? { ...link, ...anchors, ...anchorFields(ports), origin: "drawn", edited: true }
+        ? clearHiddenLinkAnchors({ ...link, ...anchors, origin: "drawn", edited: true })
         : link)
-      : [...existing, newLink(targetId, { ...anchors, ...anchorFields(ports) })];
+      : [...existing, clearHiddenLinkAnchors(newLink(targetId, { ...anchors }))];
     if (secret) secret.links = links;
     else if (notesStore.getSharedPage(sourceId)) vault.hiddenLinks[sourceId] = links;
   });
 }
 
-function anchorFields(fields) {
-  const clean = {};
-  if (typeof fields?.sourceAnchorId === "string") clean.sourceAnchorId = fields.sourceAnchorId.slice(0, 64);
-  if (typeof fields?.targetAnchorId === "string") clean.targetAnchorId = fields.targetAnchorId.slice(0, 64);
-  if (Array.isArray(fields?.routeAnchors)) clean.routeAnchors = normalizeRouteAnchors(fields.routeAnchors);
-  return clean;
+/**
+ * Vault links are invisible to shared anchor pruning. They therefore never keep shared
+ * `sourceAnchorId`/`targetAnchorId`/`routeAnchors` references; point/side fallback still renders
+ * them exactly where the GM dropped them.
+ */
+function clearHiddenLinkAnchors(link) {
+  link.sourceAnchorId = "";
+  link.targetAnchorId = "";
+  link.routeAnchors = [];
+  return link;
 }
 
 /**
@@ -728,7 +734,8 @@ export function sanitizeHiddenLinkFields(fields) {
     clean.secondaryColor = isLinkColor(fields.secondaryColor)
       ? normalizeLinkColor(fields.secondaryColor) : "";
   }
-  Object.assign(clean, anchorFields(fields));
+  // Anchor ids and route waypoints are deliberately not cosmetic-editable here: hidden links
+  // must never reference shared anchors that shared pruning cannot see.
   // Keep the legacy dashed flag and the new pattern vocabulary in sync when only one is sent.
   if ("pattern" in clean && !("lineStyle" in clean)) {
     clean.lineStyle = clean.pattern === "interrupted" ? "dashed" : "solid";
@@ -748,6 +755,8 @@ export function updateHiddenLink(sourceId, linkId, fields) {
     for (const [key, value] of Object.entries(clean)) link[key] = value;
     const pins = moveThreadPin(link.pins, fields?.pinMove);
     if (pins) link.pins = pins;
+    // Clear any legacy anchor references on every edit; shared pruning is vault-blind.
+    clearHiddenLinkAnchors(link);
     if (Object.keys(clean).length || pins) link.edited = true;
   });
 }
@@ -773,7 +782,12 @@ export async function revealLink(sourceId, linkId) {
     return false;
   }
   const ok = await sendAndConfirm(
-    { type: "gmAddLink", sourceId, link },
+    {
+      type: "gmAddLink",
+      sourceId,
+      // Shared endpoint anchors cannot be trusted from the vault; the point/side fallback is kept.
+      link: { ...link, sourceAnchorId: "", targetAnchorId: "", routeAnchors: [] }
+    },
     () => (notesStore.getSharedPage(sourceId)?.system.links ?? []).some(l => l.targetId === link.targetId)
   );
   if (ok) await deleteHiddenLink(sourceId, linkId);
@@ -793,13 +807,13 @@ export async function hideSharedLink(sourceId, linkId) {
     if (!list.some(l => l.targetId === link.targetId)) {
       vault.hiddenLinks[sourceId] = [
         ...list,
-        {
+        clearHiddenLinkAnchors({
           ...normalizeVaultLink(link),
           id: randomID(),
           origin: "drawn",
           edited: true,
           hint: false
-        }
+        })
       ];
     }
   });

@@ -44,6 +44,7 @@ const secrets = await import(`${JN}/scripts/secrets/secret-actions.mjs`);
 const { registerSocket, requestWrite } = await import(`${JN}/scripts/socket.mjs`);
 const { privateStore } = await import(`${JN}/scripts/store/private-store.mjs`);
 const { resolvePresentation } = await import(`${JN}/scripts/presentation.mjs`);
+const { anchorWorld } = await import(`${JN}/scripts/anchors.mjs`);
 const { default: NoteEditor } = await import(`${JN}/scripts/app/editor.mjs`);
 const { default: JournalCanvas } = await import(`${JN}/scripts/app/canvas.mjs`);
 const { default: JournalApp, isTextEntryTarget, themeApplicationChanged } =
@@ -1267,7 +1268,7 @@ test("Alt-click connects edges through saved board pins and the toolbar can repl
   try {
     click(a, 0.5, 0.5, true);
     assert.equal(host.querySelector(".jn-canvas").dataset.placingLink, "true");
-    assert.equal(host.querySelector(".jn-link-preview"), null);
+    assert.ok(host.querySelector(".jn-link-preview"), "an interior click starts a new minor-pin source");
     click(a, 0.32, 0.96);
     assert.ok(host.querySelector(".jn-link-preview"));
     assert.equal(host.querySelector(".jn-card-text-input"), null);
@@ -2257,6 +2258,95 @@ test("private link edits accept cosmetics and anchors but never identity or targ
   }
 });
 
+test("private anchors are capped, strictly named, reference-safe and main-pin guarded", async () => {
+  const user = makeUser("Player000000011", { name: "Private Anchor" });
+  const page = await privateStore.createFor(user);
+  const workspace = new PrivateWorkspace({ onChange() {} });
+  workspace.setPage(page);
+  try {
+    const sourceId = await workspace.createNoteAt({ title: "Private Anchor Source", x: 0, y: 0 });
+    const targetId = await workspace.createNoteAt({ title: "Private Anchor Target", x: 400, y: 0 });
+    const anchorId = await workspace.addCardAnchor(targetId, { kind: "minor", x: 0.2, y: 0.3 });
+    assert.ok(anchorId);
+    await workspace.createLink(sourceId, targetId, {
+      sourceSide: "right", targetSide: "left", targetAnchorId: anchorId
+    });
+    const link = workspace.workspace.notes[sourceId].links[0];
+    assert.equal(link.targetAnchorId, anchorId);
+
+    assert.equal(await workspace.removeCardAnchor(targetId, anchorId), false,
+      "a minor referenced by a private link is not removed");
+    assert.ok(workspace.workspace.layout.cards[targetId].anchors[anchorId]);
+    assert.equal(await workspace.moveCardAnchor(targetId, "a.b", 0.5, 0.5), false,
+      "dotted ids are rejected");
+    assert.equal(await workspace.removeCardAnchor(targetId, "constructor"), false,
+      "prototype ids are rejected");
+
+    // Fill the registry to the shared 256 cap through the normal save/normalize path.
+    const card = workspace.workspace.layout.cards[targetId];
+    for (let i = 0; i < 300; i++) card.anchors[`m${i}`] = { kind: "minor", x: 0.5, y: 0.5 };
+    await privateStore.save(page, workspace.workspace, privateStore.flags(page).rev ?? 0);
+    workspace.setPage(privateStore.findById(page.id));
+    assert.equal(Object.keys(workspace.workspace.layout.cards[targetId].anchors).length, 256,
+      "private normalization applies the shared cap");
+    assert.equal(await workspace.addCardAnchor(targetId, { kind: "minor", x: 0.1, y: 0.1 }), null,
+      "adding past the cap is refused");
+
+    const secondSource = await workspace.createNoteAt({ title: "Private Main Ref", x: 800, y: 0 });
+    await workspace.createLink(secondSource, targetId, {
+      sourceSide: "right", targetSide: "left", targetAnchorId: "main"
+    });
+    assert.equal(await workspace.setMainPinEnabled(targetId, false), false,
+      "private main-pin removal is refused while links use it");
+    assert.equal(workspace.workspace.notes[targetId].attachment.mainPinEnabled, true);
+
+    workspace.selectedNoteId = targetId;
+    workspace.editor.open(targetId);
+    workspace.editor.render();
+    assert.equal(workspace.editor.root.querySelector(".journalinator-main-pin").disabled, true,
+      "the private toggle is qualified instead of pretending it can redistribute links");
+    await workspace.editor.setMainPinEnabled(targetId, false);
+    assert.equal(workspace.workspace.notes[targetId].attachment.mainPinEnabled, true,
+      "the editor checkbox cannot bypass the workspace main-pin guard");
+  } finally {
+    workspace.destroy();
+    await privateStore.remove(page);
+  }
+});
+
+test("private link creation does not materialize new minors while pins are disabled", async () => {
+  const user = makeUser("Player000000012", { name: "Private Pin Gate" });
+  const page = await privateStore.createFor(user);
+  const workspace = new PrivateWorkspace({ onChange() {} });
+  workspace.setPage(page);
+  try {
+    const sourceId = await workspace.createNoteAt({ title: "Private Gate Source", x: 0, y: 0 });
+    const targetId = await workspace.createNoteAt({ title: "Private Gate Target", x: 400, y: 0 });
+    const before = structuredClone(workspace.workspace.layout.cards[sourceId].anchors);
+    await game.settings.set("fvtt-journalinator", "pinsEnabled", false);
+    try {
+      await workspace.createLink(sourceId, targetId, {
+        sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 },
+        sourceAnchor: { kind: "minor", x: 0.5, y: 0.5 },
+        targetAnchor: { kind: "minor", x: 0.5, y: 0.5 }
+      });
+    } finally {
+      await game.settings.set("fvtt-journalinator", "pinsEnabled", true);
+    }
+    const link = workspace.workspace.notes[sourceId].links.find(item => item.targetId === targetId);
+    assert.ok(link, "the link is still created with its point fallback");
+    assert.equal(link.sourceAnchorId, "");
+    assert.equal(link.targetAnchorId, "");
+    assert.deepEqual(workspace.workspace.layout.cards[sourceId].anchors, before,
+      "no new source minor is materialized while pins are off");
+    assert.equal(Object.keys(workspace.workspace.layout.cards[targetId].anchors).length, 1,
+      "no new target minor is materialized while pins are off");
+  } finally {
+    workspace.destroy();
+    await privateStore.remove(page);
+  }
+});
+
 test("private legacy note edits keep presentation and label in sync", async () => {
   const user = makeUser("Player000000009", { name: "Private Setter" });
   const page = await privateStore.createFor(user);
@@ -2336,6 +2426,527 @@ test("merging a hidden block keeps text typed but not yet saved", async () => {
   const blocks = vaultStore.data.notes[secretId].blocks;
   assert.equal(blocks.length, 1);
   assert.equal(blocks[0].text, "alphabetaGAMMA");
+});
+
+test("attachment pins render author colour, all candidate styles, and transform with the card", () => {
+  const canvas = new JournalCanvas({});
+  document.body.appendChild(canvas.root);
+  canvas.pinsEnabled = true;
+  const note = (id, attachment, links = []) => ({
+    _id: id,
+    name: id,
+    system: {
+      style: "sticky", authorId: gmUser.id, blocks: [], links,
+      attachment
+    }
+  });
+  const aId = "pincardA0000001";
+  const bId = "pincardB0000002";
+  const a = note(aId, { mainPinEnabled: true, mainSnapRadius: 24, minorSnapRadius: 6, pinStyle: "brass" }, [
+    { id: "pinlink", targetId: bId, sourceAnchorId: "main", targetAnchorId: "secondary" }
+  ]);
+  const b = note(bId, { mainPinEnabled: true, mainSnapRadius: 24, minorSnapRadius: 6, pinStyle: "wood" });
+  const makeLayout = () => ({
+    cards: {
+      [aId]: {
+        x: 0, y: 0, width: 200, height: 100, rotation: 0,
+        anchors: {
+          main: { kind: "main", x: 0.5, y: 0, createdBy: gmUser.id },
+          m1: { kind: "minor", x: 0.2, y: 0.3, createdBy: gmUser.id }
+        }
+      },
+      [bId]: {
+        x: 400, y: 0, width: 200, height: 100, rotation: 0,
+        anchors: {
+          main: { kind: "main", x: 0.5, y: 0, createdBy: gmUser.id },
+          secondary: { kind: "minor", x: 0.7, y: 0.25, createdBy: gmUser.id }
+        }
+      }
+    },
+    labels: {}
+  });
+  try {
+    canvas.update([a, b], makeLayout());
+    const card = id => canvas.root.querySelector(`.jn-card[data-id="${id}"]`);
+    const main = card(aId).querySelector(".jn-pin-main");
+    const minor = card(aId).querySelector('.jn-pin[data-anchor-id="m1"]');
+    assert.ok(main, "main pin rendered when attachment.mainPinEnabled and a main anchor exists");
+    assert.ok(main.classList.contains("jn-pin-style-brass"), "pin style class comes from the attachment");
+    assert.equal(main.style.getPropertyValue("--jn-pin-color"), gmUser.color,
+      "the main pin uses the creator/author colour");
+    assert.equal(main.style.left, "50%");
+    assert.equal(main.style.top, "0%");
+    assert.ok(minor, "minor anchors render their own pin");
+    assert.equal(minor.style.left, "20%");
+    assert.equal(minor.style.top, "30%");
+    assert.equal(main.closest(".jn-card-main"), null, "pins live outside the clipped paper wrapper");
+
+    const group = canvas.svg.querySelector('g[data-id="pinlink"]');
+    let endpoints = [...group.querySelectorAll(".jn-thread-pin:not(.jn-board-pin)")];
+    const sourceWorld = anchorWorld({ x: 0, y: 0, w: 200, h: 100, rotation: 0 },
+      { kind: "main", x: 0.5, y: 0 });
+    const targetWorld = anchorWorld({ x: 400, y: 0, w: 200, h: 100, rotation: 0 },
+      { kind: "minor", x: 0.7, y: 0.25 });
+    assert.equal(Number(endpoints[0].getAttribute("cx")), sourceWorld.x);
+    assert.equal(Number(endpoints[0].getAttribute("cy")), sourceWorld.y);
+    assert.equal(Number(endpoints[1].getAttribute("cx")), targetWorld.x);
+    assert.equal(Number(endpoints[1].getAttribute("cy")), targetWorld.y);
+
+    for (const style of ["default", "enamel", "brass", "iron", "wood", "decorative", "wax"]) {
+      a.system.attachment = { mainPinEnabled: true, mainSnapRadius: 24, minorSnapRadius: 6, pinStyle: style };
+      canvas.update([a, b], makeLayout());
+      const expected = style === "default" ? "enamel" : style;
+      assert.ok(card(aId).querySelector(`.jn-pin-main.jn-pin-style-${expected}`),
+        `${style} maps to the ${expected} pin visual`);
+    }
+    const css = readFileSync(new URL("../../styles/stylized.css", import.meta.url), "utf8");
+    assert.match(css,
+      /\.jn-canvas \.jn-card \.jn-pin \{[^}]*width:\s*calc\(20px \* var\(--jn-zoom-comp, 1\)\);/,
+      "main pins are a screen-constant 20px via --jn-zoom-comp");
+    assert.match(css,
+      /\.jn-canvas \.jn-card \.jn-pin-minor \{[^}]*width:\s*calc\(9px \* var\(--jn-zoom-comp, 1\)\);/,
+      "minor pins are a screen-constant 9px visual");
+    assert.match(css,
+      /\.jn-canvas \.jn-card \.jn-pin::after \{[^}]*width:\s*max\(calc\(14px \* var\(--jn-zoom-comp, 1\)\), 100%\);/,
+      "small pins keep a ~14px screen-space hit target via a zoom-compensated pseudo-element");
+    for (const style of ["enamel", "brass", "iron", "wood", "decorative", "wax"]) {
+      assert.ok(css.includes(`.jn-pin-style-${style}::before`), `${style} has a pin visual rule`);
+    }
+
+    a.system.attachment = { mainPinEnabled: true, mainSnapRadius: 24, minorSnapRadius: 6, pinStyle: "brass" };
+    const layout = makeLayout();
+    layout.cards[aId].width = 240;
+    layout.cards[aId].height = 120;
+    layout.cards[aId].rotation = 90;
+    canvas.update([a, b], layout);
+    assert.equal(card(aId).querySelector(".jn-pin-main").style.left, "50%",
+      "normalized pin coordinates survive rotation and resize");
+    const rotatedWorld = anchorWorld({ x: 0, y: 0, w: 240, h: 120, rotation: 90 },
+      { kind: "main", x: 0.5, y: 0 });
+    endpoints = [...canvas.svg.querySelectorAll('g[data-id="pinlink"] .jn-thread-pin:not(.jn-board-pin)')];
+    assert.equal(Number(endpoints[0].getAttribute("cx")), rotatedWorld.x);
+    assert.equal(Number(endpoints[0].getAttribute("cy")), rotatedWorld.y);
+
+    canvas.pinsEnabled = false;
+    canvas.update([a, b], layout);
+    assert.equal(canvas.root.querySelector(".jn-pin"), null, "pins are hidden when the experiment is off");
+    endpoints = [...canvas.svg.querySelectorAll('g[data-id="pinlink"] .jn-thread-pin:not(.jn-board-pin)')];
+    assert.equal(Number(endpoints[0].getAttribute("cx")), rotatedWorld.x,
+      "an existing anchor-linked path still resolves its pin position while pins are hidden");
+
+    canvas.pinsEnabled = true;
+    a.system.attachment = { mainPinEnabled: false, mainSnapRadius: 24, minorSnapRadius: 6, pinStyle: "brass" };
+    canvas.update([a, b], layout);
+    assert.equal(card(aId).querySelector(".jn-pin-main"), null,
+      "a disabled main pin renders nothing and is never synthesized on the client");
+    assert.ok(card(aId).querySelector('.jn-pin[data-anchor-id="m1"]'), "minor pins remain visible");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("main-pin drag moves the note, minor pins move alone and report normalized coordinates", () => {
+  const calls = [];
+  const canvas = new JournalCanvas(new Proxy({}, {
+    get: (_, name) => (...args) => calls.push([name, ...args])
+  }));
+  document.body.appendChild(canvas.root);
+  canvas.pinsEnabled = true;
+  const note = id => ({
+    _id: id, name: id,
+    system: {
+      style: "sticky", authorId: gmUser.id, blocks: [], links: [],
+      attachment: { mainPinEnabled: true, mainSnapRadius: 24, minorSnapRadius: 6, pinStyle: "enamel" }
+    }
+  });
+  const aId = "dragcardA0000001";
+  const bId = "dragcardB0000002";
+  const layout = () => ({
+    cards: {
+      [aId]: {
+        x: 0, y: 0, width: 200, height: 100, rotation: 0,
+        anchors: {
+          main: { kind: "main", x: 0.5, y: 0, createdBy: gmUser.id },
+          m1: { kind: "minor", x: 0.2, y: 0.3, createdBy: gmUser.id }
+        }
+      },
+      [bId]: {
+        x: 400, y: 0, width: 200, height: 100, rotation: 0,
+        anchors: { main: { kind: "main", x: 0.5, y: 0, createdBy: gmUser.id } }
+      }
+    },
+    labels: {}
+  });
+  const notes = [note(aId), note(bId)];
+  try {
+    canvas.update(notes, layout());
+    const card = id => canvas.root.querySelector(`.jn-card[data-id="${id}"]`);
+    const main = card(aId).querySelector(".jn-pin-main");
+    main.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 100, clientY: 0 }));
+    canvas.root.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, button: 0, clientX: 130, clientY: 10 }));
+    canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 130, clientY: 10 }));
+    assert.ok(calls.some(([name, id, x, y]) => name === "onMoveCard" && id === aId && x === 30 && y === 10),
+      "dragging the main pin moves the whole note");
+
+    canvas.update(notes, layout());
+    calls.length = 0;
+    const minor = card(aId).querySelector('.jn-pin[data-anchor-id="m1"]');
+    minor.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 40, clientY: 30 }));
+    canvas.root.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, button: 0, clientX: 80, clientY: 60 }));
+    canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 80, clientY: 60 }));
+    assert.ok(calls.some(([name, id, anchorId, x, y]) => name === "onMoveCardAnchor"
+      && id === aId && anchorId === "m1" && Math.abs(x - 0.4) < 1e-9 && Math.abs(y - 0.6) < 1e-9),
+      "a minor pin reports its new normalized position");
+    assert.equal(calls.some(([name]) => name === "onMoveCard"), false,
+      "a minor pin never starts a card drag");
+
+    canvas.update(notes, layout());
+    calls.length = 0;
+    canvas.toggleLinkTool();
+    card(aId).querySelector(".jn-pin-main").dispatchEvent(new MouseEvent("click", {
+      bubbles: true, button: 0, clientX: 100, clientY: 0
+    }));
+    card(bId).querySelector(".jn-pin-main").dispatchEvent(new MouseEvent("click", {
+      bubbles: true, button: 0, clientX: 500, clientY: 0
+    }));
+    const created = calls.find(([name]) => name === "onCreateLink");
+    assert.ok(created, "link mode starts/picks links from the main pins");
+    assert.equal(created[3].sourceAnchorId, "main");
+    assert.equal(created[3].targetAnchorId, "main");
+
+    canvas.update(notes, layout());
+    calls.length = 0;
+    card(aId).dispatchEvent(new MouseEvent("contextmenu", {
+      bubbles: true, button: 2, clientX: 60, clientY: 50
+    }));
+    const addMinor = canvas.root.querySelector('.jn-context-menu [data-action="add-minor-pin"]');
+    assert.ok(addMinor, "the note menu offers an add-minor-pin action");
+    addMinor.click();
+    const added = calls.find(([name]) => name === "onAddCardAnchor");
+    assert.ok(added, "the menu requests a new minor anchor");
+    assert.equal(added[1], aId);
+    assert.equal(added[2].kind, "minor");
+    assert.ok(Math.abs(added[2].x - 0.3) < 1e-9 && Math.abs(added[2].y - 0.5) < 1e-9,
+      "the anchor lands at the right-clicked normalized point");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("a rejected minor-pin write clears the optimistic drag and restores the pin", async () => {
+  const canvas = new JournalCanvas({
+    onMoveCardAnchor() { return Promise.reject(new Error("rejected anchor write")); }
+  });
+  document.body.appendChild(canvas.root);
+  canvas.pinsEnabled = true;
+  const note = {
+    _id: "rejectpin0000001", name: "Rejected pin",
+    system: {
+      style: "sticky", authorId: gmUser.id, blocks: [], links: [],
+      attachment: { mainPinEnabled: true, mainSnapRadius: 24, minorSnapRadius: 6, pinStyle: "enamel" }
+    }
+  };
+  const layout = {
+    cards: {
+      [note._id]: {
+        x: 0, y: 0, width: 200, height: 100, rotation: 0,
+        anchors: {
+          main: { kind: "main", x: 0.5, y: 0, createdBy: gmUser.id },
+          m1: { kind: "minor", x: 0.2, y: 0.3, createdBy: gmUser.id }
+        }
+      }
+    },
+    labels: {}
+  };
+  try {
+    canvas.update([note], layout);
+    const pin = canvas.root.querySelector('.jn-pin[data-anchor-id="m1"]');
+    pin.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 40, clientY: 30 }));
+    canvas.root.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, button: 0, clientX: 100, clientY: 70 }));
+    canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 100, clientY: 70 }));
+    assert.equal(canvas.anchorDrag, null, "the drag override is cleared as soon as the write is sent");
+    await settle();
+    const restored = canvas.root.querySelector('.jn-pin[data-anchor-id="m1"]');
+    assert.equal(restored.style.left, "20%", "a rejected write snaps the pin back to the stored point");
+    assert.equal(restored.style.top, "30%");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("link tool reuses nearby pins, creates minor specs on interior clicks, and shares anchors", () => {
+  const calls = [];
+  const canvas = new JournalCanvas(new Proxy({}, {
+    get: (_, name) => (...args) => calls.push([name, ...args])
+  }));
+  document.body.appendChild(canvas.root);
+  canvas.pinsEnabled = true;
+  const note = id => ({
+    _id: id, name: id,
+    system: {
+      style: "sticky", authorId: gmUser.id, blocks: [], links: [],
+      attachment: { mainPinEnabled: true, mainSnapRadius: 24, minorSnapRadius: 6, pinStyle: "enamel" }
+    }
+  });
+  const ids = ["toolcardA0000001", "toolcardB0000002", "toolcardC0000003"];
+  const layout = {
+    cards: {
+      [ids[0]]: {
+        x: 0, y: 0, width: 200, height: 100, rotation: 0,
+        anchors: { main: { kind: "main", x: 0.5, y: 0, createdBy: gmUser.id } }
+      },
+      [ids[1]]: {
+        x: 400, y: 0, width: 200, height: 100, rotation: 0,
+        anchors: {
+          main: { kind: "main", x: 0.5, y: 0, createdBy: gmUser.id },
+          m1: { kind: "minor", x: 0.7, y: 0.25, createdBy: gmUser.id }
+        }
+      },
+      [ids[2]]: {
+        x: 800, y: 0, width: 200, height: 100, rotation: 0,
+        anchors: { main: { kind: "main", x: 0.5, y: 0, createdBy: gmUser.id } }
+      }
+    },
+    labels: {}
+  };
+  const notes = ids.map(note);
+  const clickCard = (id, x, y) => canvas.root.querySelector(`.jn-card[data-id="${id}"]`)
+    .dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, clientX: x, clientY: y }));
+  const linkCalls = () => calls.filter(([name]) => name === "onCreateLink");
+  try {
+    canvas.update(notes, layout);
+    canvas.toggleLinkTool();
+    canvas.root.querySelector(`.jn-card[data-id="${ids[0]}"]`).dispatchEvent(new MouseEvent("pointermove", {
+      bubbles: true, clientX: 100, clientY: 0
+    }));
+    const targetPreview = canvas.svg.querySelector(".jn-pin-target");
+    assert.ok(targetPreview && targetPreview.style.display !== "none",
+      "hovering a pin under the link tool shows a magnet preview");
+    assert.ok(targetPreview.classList.contains("jn-pin-target-main"));
+    clickCard(ids[0], 100, 0);
+    clickCard(ids[1], 480, 50);
+    let created = linkCalls().at(-1);
+    assert.equal(created[3].sourceAnchorId, "main");
+    assert.equal(created[3].targetAnchorId, "");
+    assert.deepEqual(created[3].targetAnchor, { kind: "minor", x: 0.4, y: 0.5 });
+    assert.deepEqual(created[3].targetPoint, { x: 0.4, y: 0.5 });
+
+    canvas.toggleLinkTool();
+    clickCard(ids[0], 100, 0);
+    clickCard(ids[1], 540, 20);
+    created = linkCalls().at(-1);
+    assert.equal(created[3].targetAnchorId, "m1",
+      "clicking near a rendered minor pin reuses its anchor id");
+
+    canvas.toggleLinkTool();
+    clickCard(ids[0], 100, 0);
+    clickCard(ids[2], 900, 0);
+    created = linkCalls().at(-1);
+    assert.equal(created[3].sourceAnchorId, "main");
+    assert.equal(created[3].targetAnchorId, "main");
+    const shares = linkCalls().filter(([, , , ports]) => ports.sourceAnchorId === "main");
+    assert.equal(shares.length, 3, "any number of links can reuse the same main anchor");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("editor pin controls write attachment values and disabling is routed through undo", async () => {
+  await requestWrite({ type: "createNote", title: "Pin Controls", x: 1000, y: 120 });
+  await settle();
+  const noteId = sharedByName("Pin Controls").id;
+  await requestWrite({
+    type: "setNoteAttachment", noteIds: [noteId],
+    fields: { mainSnapRadius: 18, minorSnapRadius: 4, pinStyle: "brass" }
+  });
+  await settle();
+  const pinCalls = [];
+  const editor = new NoteEditor({
+    onFocusNote() {},
+    onSelectNote() {},
+    onSetMainPinEnabled: (id, enabled) => { pinCalls.push([id, enabled]); return Promise.resolve("pin-undo"); }
+  });
+  document.body.appendChild(editor.root);
+  try {
+    editor.open(noteId);
+    editor.render();
+    const toggle = editor.root.querySelector(".journalinator-main-pin");
+    assert.ok(toggle, "the shared editor exposes a pin tool when the experiment is active");
+    assert.equal(toggle.checked, true);
+    assert.equal(editor.root.querySelector(".journalinator-main-snap").value, "18");
+    assert.equal(editor.root.querySelector(".journalinator-minor-snap").value, "4");
+    assert.equal(editor.root.querySelector(".journalinator-pin-style").value, "brass");
+
+    const mainSnap = editor.root.querySelector(".journalinator-main-snap");
+    mainSnap.value = "30";
+    mainSnap.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    assert.equal(notesStore.getNote(noteId).system.attachment.mainSnapRadius, 30);
+    const minorSnap = editor.root.querySelector(".journalinator-minor-snap");
+    minorSnap.value = "9";
+    minorSnap.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    assert.equal(notesStore.getNote(noteId).system.attachment.minorSnapRadius, 9);
+    const style = editor.root.querySelector(".journalinator-pin-style");
+    style.value = "wax";
+    style.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    assert.equal(notesStore.getNote(noteId).system.attachment.pinStyle, "wax");
+
+    toggle.checked = false;
+    toggle.dispatchEvent(new Event("change", { bubbles: true }));
+    assert.deepEqual(pinCalls, [[noteId, false]],
+      "disabling the main pin uses the undoable setMainPinEnabled callback instead of setNoteAttachment");
+
+    await game.settings.set("fvtt-journalinator", "pinsEnabled", false);
+    editor.render();
+    assert.equal(editor.root.querySelector(".journalinator-main-pin"), null,
+      "the pin tool is hidden when the world setting is off");
+  } finally {
+    await game.settings.set("fvtt-journalinator", "pinsEnabled", true);
+    editor.deactivate();
+    editor.root.remove();
+  }
+});
+
+test("private editor pin controls save attachment values directly", async () => {
+  const user = makeUser("PrivatePinUser01", { name: "Private Pin" });
+  const page = await privateStore.createFor(user);
+  const workspace = new PrivateWorkspace({ onChange() {} });
+  workspace.setPage(page);
+  const canvasSlot = document.createElement("div");
+  const editorSlot = document.createElement("div");
+  document.body.append(canvasSlot, editorSlot);
+  try {
+    const noteId = await workspace.createNoteAt({ title: "Private Pin", x: 0, y: 0 });
+    workspace.selectedNoteId = noteId;
+    workspace.renderInto(canvasSlot, editorSlot);
+    const card = canvasSlot.querySelector(`.jn-card[data-id="${noteId}"]`);
+    assert.ok(card.querySelector(".jn-pin-main"), "private notes render their main pin");
+    const root = workspace.editor.root;
+    const toggle = root.querySelector(".journalinator-main-pin");
+    assert.ok(toggle, "the private editor exposes the same pin controls");
+    const mainSnap = root.querySelector(".journalinator-main-snap");
+    mainSnap.value = "21";
+    mainSnap.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    assert.equal(workspace.getNote(noteId).system.attachment.mainSnapRadius, 21);
+    const style = root.querySelector(".journalinator-pin-style");
+    style.value = "decorative";
+    style.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    assert.equal(workspace.getNote(noteId).system.attachment.pinStyle, "decorative");
+    toggle.checked = false;
+    toggle.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    assert.equal(workspace.getNote(noteId).system.attachment.mainPinEnabled, false,
+      "the private main-pin toggle is a direct workspace update");
+  } finally {
+    workspace.destroy();
+    canvasSlot.remove();
+    editorSlot.remove();
+    await privateStore.remove(page);
+  }
+});
+
+test("secret/hidden links never receive anchor ids or specs", async () => {
+  const secretId = await secrets.createSecretNote({ title: "Pin Secret", x: 800, y: 120 });
+  await settle();
+  const sharedId = sharedByName("Pin Controls")?.id ?? tavernId;
+  const notes = notesStore.getAllNotes();
+  const layout = structuredClone(notesStore.getLayout());
+  for (const id of [secretId, sharedId]) {
+    if (!layout.cards[id]) continue;
+    layout.cards[id].width = 200;
+    layout.cards[id].height = 100;
+    layout.cards[id].rotation = 0;
+  }
+  const calls = [];
+  const canvas = new JournalCanvas(new Proxy({}, {
+    get: (_, name) => (...args) => calls.push([name, ...args])
+  }));
+  document.body.appendChild(canvas.root);
+  canvas.pinsEnabled = true;
+  try {
+    canvas.update(notes, layout);
+    const secretCard = canvas.root.querySelector(`.jn-card[data-id="${secretId}"]`);
+    const sharedCard = canvas.root.querySelector(`.jn-card[data-id="${sharedId}"]`);
+    assert.ok(secretCard.querySelector(".jn-pin-main"), "a secret note keeps its own main pin");
+    const secretData = layout.cards[secretId];
+    const sharedData = layout.cards[sharedId];
+    canvas.toggleLinkTool();
+    secretCard.querySelector(".jn-pin-main").dispatchEvent(new MouseEvent("click", {
+      bubbles: true, button: 0, clientX: secretData.x + 100, clientY: secretData.y
+    }));
+    sharedCard.dispatchEvent(new MouseEvent("click", {
+      bubbles: true, button: 0, clientX: sharedData.x + 80, clientY: sharedData.y + 50
+    }));
+    const created = calls.find(([name]) => name === "onCreateLink");
+    assert.ok(created, "the hidden/secret link gesture still creates a link");
+    const ports = created[3];
+    for (const key of ["sourceAnchorId", "targetAnchorId", "sourceAnchor", "targetAnchor"]) {
+      assert.equal(Object.hasOwn(ports, key), false, `${key} is never sent for a secret link`);
+    }
+    assert.ok(ports.sourcePoint && ports.targetPoint, "plain normalized points are used instead");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+    await secrets.deleteSecretNote(secretId);
+    await settle();
+  }
+});
+
+test("JournalApp Ctrl+Z sends undoPinChange before trash undo", async () => {
+  await requestWrite({ type: "createNote", title: "Pin Undo", x: 1400, y: 120 });
+  await settle();
+  const noteId = sharedByName("Pin Undo").id;
+  await game.settings.set("fvtt-journalinator", "pinsEnabled", true);
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  try {
+    await redraw();
+    const card = host.querySelector(`.jn-card[data-id="${noteId}"]`);
+    card.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 0, clientY: 0 }));
+    card.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 0, clientY: 0 }));
+    await redraw();
+    const toggle = host.querySelector(".journalinator-main-pin");
+    assert.ok(toggle, "the selected note exposes its pin toggle in the app editor");
+    toggle.checked = false;
+    toggle.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+
+    // Force the requestWrite socket path so the outbound undo message is observable.
+    const descriptor = Object.getOwnPropertyDescriptor(game.users, "activeGM");
+    const otherGM = { id: "OtherGM00000001", name: "Other GM", isGM: true, active: true };
+    Object.defineProperty(game.users, "activeGM", { configurable: true, get: () => otherGM });
+    const before = env.socketLog.length;
+    try {
+      host.querySelector(".jn-canvas").dispatchEvent(new KeyboardEvent("keydown", {
+        key: "z", ctrlKey: true, bubbles: true, cancelable: true
+      }));
+      await settle();
+    } finally {
+      Object.defineProperty(game.users, "activeGM", descriptor);
+    }
+    const messages = env.socketLog.slice(before).map(entry => entry.message);
+    assert.ok(messages.some(message => message.type === "undoPinChange" && message.undoId),
+      "Ctrl+Z pops the pin history and requests an undo");
+  } finally {
+    await game.settings.set("fvtt-journalinator", "pinsEnabled", true);
+    app._onClose();
+    host.remove();
+  }
 });
 
 test("no unexpected errors were reported", () => {
