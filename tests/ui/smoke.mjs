@@ -553,10 +553,14 @@ test("toolbar dropdowns filter cards and change the saved board theme", async ()
     theme.querySelector("summary").dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
     assert.equal(filters.open, false);
     theme.querySelector("summary").click();
-    theme.querySelector('[data-theme-choice="fantasy"]').click();
+    theme.querySelector('[data-theme-choice="parchment"]').click();
     await settle();
-    assert.equal(game.settings.get("fvtt-journalinator", "boardTheme"), "fantasy");
-    assert.equal(host.querySelector(".journalinator-root").dataset.theme, "fantasy");
+    assert.equal(game.settings.get("fvtt-journalinator", "boardTheme"), "parchment");
+    const board = host.querySelector(".journalinator-root");
+    assert.equal(board.dataset.theme, "parchment");
+    assert.equal(board.style.getPropertyValue("--jn-bg"), "#e7ddc6");
+    assert.equal(board.style.getPropertyValue("--jn-style-sticky-surface"), "#f6e6a6");
+    assert.equal(board.querySelector(".jn-canvas").dataset.boardPattern, "grid");
     assert.equal(theme.open, false);
   } finally {
     await game.settings.set("fvtt-journalinator", "boardTheme", initialTheme);
@@ -620,6 +624,12 @@ test("cards place foreground images by type and change the background independen
     await redraw();
     assert.equal(card.querySelector(".jn-card-image").hidden, true);
     assert.equal(card.querySelector(".jn-card-background").getAttribute("src"), "https://example.com/background.png");
+    card.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, button: 2 }));
+    answers.push("worlds/camera/cork.webp");
+    host.querySelector('[data-action="card-background"]').click();
+    await settle();
+    await redraw();
+    assert.equal(card.querySelector(".jn-card-background").getAttribute("src"), "worlds/camera/cork.webp");
   } finally {
     app._onClose();
     host.remove();

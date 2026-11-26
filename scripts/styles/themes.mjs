@@ -1,0 +1,482 @@
+/**
+ * Theme system (spec §4.5 extension).
+ *
+ * A theme is a declarative token set, never arbitrary CSS. It can restyle the board
+ * background, every note type's surface/frame/typography, and the shared colour roles.
+ * That keeps themes portable, testable and safe to load from settings or another module:
+ * a theme can express a look, but it cannot inject a stylesheet, fetch a remote URL from
+ * `url()`, or smuggle in an `expression`.
+ *
+ * Two layers are kept separate on purpose:
+ *   - `CARD_STYLES` (styles/registry.mjs) is structure + behaviour: class name, tilt, size.
+ *   - a theme's `styles[key]` is the skin for that structure: surface, edge, radius, shadow,
+ *     title/heading/body type. Note types never change; only their visuals do.
+ *
+ * Colour values may be literals ("#2d2e32") or references to another role ("panel", "text").
+ * References are resolved when the theme is applied, so overriding `text` automatically
+ * repaints everything that defaults to `text`.
+ */
+import { CARD_STYLES } from "./registry.mjs";
+
+export const COLOR_TOKENS = Object.freeze([
+  "bg", "panel", "text", "muted", "line", "acc", "gm", "hint", "thread",
+  "danger", "dangerBg", "dangerText", "onAccent", "shadow", "stamp"
+]);
+
+export const BOARD_PATTERNS = Object.freeze(["none", "dots", "grid"]);
+export const EDGE_STYLES = Object.freeze(["solid", "dashed", "dotted", "none"]);
+export const IMAGE_SIZES = Object.freeze(["cover", "contain", "tile"]);
+export const TEXT_TRANSFORMS = Object.freeze(["none", "uppercase", "lowercase", "capitalize"]);
+export const ALIGNMENTS = Object.freeze(["left", "center", "right"]);
+export const FONT_KEYS = Object.freeze(["system", "serif", "mono", "rounded"]);
+export const SHADOW_KEYS = Object.freeze(["none", "flat", "paper", "raised", "deep"]);
+
+const FONTS = Object.freeze({
+  system: "system-ui, sans-serif",
+  serif: 'Georgia, "Times New Roman", serif',
+  mono: "ui-monospace, monospace",
+  rounded: '"Trebuchet MS", "Segoe UI", system-ui, sans-serif'
+});
+
+const SHADOWS = Object.freeze({
+  none: "none",
+  flat: "0 2px 6px color-mix(in srgb, var(--jn-shadow) 38%, transparent)",
+  paper: "0 7px 14px color-mix(in srgb, var(--jn-shadow) 47%, transparent)",
+  raised: "0 5px 12px color-mix(in srgb, var(--jn-shadow) 40%, transparent)",
+  deep: "0 14px 30px color-mix(in srgb, var(--jn-shadow) 58%, transparent)"
+});
+
+const HEX = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+const NAMED = /^[a-z]{3,20}$/i;
+const FUNCTIONAL = /^(?:rgb|rgba|hsl|hsla|oklch|oklab|lab|lch|hwb)\([0-9a-z.%\s,/+-]+\)$/i;
+// Board images are local data paths only: a safe relative path inside Foundry's data folder.
+const SAFE_PATH = /^[A-Za-z0-9 _./@-]+$/;
+const THEME_ID = /^[a-z0-9][a-z0-9_-]{0,40}$/i;
+
+const isObject = value => !!value && typeof value === "object" && !Array.isArray(value);
+const clone = value => JSON.parse(JSON.stringify(value));
+
+export function isColor(value) {
+  if (typeof value !== "string" || value.length > 80) return false;
+  return HEX.test(value) || NAMED.test(value) || FUNCTIONAL.test(value);
+}
+
+/** Theme ids are picker keys and setting values, so keep them to a conservative charset. */
+export function isThemeId(value) {
+  return typeof value === "string" && THEME_ID.test(value);
+}
+
+/** A role name (resolved later) or a literal colour. */
+export function isColorRef(value) {
+  return COLOR_TOKENS.includes(value) || isColor(value);
+}
+
+function colorRef(value, fallback) {
+  return isColorRef(value) ? value : fallback;
+}
+
+function pickEnum(value, keys, fallback) {
+  return keys.includes(value) ? value : fallback;
+}
+
+function num(value, min, max, fallback) {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function safeName(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.replace(/[<>&"']/g, "").trim().slice(0, 60);
+  return trimmed || null;
+}
+
+function imagePath(value) {
+  if (typeof value !== "string") return null;
+  const path = value.trim();
+  if (!path || path.length > 200) return null;
+  if (path.startsWith("/") || path.includes("..")) return null;
+  return SAFE_PATH.test(path) ? path : null;
+}
+
+/** Merges a partial `type` block over a full one, clamping every value. */
+function normalizeType(raw, base) {
+  const type = { ...base };
+  if (!isObject(raw)) return type;
+  if (FONT_KEYS.includes(raw.uiFont)) type.uiFont = raw.uiFont;
+  if (FONT_KEYS.includes(raw.titleFont)) type.titleFont = raw.titleFont;
+  if (FONT_KEYS.includes(raw.headingFont)) type.headingFont = raw.headingFont;
+  if (FONT_KEYS.includes(raw.bodyFont)) type.bodyFont = raw.bodyFont;
+  type.titleSize = num(raw.titleSize, 8, 40, type.titleSize);
+  type.headingSize = num(raw.headingSize, 10, 60, type.headingSize);
+  type.bodySize = num(raw.bodySize, 8, 26, type.bodySize);
+  type.titleWeight = num(raw.titleWeight, 100, 900, type.titleWeight);
+  type.headingWeight = num(raw.headingWeight, 100, 900, type.headingWeight);
+  type.titleSpacing = num(raw.titleSpacing, -0.1, 0.4, type.titleSpacing);
+  type.headingSpacing = num(raw.headingSpacing, -0.1, 0.5, type.headingSpacing);
+  type.titleColor = colorRef(raw.titleColor, type.titleColor);
+  type.headingColor = colorRef(raw.headingColor, type.headingColor);
+  type.bodyColor = colorRef(raw.bodyColor, type.bodyColor);
+  type.titleTransform = pickEnum(raw.titleTransform, TEXT_TRANSFORMS, type.titleTransform);
+  type.headingTransform = pickEnum(raw.headingTransform, TEXT_TRANSFORMS, type.headingTransform);
+  type.align = pickEnum(raw.align, ALIGNMENTS, type.align);
+  return type;
+}
+
+const BASE_TYPE = Object.freeze({
+  uiFont: "system",
+  titleFont: "system", titleSize: 14, titleWeight: 600, titleSpacing: 0,
+  titleColor: "text", titleTransform: "none",
+  headingFont: "serif", headingSize: 23, headingWeight: 800, headingSpacing: 0.075,
+  headingColor: "muted", headingTransform: "uppercase",
+  bodyFont: "system", bodySize: 11.5, bodyColor: "muted",
+  align: "left"
+});
+
+const BASE_STYLE = Object.freeze({
+  surface: "panel", surfaceAlpha: 1,
+  edge: "line", edgeWidth: 1, edgeStyle: "solid",
+  radius: 6, shadow: "raised",
+  text: "text", imageOpacity: 0.78, stripe: 3,
+  rule: "line", ruleWidth: 0
+});
+
+/** The current look, expressed in the new token vocabulary. */
+export const CLASSIC_THEME = Object.freeze({
+  id: "classic",
+  nameKey: "JN.Theme.Classic",
+  colors: {
+    bg: "#1b1b1d", panel: "#252528", text: "#dcdce0", muted: "#8d8d97",
+    line: "#3a3a41", acc: "#a393f2", gm: "#6fb3c4", hint: "#d6a45c",
+    thread: "#8e8e9a", danger: "#a85a5a", dangerBg: "#4a2a2a",
+    dangerText: "#e8b9b9", onAccent: "#17171a", shadow: "#000000", stamp: "#e8d9b9"
+  },
+  board: {
+    color: "bg", pattern: "dots", patternColor: "#2d2d33", patternSize: 24,
+    patternOpacity: 1, image: null, imageOpacity: 1, imageSize: "cover", vignette: 0
+  },
+  type: {},
+  styles: {
+    sticky: { surface: "#2d2e32", surfaceAlpha: 1, edgeWidth: 0, edgeStyle: "none", radius: 3, shadow: "paper" },
+    document: {
+      surface: "#2b2b31", edge: "#3f3f47", edgeWidth: 1, edgeStyle: "solid", radius: 6,
+      shadow: "raised", rule: "#46464f", ruleWidth: 1,
+      type: { titleFont: "serif", titleSize: 15 }
+    },
+    torn: { surface: "#35302a", edgeWidth: 0, edgeStyle: "none", radius: 0, shadow: "none" },
+    wanted: {
+      surface: "panel", edge: "line", edgeWidth: 1, radius: 6, shadow: "raised",
+      rule: "line", ruleWidth: 1,
+      type: { align: "center", titleFont: "system", titleSize: 16, titleWeight: 650, headingColor: "muted", bodySize: 12 }
+    },
+    memo: {
+      surface: "panel", edge: "line", edgeWidth: 1, radius: 6, shadow: "raised",
+      type: { bodySize: 14, bodyColor: "text" }
+    }
+  }
+});
+
+export const WARM_THEME = Object.freeze({
+  id: "fantasy",
+  nameKey: "JN.Theme.Fantasy",
+  colors: {
+    bg: "#211912", panel: "#33251a", text: "#f1e4c9", muted: "#cbb38e",
+    line: "#674b32", acc: "#e1b66e", gm: "#90b9a7", hint: "#f0c47a",
+    thread: "#bb5d69", danger: "#b85347", dangerBg: "#43201c",
+    dangerText: "#f0c6bd", onAccent: "#17171a", shadow: "#150906", stamp: "#e6d6b4"
+  },
+  board: {
+    color: "#281e18", pattern: "dots", patternColor: "#4a3628", patternSize: 24,
+    patternOpacity: 1, image: null, imageOpacity: 1, imageSize: "cover", vignette: 0.22
+  },
+  type: { uiFont: "system" },
+  styles: {
+    sticky: { surface: "#49372b", radius: 4, shadow: "paper" },
+    document: { surface: "#3e3027", edge: "line", rule: "line" },
+    torn: { surface: "#48372b" },
+    wanted: { surface: "panel" },
+    memo: { surface: "panel" }
+  }
+});
+
+/** Light, printed-paper theme. Exists to prove a theme can leave the dark palette entirely. */
+export const PARCHMENT_THEME = Object.freeze({
+  id: "parchment",
+  nameKey: "JN.Theme.Parchment",
+  colors: {
+    bg: "#e7ddc6", panel: "#f4eddd", text: "#3a2f23", muted: "#6d5c46",
+    line: "#c6b795", acc: "#8a5a2b", gm: "#3f7a63", hint: "#a9741c",
+    thread: "#99694a", danger: "#a33b3b", dangerBg: "#f1d3d0",
+    dangerText: "#6b1f1f", onAccent: "#fff8ec", shadow: "#2b1d0f", stamp: "#f6efdc"
+  },
+  board: {
+    color: "#e7ddc6", pattern: "grid", patternColor: "#c6b795", patternSize: 26,
+    patternOpacity: 0.55, image: null, imageOpacity: 1, imageSize: "cover", vignette: 0.08
+  },
+  type: {
+    uiFont: "system", titleFont: "serif", headingFont: "serif", bodyFont: "serif",
+    titleWeight: 700, titleSize: 15, bodySize: 12
+  },
+  styles: {
+    sticky: {
+      surface: "#f6e6a6", surfaceAlpha: 1, edge: "#d8c37a", edgeWidth: 1, edgeStyle: "solid",
+      radius: 2, shadow: "flat", ruleWidth: 0, text: "#3a2f23",
+      type: { titleFont: "serif", titleSize: 14, bodyColor: "#6a573a" }
+    },
+    document: {
+      surface: "#fbf6ea", edge: "#c6b795", edgeWidth: 1, radius: 3, shadow: "flat",
+      rule: "#d8cbb0", ruleWidth: 1, text: "#3a2f23",
+      type: { titleFont: "serif", titleSize: 15 }
+    },
+    torn: { surface: "#f1e6cf", edgeWidth: 0, edgeStyle: "none", radius: 0, shadow: "none", text: "#3a2f23" },
+    wanted: {
+      surface: "#fbf6ea", edge: "#c6b795", edgeWidth: 1, radius: 3, shadow: "flat",
+      rule: "#d8cbb0", ruleWidth: 1, text: "#3a2f23",
+      type: { align: "center", headingColor: "#6d5c46", titleColor: "#3a2f23" }
+    },
+    memo: {
+      surface: "#fbf6ea", edge: "#c6b795", edgeWidth: 1, radius: 3, shadow: "flat", text: "#3a2f23"
+    }
+  }
+});
+
+/**
+ * Fills a partial theme out to a complete, safe one. Unknown keys are dropped; every number
+ * is clamped; images are restricted to Foundry data paths.
+ */
+export function normalizeTheme(raw, { id = "custom", name = null } = {}) {
+  const input = isObject(raw) ? raw : {};
+  const base = CLASSIC_THEME;
+
+  const colors = {};
+  for (const token of COLOR_TOKENS) {
+    colors[token] = colorRef(isObject(input.colors) ? input.colors[token] : null, base.colors[token]);
+  }
+
+  const rawBoard = isObject(input.board) ? input.board : {};
+  const board = {
+    color: colorRef(rawBoard.color, base.board.color),
+    pattern: pickEnum(rawBoard.pattern, BOARD_PATTERNS, base.board.pattern),
+    patternColor: colorRef(rawBoard.patternColor, base.board.patternColor),
+    patternSize: num(rawBoard.patternSize, 4, 200, base.board.patternSize),
+    patternOpacity: num(rawBoard.patternOpacity, 0, 1, base.board.patternOpacity),
+    image: imagePath(rawBoard.image),
+    imageOpacity: num(rawBoard.imageOpacity, 0, 1, base.board.imageOpacity),
+    imageSize: pickEnum(rawBoard.imageSize, IMAGE_SIZES, base.board.imageSize),
+    vignette: num(rawBoard.vignette, 0, 1, base.board.vignette)
+  };
+
+  const globalType = normalizeType(input.type, { ...BASE_TYPE, ...(base.type ?? {}) });
+  const styleInput = isObject(input.styles) ? input.styles : {};
+  const styles = {};
+  for (const styleKey of Object.keys(CARD_STYLES)) {
+    const baseStyle = base.styles[styleKey] ?? {};
+    // File defaults → this theme's defaults for the style → the style override.
+    const frameDefaults = {
+      surface: baseStyle.surface ?? BASE_STYLE.surface,
+      surfaceAlpha: baseStyle.surfaceAlpha ?? BASE_STYLE.surfaceAlpha,
+      edge: baseStyle.edge ?? BASE_STYLE.edge,
+      edgeWidth: baseStyle.edgeWidth ?? BASE_STYLE.edgeWidth,
+      edgeStyle: baseStyle.edgeStyle ?? BASE_STYLE.edgeStyle,
+      radius: baseStyle.radius ?? BASE_STYLE.radius,
+      shadow: baseStyle.shadow ?? BASE_STYLE.shadow,
+      text: baseStyle.text ?? BASE_STYLE.text,
+      imageOpacity: baseStyle.imageOpacity ?? BASE_STYLE.imageOpacity,
+      stripe: baseStyle.stripe ?? BASE_STYLE.stripe,
+      rule: baseStyle.rule ?? BASE_STYLE.rule,
+      ruleWidth: baseStyle.ruleWidth ?? BASE_STYLE.ruleWidth
+    };
+    const styleType = normalizeType(baseStyle.type, globalType);
+    styles[styleKey] = normalizeStyle(styleInput[styleKey], styleType, frameDefaults);
+  }
+
+  return {
+    id: THEME_ID.test(id) ? id : "custom",
+    name: safeName(name),
+    nameKey: typeof input.nameKey === "string" ? input.nameKey : null,
+    colors,
+    board,
+    type: globalType,
+    styles
+  };
+}
+
+function normalizeStyle(raw, inheritedType, frameDefaults = BASE_STYLE) {
+  const input = isObject(raw) ? raw : {};
+  const defaults = frameDefaults;
+  return {
+    surface: colorRef(input.surface, defaults.surface),
+    surfaceAlpha: num(input.surfaceAlpha, 0, 1, defaults.surfaceAlpha),
+    edge: colorRef(input.edge, defaults.edge),
+    edgeWidth: num(input.edgeWidth, 0, 12, defaults.edgeWidth),
+    edgeStyle: pickEnum(input.edgeStyle, EDGE_STYLES, defaults.edgeStyle),
+    radius: num(input.radius, 0, 48, defaults.radius),
+    shadow: pickEnum(input.shadow, SHADOW_KEYS, defaults.shadow),
+    text: colorRef(input.text, defaults.text),
+    imageOpacity: num(input.imageOpacity, 0, 1, defaults.imageOpacity),
+    stripe: num(input.stripe, 0, 10, defaults.stripe),
+    rule: colorRef(input.rule, defaults.rule),
+    ruleWidth: num(input.ruleWidth, 0, 8, defaults.ruleWidth),
+    type: normalizeType(input.type, inheritedType)
+  };
+}
+
+function resolveColor(value, colors) {
+  return COLOR_TOKENS.includes(value) ? (colors[value] ?? "#000000") : value;
+}
+
+function pixel(n) {
+  return `${Math.round(n * 100) / 100}px`;
+}
+
+/** A data path as an inline `url()`; theme images never leave the Foundry routes. */
+function cssUrl(path) {
+  if (!path) return "none";
+  let route = path;
+  try {
+    route = globalThis.foundry?.utils?.getRoute?.(path) ?? path;
+    route = new URL(route, globalThis.document?.baseURI ?? "http://localhost/").href;
+  } catch {
+    // jsdom / about:blank: keep the route as-is, it is still a safe relative path.
+  }
+  return `url("${String(route).replace(/"/g, "%22")}")`;
+}
+
+/** Theme → CSS custom properties. Pure: safe to unit-test without a DOM. */
+export function themeToVars(theme) {
+  const vars = {};
+  const { colors, board } = theme;
+
+  vars["--jn-bg"] = colors.bg;
+  vars["--jn-panel"] = colors.panel;
+  vars["--jn-text"] = colors.text;
+  vars["--jn-muted"] = colors.muted;
+  vars["--jn-line"] = colors.line;
+  vars["--jn-acc"] = colors.acc;
+  vars["--jn-gm"] = colors.gm;
+  vars["--jn-hint"] = colors.hint;
+  vars["--jn-thread"] = colors.thread;
+  vars["--jn-danger"] = colors.danger;
+  vars["--jn-danger-bg"] = colors.dangerBg;
+  vars["--jn-danger-text"] = colors.dangerText;
+  vars["--jn-on-accent"] = colors.onAccent;
+  vars["--jn-shadow"] = colors.shadow;
+  vars["--jn-stamp-bg"] = colors.stamp;
+
+  vars["--jn-board-color"] = resolveColor(board.color, colors);
+  vars["--jn-board-pattern-color"] = resolveColor(board.patternColor, colors);
+  vars["--jn-board-pattern-size"] = pixel(board.patternSize);
+  vars["--jn-board-pattern-opacity"] = String(board.patternOpacity);
+  vars["--jn-board-image"] = cssUrl(board.image);
+  vars["--jn-board-image-fade"] = String(1 - board.imageOpacity);
+  vars["--jn-board-image-size"] = board.imageSize === "tile" ? "auto" : board.imageSize;
+  vars["--jn-board-image-repeat"] = board.imageSize === "tile" ? "repeat" : "no-repeat";
+  vars["--jn-board-vignette"] = String(board.vignette);
+
+  const uiFont = theme.type?.uiFont ?? "system";
+  vars["--jn-ui-font"] = FONTS[uiFont] ?? FONTS.system;
+
+  for (const [styleKey, style] of Object.entries(theme.styles)) {
+    const prefix = `--jn-style-${styleKey}-`;
+    const type = style.type;
+    vars[`${prefix}surface`] = resolveColor(style.surface, colors);
+    vars[`${prefix}surface-alpha`] = String(style.surfaceAlpha);
+    vars[`${prefix}edge`] = resolveColor(style.edge, colors);
+    vars[`${prefix}edge-width`] = pixel(style.edgeWidth);
+    vars[`${prefix}edge-style`] = style.edgeStyle;
+    vars[`${prefix}radius`] = pixel(style.radius);
+    vars[`${prefix}shadow`] = SHADOWS[style.shadow] ?? SHADOWS.raised;
+    vars[`${prefix}text`] = resolveColor(style.text, colors);
+    vars[`${prefix}image-opacity`] = String(style.imageOpacity);
+    vars[`${prefix}stripe`] = pixel(style.stripe);
+    vars[`${prefix}rule`] = resolveColor(style.rule, colors);
+    vars[`${prefix}rule-width`] = pixel(style.ruleWidth);
+
+    vars[`${prefix}title-font`] = FONTS[type.titleFont] ?? FONTS.system;
+    vars[`${prefix}title-size`] = pixel(type.titleSize);
+    vars[`${prefix}title-weight`] = String(type.titleWeight);
+    vars[`${prefix}title-spacing`] = String(type.titleSpacing);
+    vars[`${prefix}title-transform`] = type.titleTransform;
+    vars[`${prefix}title-color`] = resolveColor(type.titleColor, colors);
+
+    vars[`${prefix}heading-font`] = FONTS[type.headingFont] ?? FONTS.serif;
+    vars[`${prefix}heading-size`] = pixel(type.headingSize);
+    vars[`${prefix}heading-weight`] = String(type.headingWeight);
+    vars[`${prefix}heading-spacing`] = String(type.headingSpacing);
+    vars[`${prefix}heading-transform`] = type.headingTransform;
+    vars[`${prefix}heading-color`] = resolveColor(type.headingColor, colors);
+
+    vars[`${prefix}body-font`] = FONTS[type.bodyFont] ?? FONTS.system;
+    vars[`${prefix}body-size`] = pixel(type.bodySize);
+    vars[`${prefix}body-color`] = resolveColor(type.bodyColor, colors);
+    vars[`${prefix}align`] = type.align;
+  }
+
+  return vars;
+}
+
+/**
+ * Applies a normalized theme to a root element. All state lives on `data-*` attributes and
+ * CSS custom properties, so switching themes never re-renders the canvas.
+ */
+export function applyTheme(root, theme) {
+  if (!root) return theme;
+  root.dataset.theme = theme.id;
+  root.dataset.boardPattern = theme.board.pattern;
+  root.dataset.boardImage = theme.board.image ? "on" : "off";
+  const vars = themeToVars(theme);
+  for (const [name, value] of Object.entries(vars)) root.style.setProperty(name, value);
+  return theme;
+}
+
+// --- registry -------------------------------------------------------------------------------
+
+const registry = new Map();
+const customSources = new Map();
+const REGISTERED_ORDER = [];
+export const BUILTIN_THEME_IDS = Object.freeze(["classic", "fantasy", "parchment"]);
+
+/**
+ * Registers (or replaces) a theme. Used by the built-ins at load time and by other modules
+ * through `game.journalinator.themes.register`.
+ */
+export function registerTheme(id, theme, { persist = false, name = null } = {}) {
+  const source = isObject(theme) ? theme : {};
+  const normalized = normalizeTheme(source, { id, name: name ?? source.name ?? null });
+  registry.set(normalized.id, normalized);
+  if (!REGISTERED_ORDER.includes(normalized.id)) REGISTERED_ORDER.push(normalized.id);
+  if (persist) customSources.set(normalized.id, clone(source));
+  return normalized;
+}
+
+export function listThemes() {
+  return REGISTERED_ORDER.map(id => registry.get(id)).filter(Boolean);
+}
+
+export function getTheme(id) {
+  return registry.get(id) ?? registry.get(CLASSIC_THEME.id);
+}
+
+/** Re-registers themes saved to the client setting, preserving their picker order. */
+export function loadSavedThemes(saved) {
+  if (!isObject(saved)) return [];
+  const loaded = [];
+  for (const [id, source] of Object.entries(saved)) {
+    if (!isThemeId(id) || BUILTIN_THEME_IDS.includes(id)) continue;
+    try {
+      loaded.push(registerTheme(id, source, { persist: true }));
+    } catch (err) {
+      console.error(`Journalinator: could not load theme "${id}"`, err);
+    }
+  }
+  return loaded;
+}
+
+/** Serializable copy of every theme registered with `persist: true`. */
+export function savedThemes() {
+  return Object.fromEntries(customSources);
+}
+
+registerTheme("classic", CLASSIC_THEME);
+registerTheme("fantasy", WARM_THEME);
+registerTheme("parchment", PARCHMENT_THEME);

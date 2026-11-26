@@ -4,7 +4,7 @@ import { requestWrite } from "../socket.mjs";
 import { reconcileTypedLinks, parseWikilinks } from "../wikilinks.mjs";
 import { CARD_STYLES, seedTilt } from "../styles/registry.mjs";
 import { linkAnchors, moveThreadPin, validCardPorts } from "../card-ports.mjs";
-import { noteImageUrl } from "../image-url.mjs";
+import { noteImagePath } from "../image-url.mjs";
 import {
   makeSecretTitle, stripSecretPrefix, hasSecretPrefix, mergeBlocks, orderOf, declassifyAnchor,
   resolveSecretTitle, findFreeSpot
@@ -223,7 +223,7 @@ export function setSecretTargetHeading(noteId, heading) {
 }
 
 export function setSecretNoteImage(noteId, image, background = false) {
-  const clean = noteImageUrl(image);
+  const clean = noteImagePath(image);
   if (image !== null && !clean) return;
   return vaultStore.mutate(vault => {
     const note = vault.notes[noteId];

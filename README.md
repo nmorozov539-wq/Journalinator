@@ -71,9 +71,10 @@ Open the journal from the sticky-note button in the scene controls.
 - **Add things:** right-click the canvas and choose a note, location or label.
 - **Select:** left-click a card, or drag a selection rectangle across several cards.
 - **Stamps:** right-click a note to choose a color, corner, and seal. Choosing a new seal replaces the current one. Right-click an existing seal to move it to another corner, change its color, or remove it. For a movable stamp, right-click the board and choose **Place a stamp**. Stamps placed on secret notes stay private.
-- **Board theme:** choose Classic or Warm in the top bar. Both use flat colors, and your choice is saved for your client.
+- **Themes:** Classic, Warm, Parchment, **From scene**, and any themes other modules register. A theme can restyle the board background, every note type's surface and typography, and all shared colors. Your choice is saved for your client.
 - **Connection sockets:** right-click a card and open **Connection sockets** to pick a single side or toggle additional sides. Drag from a socket to another card's edge to snap a new link to that side. The destination socket appears automatically and is shared by links on that side.
-- **Target card:** create one from the board menu or change an existing card's style to Target. Paste a direct image URL for the portrait. The title is the name and the body is the description. Cards grow to fit the full text.
+- **Images:** the Target portrait and every card background accept either an external image URL or a file from Foundry's data folder. Use **Browse…** in the image dialog to pick one from the file picker.
+- **Target card:** create one from the board menu or change an existing card's style to Target. Paste an image URL or pick a file from the Foundry data folder for the portrait. The title is the name and the body is the description. Cards grow to fit the full text.
 - **Memo:** choose Memo in the board menu for the widest card. Only the body is shown on the board.
 - **Text labels:** click to select or drag a selection box around several. Double-click a label to edit it. Double-click empty board space to open the creation menu at the cursor.
 - **Delete / undo:** select notes, a label, or a stamp and press `Backspace`. Shared notes go to the trash and can be restored with `Ctrl+Z` (`Cmd+Z` on macOS).
@@ -91,6 +92,83 @@ Open the journal from the sticky-note button in the scene controls.
 
 Players hold Observer permission. Every change is applied by the active GM's client, so
 **while no GM is connected the journal is read-only**.
+
+## Themes
+
+Themes are declarative token sets, not stylesheets. Note types (sticky, document, torn, target,
+memo) keep their structure; a theme changes their surface, frame, shadow, and typography, plus the
+board background and the shared colour roles.
+
+The top bar's palette menu lists the built-ins and every registered theme. Three ship today:
+**Classic** (the original look), **Warm** (the fantasy palette), and **Parchment** (a light,
+printed-paper theme that proves the palette is not hardcoded). **From scene** derives a theme
+from the active scene's background.
+
+### From scene
+
+Selecting **From scene** reads the current scene background and builds a theme from it:
+
+1. The image is drawn to a 64×64 canvas and sampled as OKLab pixels.
+2. Six perceptual clusters are found by k-means (deterministic seeding, so the same scene gives
+   the same palette).
+3. Roles are picked for scenes rather than wallpapers: the dominant neutral becomes `bg`/`panel`
+   at a clamped lightness and low chroma; the most vivid sufficiently-common cluster becomes the
+   accent; a second vivid hue becomes the link thread; text, muted and line are contrast-corrected
+   against the panel (7:1, 4.5:1 and a subtle 1.35:1 respectively).
+4. Dark or light mode follows the dominant area, with the overall mean as a tie-breaker, so a
+   snow map gets a light board and a crypt gets a dark one.
+5. GM teal, hint gold and danger red keep their meaning instead of being recolored by the image.
+
+The result is cached per scene + image path. It follows the active scene while selected
+(`canvasReady` / background updates), and falls back to **Classic** when the image cannot be
+read — for example a remote/S3 asset served without CORS headers. A scene with only a background
+colour still produces a usable monochrome theme.
+
+The extraction logic lives in `scripts/scene-palette.mjs`; `SCENE_PROFILE` at the top holds the
+scene-specific tunables (sample size, cluster count, light threshold, contrast targets).
+
+#### Registering a theme
+
+```js
+game.journalinator.themes.register("moody", {
+  colors: { acc: "#c98b5a", thread: "#8b4a55", gm: "#7fae9b", hint: "#d9a35c" },
+  board: {
+    color: "#141210", pattern: "grid", patternSize: 32, patternOpacity: 0.35, vignette: 0.3,
+    // Optional: a path inside Foundry's data folder (no remote URLs).
+    image: "modules/fvtt-journalinator/assets/cork.webp", imageOpacity: 0.45, imageSize: "cover"
+  },
+  type: { uiFont: "system", titleFont: "serif", bodyFont: "serif", bodySize: 12 },
+  styles: {
+    sticky: { surface: "#3a2f24", radius: 2, shadow: "paper", stripe: 0 },
+    document: { surface: "#2a2420", edge: "#4a3a2c", edgeWidth: 1, ruleWidth: 1 },
+    torn: { surface: "#332a20" },
+    wanted: { surface: "#2a2420", type: { align: "center" } },
+    memo: { surface: "#2a2420" }
+  }
+});
+```
+
+Details:
+
+- Colour values are literal CSS colours or references to another role (`"panel"`, `"text"`,
+  `"acc"`, …), so overriding `text` repaints everything that defaults to it.
+- A theme is a diff against Classic: unmentioned values, including per-style typography, fall
+  back to Classic, so a short theme object is valid.
+- `board.pattern` is `none`, `dots`, or `grid`. `board.imageSize` is `cover`, `contain`, or `tile`.
+- Fonts are `system`, `serif`, `mono`, or `rounded`; shadows are `none`, `flat`, `paper`,
+  `raised`, or `deep`; edges are `solid`, `dashed`, `dotted`, or `none`.
+- Per-style `surfaceAlpha`, `imageOpacity`, `stripe` (author bar width in px), and `ruleWidth`
+  control opacity and framing.
+- Registrations persist in a client setting. Pass `{ persist: false }` for a session-only theme.
+  `classic`, `fantasy`, and `parchment` are reserved built-in ids.
+- `Hooks.on("journalinatorThemeChanged", (id, theme) => …)` fires when a theme is applied;
+  `journalinatorThemeRegistered` fires when a new theme is registered; and
+  `Hooks.on("journalinatorRegisterThemes", themes => …)` runs at `ready` for late registration.
+- A theme's board image must be a safe relative path inside Foundry's data folder (no remote
+  URLs, no `../`), and every numeric value is clamped. A theme can express a look; it cannot
+  inject CSS or fetch a remote URL. This does **not** affect note images: the portrait and card
+  background accept either an external `http(s)` image link or a path inside Foundry's data
+  folder.
 
 ## GM secrets
 
@@ -182,6 +260,9 @@ Layout:
 | Private workspace store and admin panel | `scripts/store/private-store.mjs`, `scripts/app/private-admin.mjs` |
 | Markdown rendering and task toggles | `scripts/markdown.mjs` |
 | Markdown typing helpers | `scripts/markdown-edit.mjs` |
+| Theme tokens, built-ins, validation, registry | `scripts/styles/themes.mjs` |
+| Scene image → palette → theme | `scripts/scene-palette.mjs` |
+| Note image dialog and Foundry file picker | `scripts/app/image-dialog.mjs`, `scripts/image-picker.mjs` |
 | Socket protocol, GM write path | `scripts/socket.mjs` |
 | Lock state machine | `scripts/locks.mjs` |
 | Storage containers and read layer | `scripts/store/` |

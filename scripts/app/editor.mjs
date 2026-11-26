@@ -2,7 +2,8 @@ import { notesStore } from "../store/notes-store.mjs";
 import { requestWrite } from "../socket.mjs";
 import { requestLock, releaseLock, sendHeartbeat, requestLockState, getLock, isHeldByMe } from "../locks.mjs";
 import { CARD_STYLES, cardStyleKey } from "../styles/registry.mjs";
-import { noteImageUrl } from "../image-url.mjs";
+import { noteImagePath } from "../image-url.mjs";
+import { promptImageSource } from "./image-dialog.mjs";
 import * as secrets from "../secrets/secret-actions.mjs";
 import { stripSecretPrefix } from "../secrets/model.mjs";
 import { renderMarkdown, toggleTaskListItem } from "../markdown.mjs";
@@ -199,10 +200,13 @@ export default class NoteEditor {
     const note = notesStore.getNote(noteId);
     if (!note || note.system.deleted) return;
     const existing = note.system[background ? "backgroundImage" : "image"];
-    const value = await this.#promptText(t(background ? "JN.Editor.BackgroundURL" : "JN.Editor.ImageURL"), existing ?? "",
-      existing ? t(background ? "JN.Editor.ClearBackgroundHint" : "JN.Editor.ClearImageHint") : "");
+    const value = await promptImageSource(
+      t(background ? "JN.Editor.BackgroundURL" : "JN.Editor.ImageURL"),
+      existing ?? "",
+      existing ? t(background ? "JN.Editor.ClearBackgroundHint" : "JN.Editor.ClearImageHint") : ""
+    );
     if (value == null) return;
-    const image = value ? noteImageUrl(value) : null;
+    const image = value ? noteImagePath(value) : null;
     if (value && !image) return ui.notifications.warn(t("JN.Editor.InvalidImageURL"));
     return note.secret ? gm(() => secrets.setSecretNoteImage(noteId, image, background))
       : requestWrite({ type: "setNoteImage", noteId, image, background });

@@ -11,6 +11,9 @@ import { registerGmTierSettings } from "./secrets/access.mjs";
 import { vaultStore } from "./secrets/vault-store.mjs";
 import { privateStore } from "./store/private-store.mjs";
 import { t } from "./i18n.mjs";
+import {
+  BUILTIN_THEME_IDS, getTheme, isThemeId, listThemes, loadSavedThemes, registerTheme, savedThemes
+} from "./styles/themes.mjs";
 
 const MODULE_ID = "fvtt-journalinator";
 
@@ -27,8 +30,43 @@ Hooks.once("init", () => {
   game.settings.register(MODULE_ID, "boardTheme", {
     scope: "client", config: false, type: String, default: "classic"
   });
+  game.settings.register(MODULE_ID, "customThemes", {
+    scope: "client", config: false, type: Object, default: {}
+  });
+  loadSavedThemes(game.settings.get(MODULE_ID, "customThemes"));
+  exposeThemeApi();
   registerSidebarHiding();
 });
+
+/**
+ * Public theme API. A companion module (or a macro) can register a theme and have it appear
+ * in every open picker:
+ *
+ *   game.journalinator.themes.register("moody", { board: { ... }, styles: { sticky: { ... } } });
+ *
+ * Registrations persist in the client setting by default; pass `{ persist: false }` for a
+ * session-only theme. `journalinatorThemeRegistered` fires on registration and
+ * `journalinatorThemeChanged` fires when a theme is applied.
+ */
+function exposeThemeApi() {
+  game.journalinator = {
+    themes: {
+      register(id, theme, options = {}) {
+        if (!isThemeId(id)) throw new Error(`Journalinator: invalid theme id "${id}"`);
+        if (BUILTIN_THEME_IDS.includes(id)) throw new Error(`Journalinator: "${id}" is a built-in theme id`);
+        const registered = registerTheme(id, theme, { persist: options.persist ?? true });
+        if (options.persist ?? true) {
+          game.settings.set(MODULE_ID, "customThemes", savedThemes())
+            .catch(err => console.error("Journalinator: could not save theme", err));
+        }
+        Hooks.callAll("journalinatorThemeRegistered", registered.id, registered);
+        return registered;
+      },
+      list: () => listThemes(),
+      get: id => getTheme(id)
+    }
+  };
+}
 
 Hooks.once("ready", async () => {
   await ensureContainers();
@@ -37,6 +75,7 @@ Hooks.once("ready", async () => {
   startExpirySweep();
   startLockResync();
   await vaultStore.init();
+  Hooks.callAll("journalinatorRegisterThemes", game.journalinator?.themes);
   Hooks.on("deleteUser", user => {
     if (!game.user.isGM) return;
     privateStore.orphanUser(user.id).catch(err => console.error("Journalinator: private workspace orphan failed", err));

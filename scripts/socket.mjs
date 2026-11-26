@@ -2,7 +2,7 @@ import { getContainerIds } from "./store/containers.mjs";
 import { privateStore } from "./store/private-store.mjs";
 import { CARD_STYLES, seedTilt } from "./styles/registry.mjs";
 import { cardPorts, linkAnchors, moveThreadPin, validCardPorts } from "./card-ports.mjs";
-import { noteImageSource, noteImageUrl } from "./image-url.mjs";
+import { noteImagePath } from "./image-url.mjs";
 import { reconcileTypedLinks } from "./wikilinks.mjs";
 import { maybeSnapshot } from "./snapshots.mjs";
 import { recordActivity, addSessionMarker } from "./stats.mjs";
@@ -291,8 +291,8 @@ function cleanDeclassifiedNote(shared, message) {
   if (!title || title.length > MAX_TITLE_LENGTH) return null;
   const kind = message.kind === "location" ? "location" : "note";
   const style = typeof message.style === "string" && Object.hasOwn(CARD_STYLES, message.style) ? message.style : "sticky";
-  const image = noteImageSource(message.image);
-  const backgroundImage = noteImageUrl(message.backgroundImage);
+  const image = noteImagePath(message.image);
+  const backgroundImage = noteImagePath(message.backgroundImage);
 
   if (!Array.isArray(message.blocks) || !message.blocks.length || message.blocks.length > MAX_DECLASSIFIED_BLOCKS) return null;
   const blocks = [];
@@ -547,7 +547,7 @@ async function handleMessage(message, senderUserId) {
     case "setNoteImage": {
       const page = shared.pages.get(message.noteId);
       if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
-      const image = noteImageUrl(message.image);
+      const image = noteImagePath(message.image);
       if (message.image !== null && !image) return;
       const field = message.background === true ? "system.backgroundImage" : "system.image";
       await page.update({ [field]: image });

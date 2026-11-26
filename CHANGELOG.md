@@ -2,6 +2,25 @@
 
 These notes start with the small board and toolbar polish patches and cover the follow-up fixes and features.
 
+## Unreleased — Themes and note images
+
+- Themes are now data, not a two-value switch: a theme controls the board background (colour,
+  dots/grid pattern, size, opacity, vignette, local image), every note type's surface, edge,
+  radius, shadow, author stripe, and title/heading/body typography, and all shared colour roles.
+- The palette menu lists registered themes dynamically. Classic and Warm keep their look; a new
+  light **Parchment** theme ships as a demonstration.
+- `game.journalinator.themes.register(id, theme, { persist })` adds a theme from a macro or another
+  module. Saved themes load from a client setting. `journalinatorThemeChanged` and
+  `journalinatorRegisterThemes` hooks are available.
+- Theme values are validated and clamped; images are restricted to Foundry data routes.
+- Note portraits and card backgrounds now accept a path inside Foundry's data folder as well
+  as an external `http(s)` URL, and the image dialog has a **Browse…** button that opens the
+  Foundry file picker.
+- **From scene** generates a theme from the active scene's background: OKLab clustering, a
+  scene-tuned role picker, automatic dark/light mode, contrast-corrected text, and semantic
+  GM/hint/danger colours preserved. It follows the active scene and falls back to Classic when
+  the image is unreadable.
+
 ## 0.8.4 — Keep the note type when copying
 
 - Ctrl/Cmd+C and Ctrl/Cmd+V now preserve the card type between the main and private canvases,

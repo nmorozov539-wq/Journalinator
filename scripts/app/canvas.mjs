@@ -3,7 +3,7 @@ import {
   CARD_SIDES, MAX_THREAD_PINS, THREAD_PIN_RADIUS, cardEdgeAt, cardPointAnchor, moveThreadPin, threadAttachment, validThreadPin
 } from "../card-ports.mjs";
 import { arrowHead, pinnedThreadPath, ThreadMotion } from "../link-thread.mjs";
-import { noteImageSource, noteImageUrl } from "../image-url.mjs";
+import { noteImageSource } from "../image-url.mjs";
 import { hasAnyLock } from "../locks.mjs";
 import { renderMarkdown } from "../markdown.mjs";
 import { t } from "../i18n.mjs";
@@ -62,6 +62,8 @@ export default class JournalCanvas {
 
     this.root = document.createElement("div");
     this.root.className = "jn-canvas";
+    this.root.dataset.boardPattern = "dots";
+    this.patternSize = 24;
     // Programmatic focus keeps canvas keyboard shortcuts scoped to an intentional canvas click
     // without adding the canvas itself to Foundry's normal Tab order.
     this.root.tabIndex = -1;
@@ -230,7 +232,7 @@ export default class JournalCanvas {
     if (source && portrait.getAttribute("src") !== source) portrait.setAttribute("src", source);
     else if (!source) portrait.removeAttribute("src");
     const background = el.querySelector(".jn-card-background");
-    const backgroundSource = noteImageUrl(note.system.backgroundImage);
+    const backgroundSource = noteImageSource(note.system.backgroundImage);
     background.hidden = !backgroundSource;
     if (backgroundSource && background.getAttribute("src") !== backgroundSource) background.setAttribute("src", backgroundSource);
     else if (!backgroundSource) background.removeAttribute("src");
@@ -556,7 +558,7 @@ export default class JournalCanvas {
     this.linkToolbar.innerHTML = `
       <input type="text" class="jn-link-label-input" placeholder="${t("JN.Link.Label")}" value="${foundry.utils.escapeHTML(link.label ?? "")}">
       <button type="button" class="jn-link-dir" title="${t("JN.Link.Direction")}">${{ none: "—", one: "→", two: "↔" }[direction]}</button>
-      <span class="jn-link-colors">${LINK_COLORS.map(c => `<button type="button" class="jn-link-color${c === currentColor ? " on" : ""}" data-color="${c}" style="background:${c || `var(--jn-thread-color, ${LINK_DEFAULT_COLOR})`}"></button>`).join("")}</span>
+      <span class="jn-link-colors">${LINK_COLORS.map(c => `<button type="button" class="jn-link-color${c === currentColor ? " on" : ""}" data-color="${c}" style="background:${c || `var(--jn-thread, ${LINK_DEFAULT_COLOR})`}"></button>`).join("")}</span>
       <button type="button" class="jn-link-dash" title="${t("JN.Link.LineStyle")}">${link.lineStyle === "dashed" ? "┄┄" : "──"}</button>
       ${this.#gmLinkButtons(link)}
       <button type="button" class="jn-link-delete" title="${t("JN.Link.Delete")}">✕</button>
@@ -615,9 +617,20 @@ export default class JournalCanvas {
 
   #applyTransform() {
     this.world.style.transform = `translate(${this.view.x}px, ${this.view.y}px) scale(${this.view.k})`;
-    this.root.style.backgroundPosition = `${this.view.x}px ${this.view.y}px`;
-    this.root.style.backgroundSize = `${24 * this.view.k}px ${24 * this.view.k}px`;
+    const pattern = (this.patternSize || 24) * this.view.k;
+    this.root.style.setProperty("--jn-board-pattern-size", `${pattern}px`);
+    this.root.style.setProperty("--jn-board-pattern-pos", `${this.view.x}px ${this.view.y}px`);
     this.root.classList.toggle("jn-far-zoom", this.view.k < 0.48);
+  }
+
+  /**
+   * Board knobs the canvas itself owns: the pattern pans and zooms with the world, so its
+   * size/position cannot live purely in CSS. Everything else is on the app root.
+   */
+  setTheme(theme) {
+    this.patternSize = theme?.board?.patternSize ?? 24;
+    this.root.dataset.boardPattern = theme?.board?.pattern ?? "dots";
+    this.#applyTransform();
   }
 
   #zoomAt(clientX, clientY, k) {

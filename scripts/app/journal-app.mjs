@@ -8,6 +8,8 @@ import { privateStore } from "../store/private-store.mjs";
 import { defaultNoteTitle, promptNewNote } from "./note-dialog.mjs";
 import { computeJournalStats, deriveSessions } from "../stats.mjs";
 import { CARD_STYLES, cardStyleKey } from "../styles/registry.mjs";
+import { applyTheme, getTheme, listThemes } from "../styles/themes.mjs";
+import { SCENE_THEME_ID, clearSceneThemeCache, sceneTheme } from "../scene-palette.mjs";
 import { canUseGmTier } from "../secrets/access.mjs";
 import { vaultStore } from "../secrets/vault-store.mjs";
 import { openVaultDialog } from "../secrets/vault-ui.mjs";
@@ -21,6 +23,12 @@ function gm(job) {
     console.error(err);
     ui.notifications.error(err.message);
   });
+}
+
+/** The saved theme choice, resolved to a registered theme. `scene` is generated on demand. */
+async function resolveThemeChoice(id) {
+  if (id === SCENE_THEME_ID) return (await sceneTheme()) ?? getTheme("classic");
+  return getTheme(id);
 }
 
 /** Keyboard shortcuts must never replace the browser/editor's native typing behaviour. */
@@ -243,6 +251,17 @@ export default class JournalApp extends ApplicationV2 {
     }
     this.#hookIds.push(["journalinatorLocksChanged", Hooks.on("journalinatorLocksChanged", rerender)]);
     this.#hookIds.push(["journalinatorVaultChanged", Hooks.on("journalinatorVaultChanged", rerender)]);
+    this.#hookIds.push(["journalinatorThemeRegistered", Hooks.on("journalinatorThemeRegistered", rerender)]);
+    const rerenderForScene = () => {
+      if ((game.settings.get("fvtt-journalinator", "boardTheme") ?? "classic") !== SCENE_THEME_ID) return;
+      clearSceneThemeCache();
+      rerender();
+    };
+    this.#hookIds.push(["canvasReady", Hooks.on("canvasReady", rerenderForScene)]);
+    this.#hookIds.push(["updateScene", Hooks.on("updateScene", (scene, changes) => {
+      if ("background" in changes || "img" in changes || "backgroundColor" in changes
+        || "levels" in changes || "initialLevel" in changes) rerenderForScene();
+    })]);
 
     this.#onGlobalKeydown = ev => {
       if ((ev.ctrlKey || ev.metaKey) && ev.key === "k") {
@@ -382,6 +401,8 @@ export default class JournalApp extends ApplicationV2 {
     const q = this.#query.trim().toLowerCase();
     const authors = isPrivate ? [] : [...new Map(notes.map(n => [n.system.authorId, game.users.get(n.system.authorId)])).entries()]
       .filter(([, u]) => u);
+    const themeChoice = game.settings.get("fvtt-journalinator", "boardTheme") ?? "classic";
+    const theme = await resolveThemeChoice(themeChoice);
     return {
       view,
       allNotes: notes,
@@ -394,7 +415,16 @@ export default class JournalApp extends ApplicationV2 {
       gmTier: canUseGmTier(),
       vaultStatus: vaultStore.status,
       merged: notesStore.merged,
-      theme: game.settings.get("fvtt-journalinator", "boardTheme") === "fantasy" ? "fantasy" : "classic",
+      theme: theme.id,
+      themeObj: theme,
+      themeChoice,
+      themeList: [
+        ...listThemes().map(item => ({
+          id: item.id,
+          label: item.nameKey ? t(item.nameKey) : (item.name || item.id)
+        })),
+        { id: SCENE_THEME_ID, label: t("JN.Theme.Scene") }
+      ],
       authors,
       query: q
     };
@@ -404,7 +434,7 @@ export default class JournalApp extends ApplicationV2 {
     const root = document.createElement("div");
     const privateView = context.view === "private";
     root.className = `journalinator-root${context.merged ? " jn-gm-view" : ""}${privateView ? " jn-private-view" : ""}`;
-    root.dataset.theme = context.theme;
+    applyTheme(root, context.themeObj);
     const escape = foundry.utils.escapeHTML;
     const offline = !context.gmOnline;
     const privatePage = context.privatePage;
@@ -415,8 +445,7 @@ export default class JournalApp extends ApplicationV2 {
     const themePicker = `<details class="jn-toolbar-dropdown journalinator-theme">
       <summary class="jn-toolbar-icon" ${tooltipAttrs(t("JN.Theme.Picker"))}><i class="fa-solid fa-palette" aria-hidden="true"></i></summary>
       <div class="jn-toolbar-panel">
-        <button type="button" data-theme-choice="classic" aria-pressed="${context.theme === "classic"}">${t("JN.Theme.Classic")}</button>
-        <button type="button" data-theme-choice="fantasy" aria-pressed="${context.theme === "fantasy"}">${t("JN.Theme.Fantasy")}</button>
+        ${context.themeList.map(item => `<button type="button" data-theme-choice="${escape(item.id)}" aria-pressed="${context.themeChoice === item.id}">${escape(item.label)}</button>`).join("")}
       </div>
     </details>`;
     const sharedToolbar = `
@@ -499,6 +528,7 @@ export default class JournalApp extends ApplicationV2 {
     if (privateView) {
       this.#private.setPage(privatePage);
       if (privatePage) {
+        this.#private.canvas.setTheme(context.themeObj);
         this.#private.renderInto(root.querySelector(".journalinator-canvas-slot"), root.querySelector(".journalinator-editor"));
         this.#private.setDimMatch(note => this.#matchesQuery(note, context.query) && this.#matchesFilters(note));
         if (document.activeElement === this.#private.canvas.root) this.#focusedCanvasRenders.add(root);
@@ -512,6 +542,7 @@ export default class JournalApp extends ApplicationV2 {
     this.#editor.suspendBlur();
     this.#canvas.readOnly = offline;
     this.#editor.readOnly = offline;
+    this.#canvas.setTheme(context.themeObj);
     this.#canvas.mount(root.querySelector(".journalinator-canvas-slot"));
     this.#canvas.selectedNoteId = this.#selectedNoteId;
     this.#canvas.gmMode = context.merged;
@@ -610,17 +641,27 @@ export default class JournalApp extends ApplicationV2 {
     }
     for (const button of root.querySelectorAll("[data-theme-choice]")) {
       button.addEventListener("click", async () => {
-        const selected = button.dataset.themeChoice;
-        await game.settings.set("fvtt-journalinator", "boardTheme", selected);
+        const choice = button.dataset.themeChoice;
+        await game.settings.set("fvtt-journalinator", "boardTheme", choice);
+        if (choice === SCENE_THEME_ID) {
+          clearSceneThemeCache();
+          if (!(await sceneTheme())) ui.notifications?.warn(t("JN.Theme.SceneUnavailable"));
+          await this.render();
+          return;
+        }
+        const selected = getTheme(choice);
         const board = this.element.querySelector(".journalinator-root");
         if (!board) return;
-        board.dataset.theme = selected;
+        applyTheme(board, selected);
+        this.#canvas.setTheme(selected);
+        this.#private.canvas.setTheme(selected);
         const dropdown = board.querySelector(".journalinator-theme");
         for (const choice of dropdown.querySelectorAll("[data-theme-choice]")) {
-          choice.setAttribute("aria-pressed", String(choice.dataset.themeChoice === selected));
+          choice.setAttribute("aria-pressed", String(choice.dataset.themeChoice === selected.id));
         }
         dropdown.open = false;
         if (dropdown.contains(document.activeElement)) dropdown.querySelector("summary").focus();
+        Hooks.callAll("journalinatorThemeChanged", selected.id, selected);
       });
     }
 

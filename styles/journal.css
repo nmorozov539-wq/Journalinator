@@ -7,6 +7,23 @@
   --jn-acc: #a393f2;
   --jn-gm: #6fb3c4;   /* GM-only things: secret notes, hidden blocks/links/labels */
   --jn-hint: #d6a45c; /* GM hints: visible to players, marked as coming from the GM */
+  --jn-thread: #8e8e9a;
+  --jn-danger: #a85a5a;
+  --jn-danger-bg: #4a2a2a;
+  --jn-danger-text: #e8b9b9;
+  --jn-on-accent: #17171a;
+  --jn-shadow: #000;
+  --jn-stamp-bg: #e8d9b9;
+  --jn-ui-font: system-ui, sans-serif;
+  --jn-board-color: var(--jn-bg);
+  --jn-board-pattern-color: #2d2d33;
+  --jn-board-pattern-size: 24px;
+  --jn-board-pattern-opacity: 1;
+  --jn-board-image: none;
+  --jn-board-image-fade: 0;
+  --jn-board-image-size: cover;
+  --jn-board-image-repeat: no-repeat;
+  --jn-board-vignette: 0;
 }
 
 #journalinator-app .window-content {
@@ -19,7 +36,7 @@
   height: 100%;
   background: var(--jn-bg);
   color: var(--jn-text);
-  font: 14px/1.45 system-ui, sans-serif;
+  font: 14px/1.45 var(--jn-ui-font);
 }
 
 .journalinator-topbar {
@@ -83,7 +100,7 @@
   border-radius: 6px;
   background: var(--jn-panel);
   color: var(--jn-text);
-  box-shadow: 0 4px 14px #0008;
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--jn-shadow) 50%, transparent);
 }
 .jn-view-option {
   display: block;
@@ -147,7 +164,7 @@
   border-radius: 6px;
   background: var(--jn-panel);
   color: var(--jn-text);
-  box-shadow: 0 4px 14px #0008;
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--jn-shadow) 50%, transparent);
 }
 .jn-menu-heading {
   padding: 5px 7px;
@@ -219,7 +236,7 @@
   background: var(--jn-panel);
   border: 1px solid var(--jn-line);
   border-radius: 10px;
-  box-shadow: 0 12px 30px #000a;
+  box-shadow: 0 12px 30px color-mix(in srgb, var(--jn-shadow) 62%, transparent);
   padding: 4px;
   z-index: 20;
 }
@@ -382,8 +399,8 @@
 }
 .jn-trash-empty {
   margin-top: 10px;
-  border-color: #a85a5a;
-  color: #e8b9b9;
+  border-color: var(--jn-danger);
+  color: var(--jn-danger-text);
 }
 
 .journalinator-body {
@@ -578,7 +595,7 @@
   border: 1px solid var(--jn-line);
   border-radius: 6px;
   background: var(--jn-panel);
-  box-shadow: 0 4px 14px #0008;
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--jn-shadow) 50%, transparent);
 }
 .jn-pa-menu[hidden] { display: none; }
 .jn-pa-menu button {
@@ -614,23 +631,59 @@
 /* --- Canvas --- */
 
 .jn-canvas {
+  --jn-board-pattern-paint: color-mix(in srgb, var(--jn-board-pattern-color) calc(var(--jn-board-pattern-opacity) * 100%), transparent);
+  --jn-board-scrim: color-mix(in srgb, var(--jn-board-color) calc(var(--jn-board-image-fade) * 100%), transparent);
   position: absolute;
   inset: 0;
   overflow: hidden;
   touch-action: none;
-  background-image: radial-gradient(#2d2d33 1.2px, transparent 1.2px);
-  background-size: 24px 24px;
+  background-color: var(--jn-board-color);
+  background-image:
+    linear-gradient(var(--jn-board-scrim), var(--jn-board-scrim)),
+    var(--jn-board-image);
+  background-position: center;
+  background-size: 100% 100%, var(--jn-board-image-size);
+  background-repeat: no-repeat, var(--jn-board-image-repeat);
   cursor: default;
 }
-.journalinator-root .jn-canvas:focus { outline: none; }
-.jn-canvas.jn-far-zoom {
-  background-image: none;
+/* The pattern is its own layer so it can pan/zoom without fighting the wallpaper layers. */
+.jn-canvas::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background-image: var(--jn-board-pattern, none);
+  background-size: var(--jn-board-pattern-size) var(--jn-board-pattern-size);
+  background-position: var(--jn-board-pattern-pos, 0 0);
+  pointer-events: none;
 }
+.jn-canvas[data-board-pattern="dots"] {
+  --jn-board-pattern: radial-gradient(var(--jn-board-pattern-paint) 1.2px, transparent 1.2px);
+}
+.jn-canvas[data-board-pattern="grid"] {
+  --jn-board-pattern:
+    linear-gradient(to right, var(--jn-board-pattern-paint) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--jn-board-pattern-paint) 1px, transparent 1px);
+}
+.jn-canvas[data-board-pattern="none"] { --jn-board-pattern: none; }
+/* A vignette sits above the board art but below the cards. */
+.jn-canvas::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: radial-gradient(ellipse at center, transparent 55%,
+    color-mix(in srgb, var(--jn-shadow) calc(var(--jn-board-vignette) * 100%), transparent) 100%);
+  pointer-events: none;
+}
+.journalinator-root .jn-canvas:focus { outline: none; }
+.jn-canvas.jn-far-zoom::before { display: none; }
 
 .jn-world {
   position: absolute;
   left: 0;
   top: 0;
+  z-index: 1;
   transform-origin: 0 0;
 }
 
@@ -666,7 +719,7 @@
   background: var(--jn-panel);
   border: 1px solid var(--jn-line);
   border-radius: 9px;
-  box-shadow: 0 12px 30px #000a;
+  box-shadow: 0 12px 30px color-mix(in srgb, var(--jn-shadow) 62%, transparent);
 }
 .jn-context-menu button {
   border: 0;
@@ -688,7 +741,7 @@
   height: 48px;
   object-fit: contain;
   border-radius: 5px;
-  background: #e8d9b9;
+  background: var(--jn-stamp-bg);
   user-select: none;
 }
 .jn-stamp.jn-stamp-colored { background: var(--jn-seal-color); }
@@ -707,7 +760,7 @@
   height: 30px;
   object-fit: contain;
   border-radius: 4px;
-  background: #e8d9b9;
+  background: var(--jn-stamp-bg);
 }
 .jn-stamp-picker button[aria-pressed="true"] img { outline: 2px solid var(--jn-acc); }
 .jn-stamp-colors {
@@ -765,7 +818,7 @@
   background: radial-gradient(circle at 35% 28%,
     color-mix(in srgb, var(--jn-seal-color), #fff 32%), var(--jn-seal-color) 66%,
     color-mix(in srgb, var(--jn-seal-color), #000 34%));
-  box-shadow: 0 2px 3px #0008, inset 0 0 2px #3b100e;
+  box-shadow: 0 2px 3px color-mix(in srgb, var(--jn-shadow) 50%, transparent), inset 0 0 2px #3b100e;
   cursor: pointer;
 }
 .jn-card-stamps .jn-stamp-private { border-style: dashed; }
@@ -774,26 +827,189 @@
   outline-offset: 3px;
 }
 
+/* Base card. Every visual is supplied by the active theme's per-style tokens; the
+   structure (flex column, absolute position, padding) stays in the style blocks. */
 .jn-card {
   --jn-author-color: #8d8d97;
   --jn-rotation: 0deg;
+  --jn-surface: var(--jn-panel);
+  --jn-surface-alpha: 1;
+  --jn-edge: var(--jn-line);
+  --jn-edge-width: 1px;
+  --jn-edge-style: solid;
+  --jn-radius: 6px;
+  --jn-card-shadow: none;
+  --jn-card-text: var(--jn-text);
+  --jn-card-image-opacity: .78;
+  --jn-stripe: 3px;
+  --jn-rule: var(--jn-line);
+  --jn-rule-width: 0px;
+  --jn-title-font: var(--jn-ui-font);
+  --jn-title-size: 14px;
+  --jn-title-weight: 600;
+  --jn-title-spacing: 0;
+  --jn-title-transform: none;
+  --jn-title-color: var(--jn-text);
+  --jn-heading-font: Georgia, "Times New Roman", serif;
+  --jn-heading-size: 23px;
+  --jn-heading-weight: 800;
+  --jn-heading-spacing: .075em;
+  --jn-heading-transform: uppercase;
+  --jn-heading-color: var(--jn-muted);
+  --jn-body-font: var(--jn-ui-font);
+  --jn-body-size: 11.5px;
+  --jn-body-color: var(--jn-muted);
+  --jn-align: left;
   position: absolute;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
   width: 190px;
   padding: 10px 12px 10px 14px;
-  color: var(--jn-text);
+  color: var(--jn-card-text);
   cursor: grab;
   user-select: none;
   transform: rotate(var(--jn-rotation));
+  background-color: var(--jn-surface);
+  background-color: color-mix(in srgb, var(--jn-surface) calc(var(--jn-surface-alpha) * 100%), transparent);
+  border: var(--jn-edge-width) var(--jn-edge-style) var(--jn-edge);
+  border-radius: var(--jn-radius);
+  box-shadow: var(--jn-card-shadow);
+  text-align: var(--jn-align);
 }
 .jn-card::before {
   content: "";
   position: absolute;
   left: 0; top: 0; bottom: 0;
-  width: 3px;
+  width: var(--jn-stripe);
   background: var(--jn-author-color);
+}
+/* Per-style theme tokens → the generic card variables above. */
+.jn-card-sticky {
+  --jn-surface: var(--jn-style-sticky-surface);
+  --jn-surface-alpha: var(--jn-style-sticky-surface-alpha);
+  --jn-edge: var(--jn-style-sticky-edge);
+  --jn-edge-width: var(--jn-style-sticky-edge-width);
+  --jn-edge-style: var(--jn-style-sticky-edge-style);
+  --jn-radius: var(--jn-style-sticky-radius);
+  --jn-card-shadow: var(--jn-style-sticky-shadow);
+  --jn-card-text: var(--jn-style-sticky-text);
+  --jn-card-image-opacity: var(--jn-style-sticky-image-opacity);
+  --jn-stripe: var(--jn-style-sticky-stripe);
+  --jn-rule: var(--jn-style-sticky-rule);
+  --jn-rule-width: var(--jn-style-sticky-rule-width);
+  --jn-title-font: var(--jn-style-sticky-title-font);
+  --jn-title-size: var(--jn-style-sticky-title-size);
+  --jn-title-weight: var(--jn-style-sticky-title-weight);
+  --jn-title-spacing: var(--jn-style-sticky-title-spacing);
+  --jn-title-transform: var(--jn-style-sticky-title-transform);
+  --jn-title-color: var(--jn-style-sticky-title-color);
+  --jn-body-font: var(--jn-style-sticky-body-font);
+  --jn-body-size: var(--jn-style-sticky-body-size);
+  --jn-body-color: var(--jn-style-sticky-body-color);
+  --jn-align: var(--jn-style-sticky-align);
+}
+.jn-card-document {
+  --jn-surface: var(--jn-style-document-surface);
+  --jn-surface-alpha: var(--jn-style-document-surface-alpha);
+  --jn-edge: var(--jn-style-document-edge);
+  --jn-edge-width: var(--jn-style-document-edge-width);
+  --jn-edge-style: var(--jn-style-document-edge-style);
+  --jn-radius: var(--jn-style-document-radius);
+  --jn-card-shadow: var(--jn-style-document-shadow);
+  --jn-card-text: var(--jn-style-document-text);
+  --jn-card-image-opacity: var(--jn-style-document-image-opacity);
+  --jn-stripe: var(--jn-style-document-stripe);
+  --jn-rule: var(--jn-style-document-rule);
+  --jn-rule-width: var(--jn-style-document-rule-width);
+  --jn-title-font: var(--jn-style-document-title-font);
+  --jn-title-size: var(--jn-style-document-title-size);
+  --jn-title-weight: var(--jn-style-document-title-weight);
+  --jn-title-spacing: var(--jn-style-document-title-spacing);
+  --jn-title-transform: var(--jn-style-document-title-transform);
+  --jn-title-color: var(--jn-style-document-title-color);
+  --jn-body-font: var(--jn-style-document-body-font);
+  --jn-body-size: var(--jn-style-document-body-size);
+  --jn-body-color: var(--jn-style-document-body-color);
+  --jn-align: var(--jn-style-document-align);
+}
+.jn-card-torn {
+  --jn-surface: var(--jn-style-torn-surface);
+  --jn-surface-alpha: var(--jn-style-torn-surface-alpha);
+  --jn-edge: var(--jn-style-torn-edge);
+  --jn-edge-width: var(--jn-style-torn-edge-width);
+  --jn-edge-style: var(--jn-style-torn-edge-style);
+  --jn-radius: var(--jn-style-torn-radius);
+  --jn-card-shadow: var(--jn-style-torn-shadow);
+  --jn-card-text: var(--jn-style-torn-text);
+  --jn-card-image-opacity: var(--jn-style-torn-image-opacity);
+  --jn-stripe: var(--jn-style-torn-stripe);
+  --jn-rule: var(--jn-style-torn-rule);
+  --jn-rule-width: var(--jn-style-torn-rule-width);
+  --jn-title-font: var(--jn-style-torn-title-font);
+  --jn-title-size: var(--jn-style-torn-title-size);
+  --jn-title-weight: var(--jn-style-torn-title-weight);
+  --jn-title-spacing: var(--jn-style-torn-title-spacing);
+  --jn-title-transform: var(--jn-style-torn-title-transform);
+  --jn-title-color: var(--jn-style-torn-title-color);
+  --jn-body-font: var(--jn-style-torn-body-font);
+  --jn-body-size: var(--jn-style-torn-body-size);
+  --jn-body-color: var(--jn-style-torn-body-color);
+  --jn-align: var(--jn-style-torn-align);
+}
+.jn-card-wanted {
+  --jn-surface: var(--jn-style-wanted-surface);
+  --jn-surface-alpha: var(--jn-style-wanted-surface-alpha);
+  --jn-edge: var(--jn-style-wanted-edge);
+  --jn-edge-width: var(--jn-style-wanted-edge-width);
+  --jn-edge-style: var(--jn-style-wanted-edge-style);
+  --jn-radius: var(--jn-style-wanted-radius);
+  --jn-card-shadow: var(--jn-style-wanted-shadow);
+  --jn-card-text: var(--jn-style-wanted-text);
+  --jn-card-image-opacity: var(--jn-style-wanted-image-opacity);
+  --jn-stripe: var(--jn-style-wanted-stripe);
+  --jn-rule: var(--jn-style-wanted-rule);
+  --jn-rule-width: var(--jn-style-wanted-rule-width);
+  --jn-title-font: var(--jn-style-wanted-title-font);
+  --jn-title-size: var(--jn-style-wanted-title-size);
+  --jn-title-weight: var(--jn-style-wanted-title-weight);
+  --jn-title-spacing: var(--jn-style-wanted-title-spacing);
+  --jn-title-transform: var(--jn-style-wanted-title-transform);
+  --jn-title-color: var(--jn-style-wanted-title-color);
+  --jn-heading-font: var(--jn-style-wanted-heading-font);
+  --jn-heading-size: var(--jn-style-wanted-heading-size);
+  --jn-heading-weight: var(--jn-style-wanted-heading-weight);
+  --jn-heading-spacing: var(--jn-style-wanted-heading-spacing);
+  --jn-heading-transform: var(--jn-style-wanted-heading-transform);
+  --jn-heading-color: var(--jn-style-wanted-heading-color);
+  --jn-body-font: var(--jn-style-wanted-body-font);
+  --jn-body-size: var(--jn-style-wanted-body-size);
+  --jn-body-color: var(--jn-style-wanted-body-color);
+  --jn-align: var(--jn-style-wanted-align);
+}
+.jn-card-memo {
+  --jn-surface: var(--jn-style-memo-surface);
+  --jn-surface-alpha: var(--jn-style-memo-surface-alpha);
+  --jn-edge: var(--jn-style-memo-edge);
+  --jn-edge-width: var(--jn-style-memo-edge-width);
+  --jn-edge-style: var(--jn-style-memo-edge-style);
+  --jn-radius: var(--jn-style-memo-radius);
+  --jn-card-shadow: var(--jn-style-memo-shadow);
+  --jn-card-text: var(--jn-style-memo-text);
+  --jn-card-image-opacity: var(--jn-style-memo-image-opacity);
+  --jn-stripe: var(--jn-style-memo-stripe);
+  --jn-rule: var(--jn-style-memo-rule);
+  --jn-rule-width: var(--jn-style-memo-rule-width);
+  --jn-title-font: var(--jn-style-memo-title-font);
+  --jn-title-size: var(--jn-style-memo-title-size);
+  --jn-title-weight: var(--jn-style-memo-title-weight);
+  --jn-title-spacing: var(--jn-style-memo-title-spacing);
+  --jn-title-transform: var(--jn-style-memo-title-transform);
+  --jn-title-color: var(--jn-style-memo-title-color);
+  --jn-body-font: var(--jn-style-memo-body-font);
+  --jn-body-size: var(--jn-style-memo-body-size);
+  --jn-body-color: var(--jn-style-memo-body-color);
+  --jn-align: var(--jn-style-memo-align);
 }
 .jn-card-badge {
   position: absolute;
@@ -801,7 +1017,7 @@
   width: 16px; height: 16px;
   border-radius: 50%;
   background: var(--jn-author-color);
-  color: #17171a;
+  color: var(--jn-on-accent);
   font: 600 10px/16px system-ui;
   text-align: center;
 }
@@ -816,7 +1032,7 @@
   box-sizing: border-box;
   border-radius: 8px;
   background: var(--jn-acc);
-  color: #17171a;
+  color: var(--jn-on-accent);
   pointer-events: none;
 }
 .jn-card.jn-being-edited .jn-card-lock-pill {
@@ -827,15 +1043,20 @@
 
 .jn-card-title {
   margin: 0;
-  font-size: 14px;
-  font-weight: 600;
   padding-right: 18px;
+  font-family: var(--jn-title-font);
+  font-size: var(--jn-title-size);
+  font-weight: var(--jn-title-weight);
+  letter-spacing: calc(var(--jn-title-spacing) * 1em);
+  text-transform: var(--jn-title-transform);
+  color: var(--jn-title-color);
 }
 .jn-card-excerpt {
   margin: 7px 0 0;
-  font-size: 11.5px;
+  font-family: var(--jn-body-font);
+  font-size: var(--jn-body-size);
   line-height: 1.5;
-  color: var(--jn-muted);
+  color: var(--jn-body-color);
   white-space: normal;
   overflow-wrap: anywhere;
 }
@@ -965,13 +1186,13 @@ input.jn-task-checkbox:disabled { cursor: default; }
   max-height: none;
   border: 0;
   border-radius: inherit;
-  opacity: .78;
+  opacity: var(--jn-card-image-opacity);
   object-fit: cover;
   pointer-events: none;
 }
 .jn-card-background[hidden], .jn-card-image[hidden] { display: none; }
 .jn-card:has(> .jn-card-background[src]) :is(.jn-card-title, .jn-card-wanted-heading, .jn-card-excerpt) {
-  text-shadow: 0 1px 3px #000, 0 0 4px #000;
+  text-shadow: 0 1px 3px var(--jn-shadow), 0 0 4px var(--jn-shadow);
 }
 .jn-card-wanted-heading { display: none; }
 .jn-card .jn-card-image-button {
@@ -1006,20 +1227,18 @@ input.jn-task-checkbox:disabled { cursor: default; }
   width: 250px;
   gap: 7px;
   padding: 14px 18px 17px;
-  border: 1px solid var(--jn-line);
-  border-radius: 6px;
-  background: var(--jn-panel);
-  box-shadow: 0 5px 12px #0006;
-  text-align: center;
 }
 .jn-card-wanted .jn-card-wanted-heading {
   display: block;
   padding: 0 24px 6px;
-  border-bottom: 1px solid var(--jn-line);
-  color: var(--jn-muted);
-  font: 800 23px/1.15 Georgia, "Times New Roman", serif;
-  letter-spacing: .075em;
-  text-transform: uppercase;
+  border-bottom: var(--jn-rule-width) solid var(--jn-rule);
+  color: var(--jn-heading-color);
+  font-family: var(--jn-heading-font);
+  font-size: var(--jn-heading-size);
+  font-weight: var(--jn-heading-weight);
+  line-height: 1.15;
+  letter-spacing: calc(var(--jn-heading-spacing) * 1em);
+  text-transform: var(--jn-heading-transform);
   overflow-wrap: anywhere;
 }
 .jn-card-wanted .jn-card-image {
@@ -1036,14 +1255,12 @@ input.jn-task-checkbox:disabled { cursor: default; }
 .jn-card-wanted .jn-card-image[hidden] { opacity: .55; border-style: dashed; }
 .jn-card.jn-card-wanted > .jn-card-title {
   padding: 0;
-  color: var(--jn-text);
-  font: 650 16px/1.25 system-ui, sans-serif;
+  line-height: 1.25;
 }
 .jn-card.jn-card-wanted .jn-card-excerpt {
   margin: 0;
   padding-top: 7px;
-  border-top: 1px solid var(--jn-line);
-  font-size: 12px;
+  border-top: var(--jn-rule-width) solid var(--jn-rule);
 }
 .jn-card-resize {
   display: none;
@@ -1062,32 +1279,7 @@ input.jn-task-checkbox:disabled { cursor: default; }
   right: 36px;
 }
 
-/* The board theme is local to the open Journalinator window. */
-.journalinator-root[data-theme="fantasy"] {
-  --jn-bg: #211912;
-  --jn-panel: #33251a;
-  --jn-text: #f1e4c9;
-  --jn-muted: #cbb38e;
-  --jn-line: #674b32;
-  --jn-acc: #e1b66e;
-  --jn-gm: #90b9a7;
-  --jn-hint: #f0c47a;
-  --jn-thread-color: #bb5d69;
-}
-[data-theme="fantasy"] .jn-canvas {
-  background-color: #281e18;
-  background-image: radial-gradient(#4a3628 1.2px, transparent 1.2px);
-}
-[data-theme="fantasy"] .jn-canvas.jn-far-zoom { background-image: none; }
-[data-theme="fantasy"] .jn-card-sticky { background: #49372b; }
-[data-theme="fantasy"] .jn-card-document {
-  background: #3e3027;
-  border-color: var(--jn-line);
-}
-[data-theme="fantasy"] .jn-card-document .jn-card-title { border-color: var(--jn-line); }
-[data-theme="fantasy"] .jn-card-torn::before {
-  background: linear-gradient(to right, var(--jn-author-color) 3px, #48372b 3px);
-}
+/* Themes are applied as data-theme + CSS custom properties by scripts/styles/themes.mjs. */
 .jn-card.selected {
   outline: 2px solid var(--jn-acc);
   outline-offset: 3px;
@@ -1096,49 +1288,36 @@ input.jn-task-checkbox:disabled { cursor: default; }
   opacity: 0.22;
 }
 
-.jn-card-sticky {
-  background: #2d2e32;
-  border-radius: 3px;
-  box-shadow: 0 7px 14px #0007;
-}
-.jn-card-document {
-  width: 245px;
-  background: #2b2b31;
-  border: 1px solid #3f3f47;
-  border-radius: 6px;
-  box-shadow: 0 5px 12px #0006;
-}
+.jn-card-document { width: 245px; }
 .jn-card-document .jn-card-title {
-  font: 600 15px Georgia, "Times New Roman", serif;
   padding-bottom: 6px;
-  border-bottom: 1px solid #46464f;
+  border-bottom: var(--jn-rule-width) solid var(--jn-rule);
 }
 .jn-card-torn {
   --jn-torn-shape: polygon(0 0, 100% 0, 100% 8%, 97% 20%, 100% 33%, 96% 47%, 100% 60%, 97% 74%, 100% 88%, 96% 100%, 88% 96%, 78% 100%, 66% 95%, 55% 100%, 42% 96%, 30% 100%, 18% 95%, 8% 100%, 0 97%);
   width: 225px;
   padding-bottom: 26px;
 }
+.jn-card.jn-card-torn {
+  background: none;
+  border: 0;
+  box-shadow: none;
+}
 .jn-card-torn::before {
   inset: 0;
   width: auto;
   z-index: -1;
-  background: linear-gradient(to right, var(--jn-author-color) 3px, #35302a 3px);
+  background: linear-gradient(to right, var(--jn-author-color) var(--jn-stripe), var(--jn-surface) var(--jn-stripe));
   clip-path: var(--jn-torn-shape);
 }
 .jn-card-torn > .jn-card-background { clip-path: var(--jn-torn-shape); }
 .jn-card-memo {
   width: 360px;
   min-height: 240px;
-  border: 1px solid var(--jn-line);
-  border-radius: 6px;
-  background: var(--jn-panel);
-  box-shadow: 0 5px 12px #0006;
 }
 .jn-card-memo > .jn-card-title { display: none; }
 .jn-card-memo .jn-card-excerpt {
   margin: 4px 18px 0 0;
-  color: var(--jn-text);
-  font-size: 14px;
 }
 
 .jn-label {
@@ -1262,7 +1441,7 @@ input.jn-task-checkbox:disabled { cursor: default; }
   border: 1px solid var(--jn-line);
   border-radius: 6px;
   background: var(--jn-panel);
-  box-shadow: 0 4px 14px #0008;
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--jn-shadow) 50%, transparent);
 }
 .jn-note-tool-panel > select, .jn-note-tool-panel > input { width: 100%; }
 .jn-note-block-tools { display: flex; align-items: center; gap: 8px; padding: 3px; }
@@ -1287,7 +1466,7 @@ input.jn-task-checkbox:disabled { cursor: default; }
   cursor: pointer;
 }
 .journalinator-delete:hover {
-  border-color: #a85a5a;
+  border-color: var(--jn-danger);
 }
 .journalinator-rename:hover {
   border-color: var(--jn-acc);
@@ -1306,8 +1485,8 @@ input.jn-task-checkbox:disabled { cursor: default; }
 
 .journalinator-offline-banner {
   padding: 6px 12px;
-  background: #4a2a2a;
-  color: #e8b9b9;
+  background: var(--jn-danger-bg);
+  color: var(--jn-danger-text);
   font-size: 12.5px;
   text-align: center;
 }
@@ -1352,11 +1531,11 @@ input.jn-task-checkbox:disabled { cursor: default; }
   padding: 1px 7px;
   border-radius: 9px;
   background: var(--jn-lc, var(--jn-acc));
-  color: #17171a;
+  color: var(--jn-on-accent);
 }
 .jn-draft-tag {
   background: var(--jn-muted);
-  color: #17171a;
+  color: var(--jn-on-accent);
 }
 .jn-block-input {
   field-sizing: content;
@@ -1409,27 +1588,16 @@ input.jn-task-checkbox:disabled { cursor: default; }
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.jn-thread { filter: drop-shadow(0 1px 1px #0009); }
+.jn-thread { filter: drop-shadow(0 1px 1px color-mix(in srgb, var(--jn-shadow) 60%, transparent)); }
 .jn-thread-pin {
   display: inline;
   fill: var(--jn-acc);
   stroke: var(--jn-bg);
   stroke-width: 1px;
 }
-[data-theme="fantasy"] .jn-thread {
-  filter: drop-shadow(0 1px 1px #150906);
-}
-[data-theme="fantasy"] .jn-thread-default { stroke: var(--jn-thread-color); }
-[data-theme="fantasy"] .jn-thread-arrow-default { fill: var(--jn-thread-color); }
+.jn-thread-default { stroke: var(--jn-thread); }
+.jn-thread-arrow-default { fill: var(--jn-thread); }
 .jn-link-arrow { pointer-events: none; }
-[data-theme="fantasy"] .jn-thread-pin {
-  display: inline;
-  fill: #d2a25f;
-  stroke: #513116;
-  stroke-width: 1px;
-  pointer-events: none;
-}
-[data-theme="fantasy"] .jn-link-preview { stroke: var(--jn-thread-color); }
 .jn-link-label {
   font-size: 11px;
   fill: var(--jn-muted);
@@ -1463,7 +1631,7 @@ input.jn-task-checkbox:disabled { cursor: default; }
   background: var(--jn-panel);
   border: 1px solid var(--jn-line);
   border-radius: 10px;
-  box-shadow: 0 8px 20px #0007;
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--jn-shadow) 44%, transparent);
   transform: translate(-50%, -135%);
 }
 .jn-link-toolbar input {
@@ -1535,7 +1703,7 @@ input.jn-task-checkbox:disabled { cursor: default; }
   padding: 0 6px;
   border-radius: 8px;
   background: var(--jn-gm);
-  color: #17171a;
+  color: var(--jn-on-accent);
   font: 700 9px/15px system-ui;
   letter-spacing: 0.05em;
 }
@@ -1589,7 +1757,7 @@ input.jn-task-checkbox:disabled { cursor: default; }
   color: var(--jn-gm);
 }
 .jn-link-toolbar .jn-link-hint-toggle.on {
-  color: #17171a;
+  color: var(--jn-on-accent);
   background: var(--jn-hint);
   border-color: var(--jn-hint);
 }
@@ -1617,7 +1785,7 @@ input.jn-task-checkbox:disabled { cursor: default; }
   color: var(--jn-gm);
 }
 .jn-gm-row .journalinator-hint-toggle.on {
-  color: #17171a;
+  color: var(--jn-on-accent);
   background: var(--jn-hint);
   border-color: var(--jn-hint);
 }
@@ -1669,4 +1837,19 @@ input.jn-task-checkbox:disabled { cursor: default; }
 .jn-vault-pass input[type="password"] {
   width: 100%;
   margin: 4px 0;
+}
+
+/* Note image dialog: paste an external URL or a Foundry path, or browse the data folder. */
+.jn-image-source-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.jn-image-source-row input[type="text"] {
+  flex: 1;
+  min-width: 0;
+}
+.jn-image-browse {
+  flex: none;
+  white-space: nowrap;
 }

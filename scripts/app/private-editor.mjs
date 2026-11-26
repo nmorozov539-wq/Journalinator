@@ -1,5 +1,6 @@
 import { CARD_STYLES, cardStyleKey } from "../styles/registry.mjs";
-import { noteImageUrl } from "../image-url.mjs";
+import { noteImagePath } from "../image-url.mjs";
+import { promptImageSource } from "./image-dialog.mjs";
 import { applyMarkdownAutocomplete } from "../markdown-edit.mjs";
 import { t } from "../i18n.mjs";
 
@@ -155,15 +156,13 @@ export default class PrivateNoteEditor {
     if (!note) return;
     const key = background ? "backgroundImage" : "image";
     const existing = note.system[key];
-    const value = await DialogV2.prompt({
-      window: { title: t(background ? "JN.Editor.BackgroundURL" : "JN.Editor.ImageURL") },
-      content: `<input type="text" name="value" autofocus value="${esc(existing ?? "")}">${existing
-        ? `<p>${esc(t(background ? "JN.Editor.ClearBackgroundHint" : "JN.Editor.ClearImageHint"))}</p>` : ""}`,
-      ok: { label: t("JN.Common.OK"), callback: (event, button) => button.form.elements.value.value.trim() },
-      rejectClose: false
-    });
+    const value = await promptImageSource(
+      t(background ? "JN.Editor.BackgroundURL" : "JN.Editor.ImageURL"),
+      existing ?? "",
+      existing ? t(background ? "JN.Editor.ClearBackgroundHint" : "JN.Editor.ClearImageHint") : ""
+    );
     if (value == null) return;
-    const image = value ? noteImageUrl(value) : null;
+    const image = value ? noteImagePath(value) : null;
     if (value && !image) return ui.notifications?.warn(t("JN.Editor.InvalidImageURL"));
     await this.callbacks.updateNote(noteId, { [key]: image });
   }
