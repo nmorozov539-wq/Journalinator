@@ -221,6 +221,27 @@ Coordinator-run with independent validation reports from all prior phases. No ne
 | A27 | PARTIAL | 100 notes/200 links measured (~6 ms geometry update vs ~19–30 ms rebuild; jsdom 238→28 ms); real Foundry stress pending |
 | A28 | PASS local; no publish | manifest/package/launch docs; Foundry 14.367 smoke; no push/merge/release |
 
+## 0.9.0 — Fit view, private transfers, and live stats (2026-11-26)
+
+- **Fit all/selection:** canvas toolbar action frames all live cards, or only the current
+  selection when notes are selected; cards only, rotated bounds, 60px padding, zoom 0.3–1.0.
+  Works on shared and private canvases.
+- **Private-to-private copies:** players and the GM can select private notes and send a copy to
+  another user. The recipient accepts or declines from an inbox; notes are copied with fresh IDs,
+  attached stamps and internal links preserved, external links/route waypoints counted and
+  dropped, and rotated card placement without overlap. Pending offers are stored in the private
+  container, capped at 20 per recipient / 5 per sender-recipient pair, and expire after 30 days.
+  Acceptance is recipient-only; accepted copies are verified after save and retried once if a
+  concurrent save overwrote them. Residual last-writer race documented (no server-side CAS).
+- **Stats:** main stats count live shared notes only, excluding private/vault notes and trashed
+  notes; trash is disclosed separately. Private stats is renamed “Private space summary” and is
+  not included in main stats.
+- **Verification:** `npm run check` pass; `npm test` 395 pass at this release point; private
+  transfer deletion uses Foundry `.-=` keys; artifact `dist/Journalinator-v0.9.0.zip` SHA-256
+  `c4b647e1d4b8786e59bf519162537040fbc5a084b47c00736dfb53b25fc7f90a` (before the 0.9.1 rebuild).
+- **Version/docs:** module/package 0.9.0; download URL `Journalinator-v0.9.0.zip`; README,
+  PRIVATE-WORKSPACES, STYLIZED-CANVAS, CHANGELOG updated.
+
 ## 0.9.0 validation follow-up (2026-11-26)
 
 - Auto-sized private cards now reserve conservative placement defaults (memo 360×240,
@@ -272,5 +293,7 @@ Journalinator console/page errors. Artifact `dist/Journalinator-v0.9.1.zip` SHA-
 | 6 route notes A/B | `bdbd273` |
 | 7 floating toolbar/bulk | `7e68ea3` |
 | 8 docs/Foundry smoke/package | `1e6b928` |
+| 0.9.0 fit/transfers/live stats | `a58980e` |
+| 0.9.1 control mode/delete recovery | `d2df467` |
 
-Final tree state: branch `stylized-canvas`, working tree clean except untracked `handoff/` (spec package) and ignored `dist/` artifact.
+Final tree state: branch `stylized-canvas`, working tree clean except untracked `handoff/` (spec package) and ignored `dist/` artifact. No push, merge, release, or deployment was performed.
