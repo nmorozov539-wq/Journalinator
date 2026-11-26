@@ -418,12 +418,19 @@ export default class JournalCanvas {
           ${points ? `<polygon class="jn-link-arrow" points="${points}"/>` : ""}`;
       };
       const dimmed = dimmedIds.has(note._id) || dimmedIds.has(link.targetId);
+      const dashed = !link.hidden && link.lineStyle === "dashed";
       const linkId = foundry.utils.escapeHTML(String(link.id ?? ""));
 
-      const linkClasses = [colorClass, link.hidden ? "jn-link-hidden" : "", link.hint ? "jn-link-hint" : ""].join(" ").trim();
-      body += `<g data-id="${linkId}" class="${linkClasses}" opacity="${dimmed ? 0.15 : 1}">
-        <path class="jn-thread" d="${d}" fill="none" stroke-width="${selected ? 3.5 : 2}"
-          ${link.hidden ? 'stroke-dasharray="2 6" stroke-linecap="round"' : link.lineStyle === "dashed" ? 'stroke-dasharray="7 6"' : ""}/>
+      const linkClasses = [
+        colorClass,
+        selected ? "jn-link-selected" : "",
+        dimmed ? "jn-link-dimmed" : "",
+        link.hidden ? "jn-link-hidden" : "",
+        dashed ? "jn-link-dashed" : "",
+        link.hint ? "jn-link-hint" : ""
+      ].filter(Boolean).join(" ");
+      body += `<g data-id="${linkId}" class="${linkClasses}">
+        <path class="jn-thread" d="${d}"/>
         ${endpoint(start, direction === "two", startLead)}
         ${endpoint(end, direction !== "none", endLead)}
         ${pins.map((pin, index) => `<circle class="jn-thread-pin jn-board-pin" data-pin-index="${index}" cx="${pin.x}" cy="${pin.y}"/>`).join("")}
@@ -434,6 +441,7 @@ export default class JournalCanvas {
       this.linksById.set(link.id, { sourceId: note._id, targetId: link.targetId, mx, my, ...link });
     }
 
+    if (this.selectedLinkId && !this.linksById.has(this.selectedLinkId)) this.selectedLinkId = null;
     this.svg.innerHTML = this.#threadMask(boxes, threads) + `<g mask="url(#${this.threadMaskId})">${body}</g>`;
     this.linkHits.innerHTML = hits;
     let index = 0;
@@ -575,7 +583,12 @@ export default class JournalCanvas {
       update({ lineStyle: link.lineStyle === "dashed" ? "solid" : "dashed" });
     const gmButton = (selector, fn) => {
       const btn = this.linkToolbar.querySelector(selector);
-      if (btn) btn.onclick = () => { fn(); this.selectedLinkId = null; this.linkToolbar.style.display = "none"; };
+      if (btn) btn.onclick = () => {
+        fn();
+        this.selectedLinkId = null;
+        this.#syncLinkSelection();
+        this.linkToolbar.style.display = "none";
+      };
     };
     gmButton(".jn-link-hide", () => this.callbacks.onHideLink?.(link.sourceId, link.id));
     gmButton(".jn-link-reveal", () => this.callbacks.onRevealLink?.(link.sourceId, link.id));
@@ -584,8 +597,16 @@ export default class JournalCanvas {
     this.linkToolbar.querySelector(".jn-link-delete").onclick = () => {
       this.callbacks.onDeleteLink(link.sourceId, link.id);
       this.selectedLinkId = null;
+      this.#syncLinkSelection();
       this.linkToolbar.style.display = "none";
     };
+  }
+
+  /** Selection is a class toggle, so clicking a thread never forces a full SVG rebuild. */
+  #syncLinkSelection() {
+    for (const group of this.svg.querySelectorAll("g[data-id]")) {
+      group.classList.toggle("jn-link-selected", group.dataset.id === this.selectedLinkId);
+    }
   }
 
   /** GM-only toolbar buttons: hide a shared link, reveal a hidden one, mark a shared link as a hint. */
@@ -668,6 +689,7 @@ export default class JournalCanvas {
     this.selectedNoteIds = new Set(ids);
     this.selectedNoteId = primary;
     this.selectedLinkId = null;
+    this.#syncLinkSelection();
     for (const [id, el] of this.cardEls) el.classList.toggle("selected", this.selectedNoteIds.has(id));
     this.#syncLinkToolbar();
     this.callbacks.onSelectNote(primary);
@@ -1223,6 +1245,7 @@ export default class JournalCanvas {
           if (link && !drag.readOnly) this.callbacks.onDeleteLink(link.sourceId, link.id);
           this.lastLinkClick = null;
           this.selectedLinkId = null;
+          this.#syncLinkSelection();
           this.#syncLinkToolbar();
         } else {
           this.#highlightLabels([]);
@@ -1231,6 +1254,7 @@ export default class JournalCanvas {
           this.selectedNoteId = null;
           this.selectedNoteIds.clear();
           for (const el of this.cardEls.values()) el.classList.remove("selected");
+          this.#syncLinkSelection();
           this.callbacks.onSelectNote(null);
           this.#syncLinkToolbar();
         }
