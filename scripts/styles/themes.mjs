@@ -156,10 +156,11 @@ function normalizeLinks(raw, board) {
     arrowScale: num(input.arrowScale, 0.6, 1.8, BASE_LINKS.arrowScale),
     pinRadius: num(input.pinRadius, 2, 6, BASE_LINKS.pinRadius),
     pinFill: colorRef(input.pinFill, BASE_LINKS.pinFill),
-    pinStroke: colorRef(input.pinStroke, BASE_LINKS.pinStroke),
+    // Board-colored by default: on custom/image boards a --jn-bg halo leaves visible patches.
+    pinStroke: colorRef(input.pinStroke, board.color),
     labelSize: num(input.labelSize, 6, 32, BASE_LINKS.labelSize),
     labelColor: colorRef(input.labelColor, BASE_LINKS.labelColor),
-    halo: colorRef(input.halo, BASE_LINKS.halo),
+    halo: colorRef(input.halo, board.color),
     haloWidth: num(input.haloWidth, 0, 24, BASE_LINKS.haloWidth),
     selectColor: colorRef(input.selectColor, BASE_LINKS.selectColor),
     colors
@@ -197,10 +198,8 @@ const BASE_LINKS = Object.freeze({
   arrowScale: 1,
   pinRadius: 3,
   pinFill: "acc",
-  pinStroke: "bg",
   labelSize: 11,
   labelColor: "muted",
-  halo: "bg",
   haloWidth: 7,
   selectColor: "acc",
   colors: DEFAULT_LINK_COLORS
@@ -463,10 +462,10 @@ export function themeToVars(theme) {
   vars["--jn-link-arrow-scale"] = String(links.arrowScale ?? BASE_LINKS.arrowScale);
   vars["--jn-link-pin-radius"] = pixel(links.pinRadius ?? BASE_LINKS.pinRadius);
   vars["--jn-link-pin-fill"] = resolveColor(links.pinFill ?? BASE_LINKS.pinFill, colors);
-  vars["--jn-link-pin-stroke"] = resolveColor(links.pinStroke ?? BASE_LINKS.pinStroke, colors);
+  vars["--jn-link-pin-stroke"] = resolveColor(links.pinStroke ?? board.color, colors);
   vars["--jn-link-label-size"] = pixel(links.labelSize ?? BASE_LINKS.labelSize);
   vars["--jn-link-label-color"] = resolveColor(links.labelColor ?? BASE_LINKS.labelColor, colors);
-  vars["--jn-link-halo"] = resolveColor(links.halo ?? BASE_LINKS.halo, colors);
+  vars["--jn-link-halo"] = resolveColor(links.halo ?? board.color, colors);
   vars["--jn-link-halo-width"] = pixel(links.haloWidth ?? BASE_LINKS.haloWidth);
   vars["--jn-link-select"] = resolveColor(links.selectColor ?? BASE_LINKS.selectColor, colors);
   for (const [index, slot] of LINK_COLOR_SLOTS.entries()) {

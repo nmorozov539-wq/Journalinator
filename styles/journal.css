@@ -33,10 +33,10 @@
   --jn-link-arrow-scale: 1;
   --jn-link-pin-radius: 3px;
   --jn-link-pin-fill: var(--jn-acc);
-  --jn-link-pin-stroke: var(--jn-bg);
+  --jn-link-pin-stroke: var(--jn-board-color);
   --jn-link-label-size: 11px;
   --jn-link-label-color: var(--jn-muted);
-  --jn-link-halo: var(--jn-bg);
+  --jn-link-halo: var(--jn-board-color);
   --jn-link-halo-width: 7px;
   --jn-link-select: var(--jn-acc);
   --jn-link-1: #a393f2;
