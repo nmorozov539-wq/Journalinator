@@ -48,6 +48,11 @@ const hueDistance = (a, b) => {
 };
 const distance = (a, b) => Math.hypot(a.L - b.L, a.a - b.a, a.b - b.b);
 
+// GM teal and hint gold carry meaning, so link hues stay clear of them when possible.
+const LINK_AVOID_HUES = Object.freeze([195, 78]);
+const LINK_HUE_MARGIN = 28;
+const LINK_HUE_SEPARATION = 32;
+
 // --- sRGB ↔ OKLab ---------------------------------------------------------------------------
 
 function channelToLinear(value) {
@@ -118,6 +123,27 @@ function ensureContrast(fg, bg, target, direction) {
     color = { ...color, L: clamp(color.L + direction * 0.02, 0.02, 0.98) };
   }
   return color;
+}
+
+/**
+ * Rotates each seed hue until it clears the GM/hint hues and every already-used link hue.
+ * The 11° step exhausts the circle in a bounded loop, so a result is always deterministic.
+ */
+function pickLinkHues(seeds, threadHue) {
+  const used = [threadHue];
+  const hues = [];
+  for (const seed of seeds) {
+    let candidate = wrapHue(seed);
+    for (let step = 0; step < 40; step++) {
+      const conflict = [...LINK_AVOID_HUES, ...used]
+        .some(hue => hueDistance(hue, candidate) < LINK_HUE_MARGIN);
+      if (!conflict) break;
+      candidate = wrapHue(candidate + 11);
+    }
+    hues.push(candidate);
+    used.push(candidate);
+  }
+  return hues;
 }
 
 function parseHex(value) {
@@ -278,6 +304,29 @@ export function analyzePixels(pixels, width, height) {
   );
   thread = ensureContrast(thread, bg, SCENE_PROFILE.threadContrast, dark ? 1 : -1);
 
+  // Three link slots, each contrast-checked against the board and spread around the wheel so
+  // they stay distinct from each other and from the thread. Vivid scene hues seed them first;
+  // fallbacks keep a monochrome scene from collapsing to one color.
+  const seeds = [];
+  for (const cluster of candidates) {
+    if (seeds.length === 3) break;
+    if (hueDistance(cluster.h, threadHue) < LINK_HUE_SEPARATION) continue;
+    if (seeds.every(hue => hueDistance(hue, cluster.h) >= LINK_HUE_SEPARATION)) seeds.push(cluster.h);
+  }
+  const fallbackOffsets = [55, 175, 295];
+  let fallback = 0;
+  while (seeds.length < 3) {
+    const hue = wrapHue(threadHue + (fallbackOffsets[fallback] ?? 43 + fallback * 37));
+    if (seeds.every(existing => hueDistance(existing, hue) >= LINK_HUE_SEPARATION)) seeds.push(hue);
+    fallback++;
+  }
+  const linkHues = pickLinkHues(seeds.slice(0, 3), threadHue);
+  const linkL = dark ? [0.70, 0.76, 0.64] : [0.46, 0.40, 0.52];
+  const linkC = [0.10, 0.09, 0.11];
+  const links = linkHues.map((hue, index) => ensureContrast(
+    fromLch(linkL[index], linkC[index], hue), bg, SCENE_PROFILE.threadContrast, dark ? 1 : -1
+  ));
+
   // Semantics stay recognisable: GM teal, hint gold, danger red.
   const gm = fromLch(dark ? 0.72 : 0.42, 0.075, 195);
   const hint = fromLch(dark ? 0.78 : 0.50, 0.10, 78);
@@ -292,7 +341,10 @@ export function analyzePixels(pixels, width, height) {
   const stamp = fromLch(0.87, 0.045, 75);
   const shadow = { L: 0.05, a: 0, b: 0 };
 
-  const labs = { bg, panel, text, muted, line, accent, thread, gm, hint, danger, dangerBg, dangerText, onAccent, stamp, shadow };
+  const labs = {
+    bg, panel, text, muted, line, accent, thread, gm, hint, danger, dangerBg, dangerText,
+    onAccent, stamp, shadow, link1: links[0], link2: links[1], link3: links[2]
+  };
   // Theme tokens name the accent role `acc`; keep `labs.accent` for the style derivation.
   const colors = Object.fromEntries(Object.entries(labs).map(([key, lab]) => [key === "accent" ? "acc" : key, labToHex(lab)]));
 
@@ -304,6 +356,7 @@ export function analyzePixels(pixels, width, height) {
       meanL,
       dominant: { L: dominant.L, C: dominant.C, h: dominant.h, weight: dominant.weight },
       accent: { L: toLch(accent).L, C: toLch(accent).C, h: accentHue },
+      links: links.map(color => ({ L: toLch(color).L, C: toLch(color).C, h: toLch(color).h })),
       sampled: total
     }
   };
@@ -327,6 +380,9 @@ export function paletteToTheme(palette, { id = SCENE_THEME_ID } = {}) {
       patternOpacity: mode === "dark" ? 0.75 : 0.5,
       image: null,
       vignette: mode === "dark" ? 0.2 : 0.06
+    },
+    links: {
+      colors: { link1: c.link1, link2: c.link2, link3: c.link3 }
     },
     styles: {
       sticky: {

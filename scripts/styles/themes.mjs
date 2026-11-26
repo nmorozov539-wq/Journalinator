@@ -17,6 +17,7 @@
  * repaints everything that defaults to `text`.
  */
 import { CARD_STYLES } from "./registry.mjs";
+import { LINK_COLOR_SLOTS } from "../link-colors.mjs";
 
 export const COLOR_TOKENS = Object.freeze([
   "bg", "panel", "text", "muted", "line", "acc", "gm", "hint", "thread",
@@ -30,6 +31,7 @@ export const TEXT_TRANSFORMS = Object.freeze(["none", "uppercase", "lowercase", 
 export const ALIGNMENTS = Object.freeze(["left", "center", "right"]);
 export const FONT_KEYS = Object.freeze(["system", "serif", "mono", "rounded"]);
 export const SHADOW_KEYS = Object.freeze(["none", "flat", "paper", "raised", "deep"]);
+export const LINK_SHADOW_KEYS = Object.freeze(["none", "soft"]);
 
 const FONTS = Object.freeze({
   system: "system-ui, sans-serif",
@@ -44,6 +46,12 @@ const SHADOWS = Object.freeze({
   paper: "0 7px 14px color-mix(in srgb, var(--jn-shadow) 47%, transparent)",
   raised: "0 5px 12px color-mix(in srgb, var(--jn-shadow) 40%, transparent)",
   deep: "0 14px 30px color-mix(in srgb, var(--jn-shadow) 58%, transparent)"
+});
+
+/** Link threads reuse soft drop shadows; `soft` is the pre-theme look. */
+const LINK_SHADOWS = Object.freeze({
+  none: "drop-shadow(0 0 0 transparent)",
+  soft: "drop-shadow(0 1px 1px color-mix(in srgb, var(--jn-shadow) 60%, transparent))"
 });
 
 const HEX = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
@@ -85,6 +93,13 @@ function num(value, min, max, fallback) {
   return Math.min(max, Math.max(min, n));
 }
 
+/** SVG dash arrays are strings of short numbers; anything else falls back. */
+function dashPattern(value, fallback) {
+  if (typeof value !== "string") return fallback;
+  const pattern = value.trim().replace(/,/g, " ").replace(/\s+/g, " ");
+  return /^\d{1,3}(?: \d{1,3}){0,7}$/.test(pattern) ? pattern : fallback;
+}
+
 function safeName(value) {
   if (typeof value !== "string") return null;
   const trimmed = value.replace(/[<>&"']/g, "").trim().slice(0, 60);
@@ -123,6 +138,35 @@ function normalizeType(raw, base) {
   return type;
 }
 
+/** Merges a partial `links` block over the defaults, clamping every value. */
+function normalizeLinks(raw, board) {
+  const input = isObject(raw) ? raw : {};
+  const colorInput = isObject(input.colors) ? input.colors : {};
+  const colors = {};
+  for (const slot of LINK_COLOR_SLOTS) {
+    colors[slot] = colorRef(colorInput[slot], DEFAULT_LINK_COLORS[slot]);
+  }
+  return {
+    width: num(input.width, 0.5, 12, BASE_LINKS.width),
+    selectedWidth: num(input.selectedWidth, 0.5, 16, BASE_LINKS.selectedWidth),
+    dash: dashPattern(input.dash, BASE_LINKS.dash),
+    hiddenDash: dashPattern(input.hiddenDash, BASE_LINKS.hiddenDash),
+    dimOpacity: num(input.dimOpacity, 0, 1, BASE_LINKS.dimOpacity),
+    shadow: pickEnum(input.shadow, LINK_SHADOW_KEYS, BASE_LINKS.shadow),
+    arrowScale: num(input.arrowScale, 0.6, 1.8, BASE_LINKS.arrowScale),
+    pinRadius: num(input.pinRadius, 2, 6, BASE_LINKS.pinRadius),
+    pinFill: colorRef(input.pinFill, BASE_LINKS.pinFill),
+    // Board-colored by default: on custom/image boards a --jn-bg halo leaves visible patches.
+    pinStroke: colorRef(input.pinStroke, board.color),
+    labelSize: num(input.labelSize, 6, 32, BASE_LINKS.labelSize),
+    labelColor: colorRef(input.labelColor, BASE_LINKS.labelColor),
+    halo: colorRef(input.halo, board.color),
+    haloWidth: num(input.haloWidth, 0, 24, BASE_LINKS.haloWidth),
+    selectColor: colorRef(input.selectColor, BASE_LINKS.selectColor),
+    colors
+  };
+}
+
 const BASE_TYPE = Object.freeze({
   uiFont: "system",
   titleFont: "system", titleSize: 14, titleWeight: 600, titleSpacing: 0,
@@ -141,6 +185,26 @@ const BASE_STYLE = Object.freeze({
   rule: "line", ruleWidth: 0
 });
 
+const DEFAULT_LINK_COLORS = Object.freeze({ link1: "acc", link2: "hint", link3: "danger" });
+
+/** Link defaults match the pre-theme rendering. Colors are overridden per built-in theme. */
+const BASE_LINKS = Object.freeze({
+  width: 2,
+  selectedWidth: 3.5,
+  dash: "7 6",
+  hiddenDash: "2 6",
+  dimOpacity: 0.15,
+  shadow: "soft",
+  arrowScale: 1,
+  pinRadius: 3,
+  pinFill: "acc",
+  labelSize: 11,
+  labelColor: "muted",
+  haloWidth: 7,
+  selectColor: "acc",
+  colors: DEFAULT_LINK_COLORS
+});
+
 /** The current look, expressed in the new token vocabulary. */
 export const CLASSIC_THEME = Object.freeze({
   id: "classic",
@@ -154,6 +218,11 @@ export const CLASSIC_THEME = Object.freeze({
   board: {
     color: "bg", pattern: "dots", patternColor: "#2d2d33", patternSize: 24,
     patternOpacity: 1, image: null, imageOpacity: 1, imageSize: "cover", vignette: 0
+  },
+  // The old toolbar palette, kept verbatim so existing worlds look untouched.
+  links: {
+    ...BASE_LINKS,
+    colors: { link1: "#a393f2", link2: "#d6a45c", link3: "#d77b91" }
   },
   type: {},
   styles: {
@@ -189,6 +258,9 @@ export const WARM_THEME = Object.freeze({
     color: "#281e18", pattern: "dots", patternColor: "#4a3628", patternSize: 24,
     patternOpacity: 1, image: null, imageOpacity: 1, imageSize: "cover", vignette: 0.22
   },
+  links: {
+    colors: { link1: "#c98a52", link2: "#93a86b", link3: "#a97ba8" }
+  },
   type: { uiFont: "system" },
   styles: {
     sticky: { surface: "#49372b", radius: 4, shadow: "paper" },
@@ -212,6 +284,9 @@ export const PARCHMENT_THEME = Object.freeze({
   board: {
     color: "#e7ddc6", pattern: "grid", patternColor: "#c6b795", patternSize: 26,
     patternOpacity: 0.55, image: null, imageOpacity: 1, imageSize: "cover", vignette: 0.08
+  },
+  links: {
+    colors: { link1: "#7a4fa0", link2: "#2f6f8f", link3: "#a8443f" }
   },
   type: {
     uiFont: "system", titleFont: "serif", headingFont: "serif", bodyFont: "serif",
@@ -265,6 +340,7 @@ export function normalizeTheme(raw, { id = "custom", name = null } = {}) {
     imageSize: pickEnum(rawBoard.imageSize, IMAGE_SIZES, base.board.imageSize),
     vignette: num(rawBoard.vignette, 0, 1, base.board.vignette)
   };
+  const links = normalizeLinks(input.links, board);
 
   const globalType = normalizeType(input.type, { ...BASE_TYPE, ...(base.type ?? {}) });
   const styleInput = isObject(input.styles) ? input.styles : {};
@@ -296,6 +372,7 @@ export function normalizeTheme(raw, { id = "custom", name = null } = {}) {
     nameKey: typeof input.nameKey === "string" ? input.nameKey : null,
     colors,
     board,
+    links,
     type: globalType,
     styles
   };
@@ -363,7 +440,8 @@ export function themeToVars(theme) {
   vars["--jn-shadow"] = colors.shadow;
   vars["--jn-stamp-bg"] = colors.stamp;
 
-  vars["--jn-board-color"] = resolveColor(board.color, colors);
+  const boardColor = resolveColor(board.color, colors);
+  vars["--jn-board-color"] = boardColor;
   vars["--jn-board-pattern-color"] = resolveColor(board.patternColor, colors);
   vars["--jn-board-pattern-size"] = pixel(board.patternSize);
   vars["--jn-board-pattern-opacity"] = String(board.patternOpacity);
@@ -372,6 +450,27 @@ export function themeToVars(theme) {
   vars["--jn-board-image-size"] = board.imageSize === "tile" ? "auto" : board.imageSize;
   vars["--jn-board-image-repeat"] = board.imageSize === "tile" ? "repeat" : "no-repeat";
   vars["--jn-board-vignette"] = String(board.vignette);
+
+  const links = theme.links ?? {};
+  const linkColors = links.colors ?? DEFAULT_LINK_COLORS;
+  vars["--jn-link-width"] = String(links.width ?? BASE_LINKS.width);
+  vars["--jn-link-width-selected"] = String(links.selectedWidth ?? BASE_LINKS.selectedWidth);
+  vars["--jn-link-dash"] = links.dash ?? BASE_LINKS.dash;
+  vars["--jn-link-dash-hidden"] = links.hiddenDash ?? BASE_LINKS.hiddenDash;
+  vars["--jn-link-dim-opacity"] = String(links.dimOpacity ?? BASE_LINKS.dimOpacity);
+  vars["--jn-link-shadow"] = LINK_SHADOWS[links.shadow] ?? LINK_SHADOWS[BASE_LINKS.shadow];
+  vars["--jn-link-arrow-scale"] = String(links.arrowScale ?? BASE_LINKS.arrowScale);
+  vars["--jn-link-pin-radius"] = pixel(links.pinRadius ?? BASE_LINKS.pinRadius);
+  vars["--jn-link-pin-fill"] = resolveColor(links.pinFill ?? BASE_LINKS.pinFill, colors);
+  vars["--jn-link-pin-stroke"] = resolveColor(links.pinStroke ?? board.color, colors);
+  vars["--jn-link-label-size"] = pixel(links.labelSize ?? BASE_LINKS.labelSize);
+  vars["--jn-link-label-color"] = resolveColor(links.labelColor ?? BASE_LINKS.labelColor, colors);
+  vars["--jn-link-halo"] = resolveColor(links.halo ?? board.color, colors);
+  vars["--jn-link-halo-width"] = pixel(links.haloWidth ?? BASE_LINKS.haloWidth);
+  vars["--jn-link-select"] = resolveColor(links.selectColor ?? BASE_LINKS.selectColor, colors);
+  for (const [index, slot] of LINK_COLOR_SLOTS.entries()) {
+    vars[`--jn-link-${index + 1}`] = resolveColor(linkColors[slot] ?? DEFAULT_LINK_COLORS[slot], colors);
+  }
 
   const uiFont = theme.type?.uiFont ?? "system";
   vars["--jn-ui-font"] = FONTS[uiFont] ?? FONTS.system;

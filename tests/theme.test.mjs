@@ -31,6 +31,108 @@ test("classic keeps the pre-theme look", () => {
   assert.equal(varFor(classic, "--jn-style-memo-surface"), "#252528");
 });
 
+test("link defaults reproduce the pre-theme look", () => {
+  const classic = getTheme("classic");
+  const vars = themeToVars(classic);
+  assert.equal(vars["--jn-link-width"], "2");
+  assert.equal(vars["--jn-link-width-selected"], "3.5");
+  assert.equal(vars["--jn-link-dash"], "7 6");
+  assert.equal(vars["--jn-link-dash-hidden"], "2 6");
+  assert.equal(vars["--jn-link-dim-opacity"], "0.15");
+  assert.match(vars["--jn-link-shadow"], /^drop-shadow\(0 1px 1px/);
+  assert.equal(vars["--jn-link-arrow-scale"], "1");
+  assert.equal(vars["--jn-link-pin-radius"], "3px");
+  assert.equal(vars["--jn-link-pin-fill"], "#a393f2");
+  assert.equal(vars["--jn-link-pin-stroke"], "#1b1b1d");
+  assert.equal(vars["--jn-link-label-size"], "11px");
+  assert.equal(vars["--jn-link-label-color"], "#8d8d97");
+  assert.equal(vars["--jn-link-halo"], "#1b1b1d");
+  assert.equal(vars["--jn-link-halo-width"], "7px");
+  assert.equal(vars["--jn-link-select"], "#a393f2");
+  assert.equal(vars["--jn-link-1"], "#a393f2");
+  assert.equal(vars["--jn-link-2"], "#d6a45c");
+  assert.equal(vars["--jn-link-3"], "#d77b91");
+});
+
+test("every built-in theme has complete link colors", () => {
+  for (const id of ["classic", "fantasy", "parchment"]) {
+    const theme = getTheme(id);
+    assert.ok(theme.links, `${theme.id} has no links block`);
+    for (const slot of ["link1", "link2", "link3"]) {
+      assert.match(theme.links.colors[slot], /^(#|rgb|hsl)/, `${theme.id}.links.colors.${slot}`);
+      assert.match(themeToVars(theme)[`--jn-link-${slot.slice(-1)}`], /^(#|rgb|hsl)/);
+    }
+  }
+});
+
+test("link values are clamped, and invalid values fall back", () => {
+  const theme = normalizeTheme({
+    links: {
+      width: 999, selectedWidth: -5, dash: "url(https://evil.test)", hiddenDash: 42,
+      dimOpacity: 3, shadow: "0 0 9px red", arrowScale: 99, pinRadius: 99,
+      pinFill: "url(https://evil.test)", pinStroke: "javascript:alert(1)",
+      labelSize: 999, labelColor: "javascript:alert(1)",
+      halo: "url(https://evil.test)", haloWidth: -1, selectColor: "not a color",
+      colors: { link1: "url(https://evil.test)", link2: "not a color", link3: "#123456" }
+    }
+  }, { id: "evil-links" });
+
+  assert.equal(theme.links.width, 12);
+  assert.equal(theme.links.selectedWidth, 0.5);
+  assert.equal(theme.links.dash, "7 6");
+  assert.equal(theme.links.hiddenDash, "2 6");
+  assert.equal(theme.links.dimOpacity, 1);
+  assert.equal(theme.links.shadow, "soft");
+  assert.equal(theme.links.arrowScale, 1.8);
+  assert.equal(theme.links.pinRadius, 6);
+  assert.equal(theme.links.pinFill, "acc");
+  assert.equal(theme.links.pinStroke, "bg");
+  assert.equal(theme.links.labelSize, 32);
+  assert.equal(theme.links.labelColor, "muted");
+  assert.equal(theme.links.halo, "bg");
+  assert.equal(theme.links.haloWidth, 0);
+  assert.equal(theme.links.selectColor, "acc");
+  assert.deepEqual(theme.links.colors, { link1: "acc", link2: "hint", link3: "#123456" });
+  // A hostile dash string never reaches CSS or SVG.
+  assert.equal(themeToVars(theme)["--jn-link-dash"], "7 6");
+});
+
+test("a theme without a links block normalizes to sane defaults", () => {
+  const theme = normalizeTheme({}, { id: "bare-links" });
+  assert.ok(theme.links);
+  assert.equal(theme.links.width, 2);
+  assert.equal(theme.links.shadow, "soft");
+  assert.deepEqual(theme.links.colors, { link1: "acc", link2: "hint", link3: "danger" });
+  assert.equal(themeToVars(theme)["--jn-link-1"], "#a393f2");
+});
+
+test("themeToVars emits every link variable", () => {
+  const vars = themeToVars(getTheme("classic"));
+  const names = [
+    "--jn-link-width", "--jn-link-width-selected", "--jn-link-dash", "--jn-link-dash-hidden",
+    "--jn-link-dim-opacity", "--jn-link-shadow", "--jn-link-arrow-scale", "--jn-link-pin-radius",
+    "--jn-link-pin-fill", "--jn-link-pin-stroke", "--jn-link-label-size", "--jn-link-label-color",
+    "--jn-link-halo", "--jn-link-halo-width", "--jn-link-select",
+    "--jn-link-1", "--jn-link-2", "--jn-link-3"
+  ];
+  for (const name of names) assert.ok(name in vars, `${name} missing`);
+});
+
+test("link halo and pin stroke follow the board color unless overridden", () => {
+  const theme = normalizeTheme({ board: { color: "panel" } }, { id: "board-halo" });
+  const vars = themeToVars(theme);
+  assert.equal(vars["--jn-board-color"], vars["--jn-link-halo"]);
+  assert.equal(vars["--jn-board-color"], vars["--jn-link-pin-stroke"]);
+  assert.notEqual(vars["--jn-link-halo"], vars["--jn-bg"]);
+
+  const overridden = normalizeTheme({
+    board: { color: "panel" },
+    links: { halo: "#ff0000", pinStroke: "acc" }
+  }, { id: "board-halo-override" });
+  assert.equal(varFor(overridden, "--jn-link-halo"), "#ff0000");
+  assert.equal(varFor(overridden, "--jn-link-pin-stroke"), "#a393f2");
+});
+
 test("a theme can change note type visuals without touching structure", () => {
   const theme = normalizeTheme({
     styles: {

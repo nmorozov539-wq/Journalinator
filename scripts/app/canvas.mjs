@@ -3,6 +3,7 @@ import {
   CARD_SIDES, MAX_THREAD_PINS, THREAD_PIN_RADIUS, cardEdgeAt, cardPointAnchor, moveThreadPin, threadAttachment, validThreadPin
 } from "../card-ports.mjs";
 import { arrowHead, pinnedThreadPath, ThreadMotion } from "../link-thread.mjs";
+import { LINK_COLOR_SLOTS, normalizeLinkColor } from "../link-colors.mjs";
 import { noteImageSource } from "../image-url.mjs";
 import { hasAnyLock } from "../locks.mjs";
 import { renderMarkdown } from "../markdown.mjs";
@@ -11,16 +12,8 @@ import { DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, STAMP_CORNERS, STAMP
 
 const DRAG_THRESHOLD = 5;
 let threadMaskSequence = 0;
-const LINK_COLORS = ["", "#a393f2", "#d6a45c", "#d77b91"];
-const LINK_DEFAULT_COLOR = "#8e8e9a";
+const LINK_COLOR_OPTIONS = ["", ...LINK_COLOR_SLOTS];
 const LINK_DIRECTIONS = new Set(["none", "one", "two"]);
-const SAFE_LINK_COLORS = new Set(LINK_COLORS);
-
-/** Maps anything outside the toolbar palette to the default color before it reaches SVG markup. */
-function safeLinkColor(color) {
-  const normalized = typeof color === "string" ? color.toLowerCase() : "";
-  return SAFE_LINK_COLORS.has(normalized) ? normalized : "";
-}
 
 /**
  * The note canvas: pan/zoom viewport, absolutely-positioned cards, free text labels, and now
@@ -47,6 +40,7 @@ export default class JournalCanvas {
     this.movingThreads = new Set();
     this.threadFrame = null;
     this.threadTime = null;
+    this.zoomFrame = null;
     this.selectedNoteId = null;
     this.selectedLabelIds = new Set();
     this.selectedNoteIds = new Set();
@@ -152,7 +146,9 @@ export default class JournalCanvas {
     if (this.linkDrawTimer !== null) clearTimeout(this.linkDrawTimer);
     this.linkDrawTimer = null;
     if (this.threadFrame !== null) this.root.ownerDocument.defaultView.cancelAnimationFrame(this.threadFrame);
+    if (this.zoomFrame !== null) this.root.ownerDocument.defaultView.cancelAnimationFrame(this.zoomFrame);
     this.threadFrame = this.threadTime = null;
+    this.zoomFrame = null;
     this.threads.clear();
     this.pinDrag = null;
     this.movingThreads.clear();
@@ -414,26 +410,34 @@ export default class JournalCanvas {
       const pins = this.pinDrag?.id === link.id ? moveThreadPin(savedPins, this.pinDrag) ?? savedPins : savedPins;
       threads.set(link.id, { start: p, end: r, pins, motion });
       const { path: d, center: { x: mx, y: my }, startLead, endLead, start, end } = pinnedThreadPath(p, r, pins, motion);
-      const color = safeLinkColor(link.color) || LINK_DEFAULT_COLOR;
+      const color = normalizeLinkColor(link.color);
+      const colorClass = color ? `jn-link-color-${color}` : "jn-link-color-default";
       const direction = LINK_DIRECTIONS.has(link.direction) ? link.direction : "none";
       const selected = link.id === this.selectedLinkId;
       const endpoint = (anchor, directed, lead) => {
         const points = directed ? arrowHead(anchor, lead) : null;
         return `<circle class="jn-thread-pin" cx="${anchor.x - anchor.nx * THREAD_PIN_RADIUS}"
-          cy="${anchor.y - anchor.ny * THREAD_PIN_RADIUS}" r="${THREAD_PIN_RADIUS}"/>
-          ${points ? `<polygon class="jn-link-arrow${color === LINK_DEFAULT_COLOR ? " jn-thread-arrow-default" : ""}"
-          points="${points}" fill="${color}"/>` : ""}`;
+          cy="${anchor.y - anchor.ny * THREAD_PIN_RADIUS}"/>
+          ${points ? `<polygon class="jn-link-arrow" points="${points}"
+            style="transform-origin:${anchor.x}px ${anchor.y}px"/>` : ""}`;
       };
       const dimmed = dimmedIds.has(note._id) || dimmedIds.has(link.targetId);
+      const dashed = !link.hidden && link.lineStyle === "dashed";
       const linkId = foundry.utils.escapeHTML(String(link.id ?? ""));
 
-      const linkClasses = [link.hidden ? "jn-link-hidden" : "", link.hint ? "jn-link-hint" : ""].join(" ").trim();
-      body += `<g data-id="${linkId}" class="${linkClasses}" opacity="${dimmed ? 0.15 : 1}">
-        <path class="jn-thread${color === LINK_DEFAULT_COLOR ? " jn-thread-default" : ""}" d="${d}" fill="none" stroke="${color}" stroke-width="${selected ? 3.5 : 2}"
-          ${link.hidden ? 'stroke-dasharray="2 6" stroke-linecap="round"' : link.lineStyle === "dashed" ? 'stroke-dasharray="7 6"' : ""}/>
+      const linkClasses = [
+        colorClass,
+        selected ? "jn-link-selected" : "",
+        dimmed ? "jn-link-dimmed" : "",
+        link.hidden ? "jn-link-hidden" : "",
+        dashed ? "jn-link-dashed" : "",
+        link.hint ? "jn-link-hint" : ""
+      ].filter(Boolean).join(" ");
+      body += `<g data-id="${linkId}" class="${linkClasses}">
+        <path class="jn-thread" d="${d}"/>
         ${endpoint(start, direction === "two", startLead)}
         ${endpoint(end, direction !== "none", endLead)}
-        ${pins.map((pin, index) => `<circle class="jn-thread-pin jn-board-pin" data-pin-index="${index}" cx="${pin.x}" cy="${pin.y}" r="${THREAD_PIN_RADIUS}"/>`).join("")}
+        ${pins.map((pin, index) => `<circle class="jn-thread-pin jn-board-pin" data-pin-index="${index}" cx="${pin.x}" cy="${pin.y}"/>`).join("")}
         ${link.label || link.hint ? `<text class="jn-link-label" x="${mx}" y="${my + 4}">${link.hint ? "&#10022; " : ""}${foundry.utils.escapeHTML(link.label ?? "")}</text>` : ""}
       </g>`;
       hits += `<path class="jn-link-hit" data-id="${linkId}" d="${d}"/>`;
@@ -441,6 +445,7 @@ export default class JournalCanvas {
       this.linksById.set(link.id, { sourceId: note._id, targetId: link.targetId, mx, my, ...link });
     }
 
+    if (this.selectedLinkId && !this.linksById.has(this.selectedLinkId)) this.selectedLinkId = null;
     this.svg.innerHTML = this.#threadMask(boxes, threads) + `<g mask="url(#${this.threadMaskId})">${body}</g>`;
     this.linkHits.innerHTML = hits;
     let index = 0;
@@ -472,7 +477,7 @@ export default class JournalCanvas {
         top = Math.min(top, y);
         bottom = Math.max(bottom, y);
       }
-      silhouettes += `<polygon points="${corners.map(({ x, y }) => `${x},${y}`).join(" ")}" fill="#777"/>`;
+      silhouettes += `<polygon class="jn-thread-silhouette" points="${corners.map(({ x, y }) => `${x},${y}`).join(" ")}"/>`;
     }
     if (!silhouettes) left = top = right = bottom = 0;
     for (const { pins } of threads.values()) {
@@ -486,7 +491,7 @@ export default class JournalCanvas {
     // Include the maximum travel of a pulled thread and its control points.
     const bounds = `x="${left - 320}" y="${top - 320}" width="${right - left + 640}" height="${bottom - top + 640}"`;
     return `<defs><mask id="${this.threadMaskId}" maskUnits="userSpaceOnUse" ${bounds}>
-      <rect ${bounds} fill="white"/>${silhouettes}
+      <rect class="jn-thread-mask-bg" ${bounds}/>${silhouettes}
     </mask></defs>`;
   }
 
@@ -553,12 +558,17 @@ export default class JournalCanvas {
 
     this.#positionLinkToolbar(link);
     this.linkToolbar.style.display = "flex";
-    const currentColor = safeLinkColor(link.color);
+    const currentColor = normalizeLinkColor(link.color);
     const direction = LINK_DIRECTIONS.has(link.direction) ? link.direction : "none";
+    const swatch = slot => {
+      const label = t(slot ? `JN.Link.Color.${slot}` : "JN.Link.Color.default");
+      return `<button type="button" class="jn-link-color jn-link-swatch-${slot || "default"}${slot === currentColor ? " on" : ""}"
+        data-color="${slot}" title="${label}" aria-label="${label}" aria-pressed="${slot === currentColor}"></button>`;
+    };
     this.linkToolbar.innerHTML = `
       <input type="text" class="jn-link-label-input" placeholder="${t("JN.Link.Label")}" value="${foundry.utils.escapeHTML(link.label ?? "")}">
       <button type="button" class="jn-link-dir" title="${t("JN.Link.Direction")}">${{ none: "—", one: "→", two: "↔" }[direction]}</button>
-      <span class="jn-link-colors">${LINK_COLORS.map(c => `<button type="button" class="jn-link-color${c === currentColor ? " on" : ""}" data-color="${c}" style="background:${c || `var(--jn-thread, ${LINK_DEFAULT_COLOR})`}"></button>`).join("")}</span>
+      <span class="jn-link-colors">${LINK_COLOR_OPTIONS.map(swatch).join("")}</span>
       <button type="button" class="jn-link-dash" title="${t("JN.Link.LineStyle")}">${link.lineStyle === "dashed" ? "┄┄" : "──"}</button>
       ${this.#gmLinkButtons(link)}
       <button type="button" class="jn-link-delete" title="${t("JN.Link.Delete")}">✕</button>
@@ -577,7 +587,12 @@ export default class JournalCanvas {
       update({ lineStyle: link.lineStyle === "dashed" ? "solid" : "dashed" });
     const gmButton = (selector, fn) => {
       const btn = this.linkToolbar.querySelector(selector);
-      if (btn) btn.onclick = () => { fn(); this.selectedLinkId = null; this.linkToolbar.style.display = "none"; };
+      if (btn) btn.onclick = () => {
+        fn();
+        this.selectedLinkId = null;
+        this.#syncLinkSelection();
+        this.linkToolbar.style.display = "none";
+      };
     };
     gmButton(".jn-link-hide", () => this.callbacks.onHideLink?.(link.sourceId, link.id));
     gmButton(".jn-link-reveal", () => this.callbacks.onRevealLink?.(link.sourceId, link.id));
@@ -586,8 +601,16 @@ export default class JournalCanvas {
     this.linkToolbar.querySelector(".jn-link-delete").onclick = () => {
       this.callbacks.onDeleteLink(link.sourceId, link.id);
       this.selectedLinkId = null;
+      this.#syncLinkSelection();
       this.linkToolbar.style.display = "none";
     };
+  }
+
+  /** Selection is a class toggle, so clicking a thread never forces a full SVG rebuild. */
+  #syncLinkSelection() {
+    for (const group of this.svg.querySelectorAll("g[data-id]")) {
+      group.classList.toggle("jn-link-selected", group.dataset.id === this.selectedLinkId);
+    }
   }
 
   /** GM-only toolbar buttons: hide a shared link, reveal a hidden one, mark a shared link as a hint. */
@@ -621,6 +644,28 @@ export default class JournalCanvas {
     this.root.style.setProperty("--jn-board-pattern-size", `${pattern}px`);
     this.root.style.setProperty("--jn-board-pattern-pos", `${this.view.x}px ${this.view.y}px`);
     this.root.classList.toggle("jn-far-zoom", this.view.k < 0.48);
+    this.#queueZoomComp();
+  }
+
+  /**
+   * Pins, arrows and labels live inside the CSS-scaled world while thread strokes are
+   * non-scaling. Dividing by the zoom keeps their on-screen size steady for k in [0.5, 2]
+   * and eases off outside that range so extreme zooms still feel like zooming.
+   */
+  #syncZoomComp() {
+    const k = this.view.k || 1;
+    const comp = Math.min(2, Math.max(0.5, 1 / k));
+    this.root.style.setProperty("--jn-zoom-comp", String(Math.round(comp * 1000) / 1000));
+  }
+
+  #queueZoomComp() {
+    if (this.zoomFrame !== null) return;
+    const win = this.root.ownerDocument.defaultView;
+    if (!win?.requestAnimationFrame) { this.#syncZoomComp(); return; }
+    this.zoomFrame = win.requestAnimationFrame(() => {
+      this.zoomFrame = null;
+      this.#syncZoomComp();
+    });
   }
 
   /**
@@ -670,6 +715,7 @@ export default class JournalCanvas {
     this.selectedNoteIds = new Set(ids);
     this.selectedNoteId = primary;
     this.selectedLinkId = null;
+    this.#syncLinkSelection();
     for (const [id, el] of this.cardEls) el.classList.toggle("selected", this.selectedNoteIds.has(id));
     this.#syncLinkToolbar();
     this.callbacks.onSelectNote(primary);
@@ -738,7 +784,6 @@ export default class JournalCanvas {
     this.linkPlacementHint.textContent = t("JN.Link.PickStart");
     this.edgePin = document.createElementNS("http://www.w3.org/2000/svg", "circle");
     this.edgePin.setAttribute("class", "jn-thread-pin jn-edge-preview");
-    this.edgePin.setAttribute("r", THREAD_PIN_RADIUS);
     this.edgePin.style.display = "none";
     this.svg.appendChild(this.edgePin);
     this.draftPins = document.createElementNS("http://www.w3.org/2000/svg", "g");
@@ -779,7 +824,6 @@ export default class JournalCanvas {
       marker.setAttribute("class", "jn-thread-pin jn-board-pin");
       marker.setAttribute("cx", world.x);
       marker.setAttribute("cy", world.y);
-      marker.setAttribute("r", THREAD_PIN_RADIUS);
       this.draftPins.appendChild(marker);
       this.#updateFreeLinkPreview(world);
       return;
@@ -797,7 +841,6 @@ export default class JournalCanvas {
     this.#startLinkPreview();
     this.previewPin = document.createElementNS("http://www.w3.org/2000/svg", "circle");
     this.previewPin.setAttribute("class", "jn-thread-pin");
-    this.previewPin.setAttribute("r", THREAD_PIN_RADIUS);
     this.svg.appendChild(this.previewPin);
     this.#updateFreeLinkPreview(threadAttachment(edge.box, point));
   }
@@ -1228,6 +1271,7 @@ export default class JournalCanvas {
           if (link && !drag.readOnly) this.callbacks.onDeleteLink(link.sourceId, link.id);
           this.lastLinkClick = null;
           this.selectedLinkId = null;
+          this.#syncLinkSelection();
           this.#syncLinkToolbar();
         } else {
           this.#highlightLabels([]);
@@ -1236,6 +1280,7 @@ export default class JournalCanvas {
           this.selectedNoteId = null;
           this.selectedNoteIds.clear();
           for (const el of this.cardEls.values()) el.classList.remove("selected");
+          this.#syncLinkSelection();
           this.callbacks.onSelectNote(null);
           this.#syncLinkToolbar();
         }

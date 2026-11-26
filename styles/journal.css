@@ -24,6 +24,24 @@
   --jn-board-image-size: cover;
   --jn-board-image-repeat: no-repeat;
   --jn-board-vignette: 0;
+  --jn-link-width: 2;
+  --jn-link-width-selected: 3.5;
+  --jn-link-dash: 7 6;
+  --jn-link-dash-hidden: 2 6;
+  --jn-link-dim-opacity: 0.15;
+  --jn-link-shadow: drop-shadow(0 1px 1px color-mix(in srgb, var(--jn-shadow) 60%, transparent));
+  --jn-link-arrow-scale: 1;
+  --jn-link-pin-radius: 3px;
+  --jn-link-pin-fill: var(--jn-acc);
+  --jn-link-pin-stroke: var(--jn-board-color);
+  --jn-link-label-size: 11px;
+  --jn-link-label-color: var(--jn-muted);
+  --jn-link-halo: var(--jn-board-color);
+  --jn-link-halo-width: 7px;
+  --jn-link-select: var(--jn-acc);
+  --jn-link-1: #a393f2;
+  --jn-link-2: #d6a45c;
+  --jn-link-3: #d77b91;
 }
 
 #journalinator-app .window-content {
@@ -697,6 +715,9 @@
   pointer-events: none;
 }
 .jn-links { z-index: 3; }
+/* Mask luminance, not paint: white keeps the thread, the card silhouette cuts it out. */
+.jn-thread-mask-bg { fill: #fff; }
+.jn-thread-silhouette { fill: #777; }
 
 .jn-selection-box {
   display: none;
@@ -1588,26 +1609,80 @@ input.jn-task-checkbox:disabled { cursor: default; }
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.jn-thread { filter: drop-shadow(0 1px 1px color-mix(in srgb, var(--jn-shadow) 60%, transparent)); }
+.jn-thread {
+  fill: none;
+  stroke-width: var(--jn-link-width);
+  filter: var(--jn-link-shadow);
+}
+/* Endpoint, board, draft and preview pins share this size. */
 .jn-thread-pin {
   display: inline;
-  fill: var(--jn-acc);
-  stroke: var(--jn-bg);
+  r: calc(var(--jn-link-pin-radius) * var(--jn-zoom-comp, 1));
+  fill: var(--jn-link-pin-fill);
+  stroke: var(--jn-link-pin-stroke);
   stroke-width: 1px;
 }
-.jn-thread-default { stroke: var(--jn-thread); }
-.jn-thread-arrow-default { fill: var(--jn-thread); }
-.jn-link-arrow { pointer-events: none; }
+.jn-link-color-default .jn-thread { stroke: var(--jn-thread); }
+.jn-link-color-link1 .jn-thread { stroke: var(--jn-link-1); }
+.jn-link-color-link2 .jn-thread { stroke: var(--jn-link-2); }
+.jn-link-color-link3 .jn-thread { stroke: var(--jn-link-3); }
+.jn-link-arrow {
+  fill: var(--jn-thread);
+  transform: scale(calc(var(--jn-link-arrow-scale) * var(--jn-zoom-comp, 1)));
+  transform-box: view-box;
+  pointer-events: none;
+}
+.jn-link-color-link1 .jn-link-arrow { fill: var(--jn-link-1); }
+.jn-link-color-link2 .jn-link-arrow { fill: var(--jn-link-2); }
+.jn-link-color-link3 .jn-link-arrow { fill: var(--jn-link-3); }
 .jn-link-label {
-  font-size: 11px;
-  fill: var(--jn-muted);
-  stroke: var(--jn-bg);
-  stroke-width: 7px;
+  font-size: calc(var(--jn-link-label-size) * var(--jn-zoom-comp, 1));
+  fill: var(--jn-link-label-color);
+  stroke: var(--jn-link-halo);
+  stroke-width: calc(var(--jn-link-halo-width) * var(--jn-zoom-comp, 1));
   stroke-linejoin: round;
   paint-order: stroke;
   text-anchor: middle;
   pointer-events: none;
 }
+/*
+ * Link state precedence:
+ * - hidden wins over dashed (a hidden link never gets the dashed style class);
+ * - selected combines with hidden and hint, so its ring and heavier width still apply;
+ * - dimmed is a whole-group opacity used by search/filter dimming.
+ */
+.jn-link-dimmed { opacity: var(--jn-link-dim-opacity); }
+.jn-link-dashed .jn-thread { stroke-dasharray: var(--jn-link-dash); }
+.jn-link-hidden .jn-thread {
+  stroke-dasharray: var(--jn-link-dash-hidden);
+  stroke-opacity: 0.75;
+  stroke-linecap: round;
+}
+.jn-link-hidden .jn-link-label { fill: var(--jn-gm); }
+.jn-link-hint .jn-thread {
+  filter: var(--jn-link-shadow) drop-shadow(0 0 3px var(--jn-hint));
+}
+.jn-link-hint .jn-link-label { fill: var(--jn-hint); }
+.jn-link-selected .jn-thread {
+  stroke-width: var(--jn-link-width-selected);
+  filter: var(--jn-link-shadow)
+    drop-shadow(0 0 2px color-mix(in srgb, var(--jn-link-select) 90%, transparent))
+    drop-shadow(0 0 7px color-mix(in srgb, var(--jn-link-select) 50%, transparent));
+}
+/* Selected + hint keeps both glows instead of the later filter replacing the hint. */
+.jn-link-hint.jn-link-selected .jn-thread {
+  filter: var(--jn-link-shadow)
+    drop-shadow(0 0 3px var(--jn-hint))
+    drop-shadow(0 0 2px color-mix(in srgb, var(--jn-link-select) 90%, transparent))
+    drop-shadow(0 0 7px color-mix(in srgb, var(--jn-link-select) 50%, transparent));
+}
+.jn-link-selected .jn-thread-pin {
+  r: calc(var(--jn-link-pin-radius) * var(--jn-zoom-comp, 1) * 1.35);
+}
+.jn-link-selected .jn-link-arrow {
+  transform: scale(calc(var(--jn-link-arrow-scale) * var(--jn-zoom-comp, 1) * 1.15));
+}
+
 .jn-link-preview {
   fill: none;
   stroke: var(--jn-acc);
@@ -1664,6 +1739,10 @@ input.jn-task-checkbox:disabled { cursor: default; }
   min-width: 18px;
   border-radius: 50%;
 }
+.jn-link-toolbar .jn-link-swatch-default { background: var(--jn-thread); }
+.jn-link-toolbar .jn-link-swatch-link1 { background: var(--jn-link-1); }
+.jn-link-toolbar .jn-link-swatch-link2 { background: var(--jn-link-2); }
+.jn-link-toolbar .jn-link-swatch-link3 { background: var(--jn-link-3); }
 .jn-link-color.on {
   border: 2px solid var(--jn-text);
 }
@@ -1740,18 +1819,6 @@ input.jn-task-checkbox:disabled { cursor: default; }
   border-bottom: 1px dashed var(--jn-gm);
 }
 
-.jn-link-hidden path:first-child {
-  stroke-opacity: 0.75;
-}
-.jn-link-hidden .jn-link-label {
-  fill: var(--jn-gm);
-}
-.jn-link-hint path:first-child {
-  filter: drop-shadow(0 0 3px var(--jn-hint));
-}
-.jn-link-hint .jn-link-label {
-  fill: var(--jn-hint);
-}
 .jn-link-toolbar .jn-link-reveal,
 .jn-link-toolbar .jn-link-hide {
   color: var(--jn-gm);

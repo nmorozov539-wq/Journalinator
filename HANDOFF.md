@@ -28,6 +28,7 @@ the bugs found during review, and the GM-side design.
 | Daily activity buckets and stats aggregation | `scripts/stats.mjs` |
 | Snapshot ring buffers | `scripts/snapshots.mjs` |
 | Style registry | `scripts/styles/registry.mjs` |
+| Link color slots and legacy hex mapping | `scripts/link-colors.mjs` |
 | GM tier: vault crypto (pure) | `scripts/secrets/crypto.mjs` |
 | GM tier: vault data model, block anchoring, titles (pure) | `scripts/secrets/model.mjs` |
 | GM tier: decrypted vault, keyring, queued writes | `scripts/secrets/vault-store.mjs` |
@@ -84,8 +85,9 @@ the module socket. It is not a substitute for a real session.
    edits that would change a link's `id` or `targetId`. `createLink` rejects self-links,
    duplicates, and deleted/missing targets. Styles/images/title lengths/block text/card
    geometry are type- and range-checked, and note-page type checks reject attempts to target
-   layout/stats/history pages. Card images are CSS-escaped, and link colors/IDs are sanitized
-   again at render time before entering SVG.
+   layout/stats/history pages. Card images are CSS-escaped. Link colors accept only `""`, the
+   three theme slots, or the three legacy hexes (normalized to slots on write), and IDs are
+   sanitized again at render time before entering SVG.
 8. **Labels are validated, and drafts survive reload/disconnect.** `addLabel`/`updateLabel`
    now type/range-check text, coordinates, size, and color, require the label to exist, and
    clamp geometry. Editor drafts are persisted to `localStorage` (world/user/note/block keyed),

@@ -4,6 +4,7 @@ import { requestWrite } from "../socket.mjs";
 import { reconcileTypedLinks, parseWikilinks } from "../wikilinks.mjs";
 import { CARD_STYLES, seedTilt } from "../styles/registry.mjs";
 import { linkAnchors, moveThreadPin, validCardPorts } from "../card-ports.mjs";
+import { isLinkColor, normalizeLinkColor } from "../link-colors.mjs";
 import { noteImagePath } from "../image-url.mjs";
 import {
   makeSecretTitle, stripSecretPrefix, hasSecretPrefix, mergeBlocks, orderOf, declassifyAnchor,
@@ -465,7 +466,7 @@ export async function declassifyNote(noteId, title) {
     .filter(l => l.origin !== "typed" && sharedIds.has(l.targetId))
     .map(link => {
       const { targetId, label, direction, color, lineStyle } = link;
-      return { targetId, label, direction, color, lineStyle, ...linkAnchors(link) };
+      return { targetId, label, direction, color: normalizeLinkColor(color), lineStyle, ...linkAnchors(link) };
     });
 
   const ok = await sendAndConfirm({
@@ -529,7 +530,14 @@ export function updateHiddenLink(sourceId, linkId, fields) {
     const list = vault.notes[sourceId]?.links ?? vault.hiddenLinks[sourceId];
     const link = list?.find(l => l.id === linkId);
     if (!link) return;
-    for (const key of LINK_FIELDS) if (key in fields) link[key] = fields[key];
+    for (const key of LINK_FIELDS) {
+      if (!(key in fields)) continue;
+      if (key === "color") {
+        if (isLinkColor(fields.color)) link.color = normalizeLinkColor(fields.color);
+      } else {
+        link[key] = fields[key];
+      }
+    }
     const pins = moveThreadPin(link.pins, fields.pinMove);
     if (pins) link.pins = pins;
     link.edited = true;
@@ -575,7 +583,7 @@ export async function hideSharedLink(sourceId, linkId) {
   await vaultStore.mutate(vault => {
     const list = vault.hiddenLinks[sourceId] ?? [];
     if (!list.some(l => l.targetId === link.targetId)) {
-      vault.hiddenLinks[sourceId] = [...list, { ...newLink(link.targetId, linkAnchors(link)), label: link.label, direction: link.direction, color: link.color, lineStyle: link.lineStyle, edited: true }];
+      vault.hiddenLinks[sourceId] = [...list, { ...newLink(link.targetId, linkAnchors(link)), label: link.label, direction: link.direction, color: normalizeLinkColor(link.color), lineStyle: link.lineStyle, edited: true }];
     }
   });
   await requestWrite({ type: "deleteLink", noteId: sourceId, linkId });

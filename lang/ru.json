@@ -204,6 +204,10 @@
   "JN.Canvas.By": "автор: {author}",
 
   "JN.Link.Label": "Подпись",
+  "JN.Link.Color.default": "Цвет по умолчанию",
+  "JN.Link.Color.link1": "Цвет связи 1",
+  "JN.Link.Color.link2": "Цвет связи 2",
+  "JN.Link.Color.link3": "Цвет связи 3",
   "JN.Link.Direction": "Направление",
   "JN.Link.LineStyle": "Стиль линии",
   "JN.Link.Delete": "Удалить связь",
