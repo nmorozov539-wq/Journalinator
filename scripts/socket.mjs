@@ -2461,6 +2461,9 @@ async function handleMessage(message, senderUserId) {
         return;
       }
       if (layout) await layout.update({ [`system.cards.-=${message.noteId}`]: null });
+      // Confirm only after the note and its card both landed. The requester shows the recovery
+      // notice from this ack, so a failed or rolled-back delete never claims success.
+      acknowledgeWriteApplied(senderUserId, { kind: "delete", undoId });
       return;
     }
 

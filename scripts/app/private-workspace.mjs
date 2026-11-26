@@ -28,6 +28,7 @@ export default class PrivateWorkspace {
     this.workspace = null;
     this.selectedNoteId = null;
     this.history = [];
+    this.deleteConfirmPending = false;
     this.dimMatch = () => true;
 
     this.canvas = new JournalCanvas({
@@ -709,6 +710,7 @@ export default class PrivateWorkspace {
     if (this.history.length > 20) this.history.shift();
     if (noteIds.includes(this.selectedNoteId)) this.selectedNoteId = null;
     this.canvas.clearSelection();
+    ui.notifications?.info(t("JN.Delete.Notice", { count: noteIds.length }));
     this.onChange();
   }
 
@@ -716,6 +718,22 @@ export default class PrivateWorkspace {
     const labelIds = this.getSelectedLabelIds();
     const noteIds = this.getSelectedNoteIds();
     if (!labelIds.length && !noteIds.length) return;
+    if (noteIds.length > 1) {
+      // A second Delete while the first confirmation is open must not stack another dialog or
+      // delete the same selection twice.
+      if (this.deleteConfirmPending) return;
+      this.deleteConfirmPending = true;
+      let confirmed;
+      try {
+        confirmed = await DialogV2.confirm({
+          window: { title: t("JN.Delete.ConfirmTitle") },
+          content: `<p>${t("JN.Delete.ConfirmMultiplePrivate", { count: noteIds.length })}</p>`
+        });
+      } finally {
+        this.deleteConfirmPending = false;
+      }
+      if (!confirmed) return;
+    }
     const undoId = foundry.utils.randomID();
     const deletedAt = Date.now();
     const ok = await this.#save(data => {
@@ -741,6 +759,7 @@ export default class PrivateWorkspace {
     }
     if (noteIds.includes(this.selectedNoteId)) this.selectedNoteId = null;
     this.canvas.clearSelection();
+    if (noteIds.length) ui.notifications?.info(t("JN.Delete.Notice", { count: noteIds.length }));
     this.onChange();
   }
 
@@ -763,11 +782,14 @@ export default class PrivateWorkspace {
     this.onChange();
   }
 
-  async restoreTrash(undoId) {
+  async restoreTrash(key) {
     await this.#save(data => {
       const keep = [];
       for (const entry of data.trash) {
-        if (undoId && entry.undoId !== undoId) { keep.push(entry); continue; }
+        // Older trash entries have no undoId. openTrash falls back to the note id as the row key,
+        // so accept either identifier here too.
+        const matches = entry.undoId === key || (!entry.undoId && entry.note?.id === key);
+        if (key && !matches) { keep.push(entry); continue; }
         data.notes[entry.note.id] = entry.note;
         if (entry.card) data.layout.cards[entry.note.id] = entry.card;
       }
@@ -815,20 +837,32 @@ export default class PrivateWorkspace {
   }
 
   async openTrash() {
+    // A legacy card-only trash entry has no note to restore, so it cannot be a usable row.
     const trashed = (this.workspace?.trash ?? [])
+      .filter(entry => entry?.note?.id)
       .map(entry => ({ ...entry, key: entry.undoId ?? entry.note.id }));
     const grouped = new Map();
     for (const entry of trashed) {
       if (!grouped.has(entry.key)) grouped.set(entry.key, []);
       grouped.get(entry.key).push(entry);
     }
-    const rows = [...grouped].map(([key, entries]) => `
-      <div class="jn-trash-row"><span>${esc(entries.map(entry => entry.note.title || t("JN.Private.NewNoteTitle")).join(", "))}</span>
-        <button type="button" class="jn-trash-restore" data-id="${key}">${t("JN.Common.Restore")}</button></div>`
-    ).join("") || `<p class="journalinator-empty">${t("JN.Trash.Empty")}</p>`;
+    const rows = [...grouped].map(([key, entries]) => {
+      const deletedAt = entries.find(entry => Number.isFinite(entry.deletedAt))?.deletedAt;
+      const date = Number.isFinite(deletedAt)
+        ? new Date(deletedAt).toLocaleString(game.i18n?.lang || undefined) : "";
+      const meta = date
+        ? t("JN.Trash.DeletedByYouAt", { date: esc(date) })
+        : t("JN.Trash.MetadataUnknown");
+      return `
+      <div class="jn-trash-row">
+        <span class="jn-trash-title">${esc(entries.map(entry => entry.note.title || t("JN.Private.NewNoteTitle")).join(", "))}</span>
+        <span class="jn-trash-meta">${meta}</span>
+        <button type="button" class="jn-trash-restore" data-id="${key}">${t("JN.Common.Restore")}</button></div>`;
+    }).join("") || `<p class="journalinator-empty">${t("JN.Trash.Empty")}</p>`;
     await DialogV2.wait({
       window: { title: t("JN.Trash.Title") },
-      content: `<div class="jn-trash-list">${rows}</div>` +
+      content: (grouped.size ? `<p class="jn-trash-hint">${t("JN.Trash.RecoverableHint")}</p>` : "")
+        + `<div class="jn-trash-list">${rows}</div>` +
         (grouped.size ? `<button type="button" class="jn-trash-empty">${t("JN.Trash.EmptyButton")}</button>` : ""),
       buttons: [{ action: "close", label: t("JN.Common.Close"), default: true }],
       rejectClose: false,

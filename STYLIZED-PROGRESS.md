@@ -3,7 +3,7 @@
 Branch: `stylized-canvas` (local only; no push/merge/publish).
 Baseline: `54eee06` (`StateHookUp`, local checkout) → branch created at Phase 0.
 Spec package: `handoff/` (README, IMPLEMENTATION, DECISIONS, ACCEPTANCE, VISUAL-REFERENCE, THREAD-CONFIGURATOR).
-Module: 0.9.0 · Foundry v14.367 · local Foundry available (isolated test root plan below).
+Module: 0.9.1 · Foundry v14.367 · local Foundry available (isolated test root plan below).
 
 ## Phase 0 — repository audit and baseline
 
@@ -238,6 +238,27 @@ Coordinator-run with independent validation reports from all prior phases. No ne
 - Verification: `npm run check` pass; `npm test` **395 pass / 0 fail / 0 skipped**.
 
 Final known limitations: session-local active-GM undo (pin/route), private main-pin disable not redistributed, multi-link bulk not implemented, split fallback crash window on fake Foundry only, best-effort (not full CAS) concurrent private-save protection with a residual last-writer race, per-torn-card shadow cost to stress-test, and all real multiplayer/manual gates above.
+
+## 0.9.1 — Control mode, deletion safety, and recovery visibility (2026-11-26)
+
+- Scene control opens only on `active === true`; closing returns the left control bar to
+  Tokens/select, and closed instances are never rendered again.
+- Single-note deletion remains immediate with a Trash/Ctrl+Z notice. Shared and private
+  multi-delete ask for confirmation and cancel without deleting labels or notes.
+- Trash rows show deletion metadata (shared deleter name + time; private deletion time) with a
+  neutral fallback, both dialogs explain recovery, and the Trash button carries a count badge.
+- Private save-conflict warnings now explain the other-tab/GM change, the reload, and the
+  unsaved local edit that was not saved. The revision check itself is unchanged.
+- A top-bar indicator reports how many live notes search/filters hide. Stats continues to
+  disclose trash separately.
+- Version/docs/package moved to 0.9.1. The notes-disappearance report remains **unreproduced**;
+  this release adds recovery visibility and safeguards, not a claimed root cause.
+
+Verification: `npm run check` pass; `npm test` **411 pass / 0 fail / 0 skipped**; isolated
+Foundry 14.367 (test data root, disposable world, port 30199) confirmed: open → one app,
+close → control returns to `tokens`, switch to `walls` → app stays closed, reopen → works; no
+Journalinator console/page errors. Artifact `dist/Journalinator-v0.9.1.zip` SHA-256
+`5caafa620a69adcb5b3acc01fdda587efa985339aacaaa20777c75f1a990bb86`.
 
 ### Local commit history (no push/merge/release)
 

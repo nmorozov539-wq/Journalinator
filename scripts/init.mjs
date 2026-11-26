@@ -6,7 +6,8 @@ import PrivateWorkspaceModel from "./data/private-model.mjs";
 import { registerContainerSettings, ensureContainers, registerSidebarHiding } from "./store/containers.mjs";
 import { registerSocket } from "./socket.mjs";
 import { startExpirySweep, startLockResync } from "./locks.mjs";
-import JournalApp from "./app/journal-app.mjs";
+import JournalApp, { isRestoringSceneControl } from "./app/journal-app.mjs";
+import { shouldOpenSceneControl } from "./app/scene-control.mjs";
 import { registerGmTierSettings } from "./secrets/access.mjs";
 import { vaultStore } from "./secrets/vault-store.mjs";
 import { privateStore } from "./store/private-store.mjs";
@@ -17,6 +18,39 @@ import {
 } from "./styles/themes.mjs";
 
 const MODULE_ID = "fvtt-journalinator";
+
+/**
+ * The one Journalinator window this client opened. It is cleared by the app's close hook so a
+ * closed instance is never rendered again (Foundry keeps no usable closed instance for us).
+ */
+let journalApp = null;
+
+Hooks.on("journalinatorAppClosed", app => {
+  if (journalApp === app) journalApp = null;
+});
+
+/** Existing rendered instance from our reference or Foundry's instance registry. */
+function renderedJournalApp() {
+  if (journalApp?.rendered) return journalApp;
+  const existing = foundry.applications.instances.get(JournalApp.DEFAULT_OPTIONS.id) ?? null;
+  if (existing?.rendered) {
+    journalApp = existing;
+    return existing;
+  }
+  return null;
+}
+
+function openJournalApp() {
+  const existing = renderedJournalApp();
+  if (existing) {
+    existing.bringToFront?.();
+    existing.render({ force: true });
+    return existing;
+  }
+  journalApp = new JournalApp();
+  journalApp.render({ force: true });
+  return journalApp;
+}
 
 Hooks.once("init", () => {
   Object.assign(CONFIG.JournalEntryPage.dataModels, {
@@ -119,11 +153,12 @@ Hooks.on("getSceneControlButtons", controls => {
         title: t("JN.Scene.Open"),
         icon: "fa-solid fa-note-sticky",
         button: true,
-        onChange: () => {
-          // Reuse the open instance instead of stacking a second app with the same id.
-          const existing = foundry.applications.instances.get(JournalApp.DEFAULT_OPTIONS.id);
-          if (existing) existing.render({ force: true });
-          else new JournalApp().render({ force: true });
+        onChange: (_event, active) => {
+          // Closing the app activates tokens, which deactivates this control: ignore that
+          // deactivating onChange and never reopen during the close-time control restore.
+          if (isRestoringSceneControl()) return;
+          if (!shouldOpenSceneControl(active)) return;
+          openJournalApp();
         }
       }
     }

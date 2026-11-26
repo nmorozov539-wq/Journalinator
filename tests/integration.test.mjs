@@ -1992,6 +1992,37 @@ test("successful pin writes are acknowledged, failed ones are not", async () => 
   assert.equal(sharedByName("Pin Ack Fail").system.attachment.mainPinEnabled, true);
 });
 
+test("delete writes are acknowledged only after the note and card are removed", async () => {
+  const note = await createNoteAt("Delete Ack Note", 6500, 3200);
+  const undoId = "DeleteAckUndo001";
+  const before = env.socketLog.length;
+  await fromPlayer({ type: "deleteNote", noteId: note.id, undoId });
+  const acks = env.socketLog.slice(before).map(entry => entry.message)
+    .filter(message => message.type === "writeApplied");
+  assert.deepEqual(acks, [{
+    type: "writeApplied", forUserId: player.id, kind: "delete", undoId
+  }]);
+  assert.ok(note.system.deleted, "the note moved to trash");
+  assert.equal(notesStore.getSharedLayout().cards[note.id], undefined, "the card was removed");
+
+  const failed = await createNoteAt("Delete Ack Fail", 6500, 3400);
+  const originalUpdate = failed.update.bind(failed);
+  failed.update = async () => { throw new Error("injected delete acknowledgement failure"); };
+  const beforeFailure = env.socketLog.length;
+  try {
+    await fromPlayer({ type: "deleteNote", noteId: failed.id, undoId: "DeleteAckFail001" });
+  } finally {
+    failed.update = originalUpdate;
+  }
+  assert.equal(env.socketLog.slice(beforeFailure).some(entry =>
+    entry.message.type === "writeApplied" && entry.message.undoId === "DeleteAckFail001"), false,
+  "a failed delete sends no acknowledgement");
+  assert.equal(failed.system.deleted, null, "the failed delete rolled back and stayed live");
+
+  await requestWrite({ type: "restoreNote", noteId: note.id });
+  assert.equal(note.system.deleted, null, "cleanup restores the acknowledged fixture");
+});
+
 test("declassifying a note clears legacy anchors from links that stay secret", async () => {
   const sourceId = await secrets.createSecretNote({ title: "Legacy Anchor Source", x: 7300, y: 3000 });
   const targetId = await secrets.createSecretNote({ title: "Legacy Anchor Target", x: 7500, y: 3000 });

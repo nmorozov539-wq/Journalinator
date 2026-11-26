@@ -24,6 +24,16 @@ globalThis.foundry.utils.cleanHTML = html => html;
 // Dialog fakes: queue answers per call.
 const answers = [];
 const dialogWaits = [];
+
+/** Renders the most recent wait() dialog so tests can click its in-content buttons. */
+function renderLastDialog() {
+  const options = dialogWaits.at(-1);
+  const element = document.createElement("div");
+  element.innerHTML = options?.content ?? "";
+  const closed = [];
+  options?.render?.(null, { element, close: () => closed.push(true) });
+  return { element, options, closed };
+}
 globalThis.foundry.applications = {
   api: {
     ApplicationV2: class {
@@ -288,9 +298,13 @@ test("Backspace removes labels and stamps or trashes notes, and Ctrl+Z restores 
   canvas.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
   app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
   assert.equal(document.activeElement, canvas, "selection re-render preserves keyboard focus");
+  const noticesBeforeDelete = env.notifications.length;
   document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Backspace" }));
   await settle();
   assert.ok(sharedByName("Tavern").system.deleted, "Backspace moves the selected note to trash");
+  assert.ok(env.notifications.slice(noticesBeforeDelete).some(([level, text]) =>
+    level === "info" && text.includes("Deleted 1 note(s)") && text.includes("Restore from Trash")),
+  "a single deleted note tells the user where it went and how to restore it");
 
   app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
   document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, code: "KeyZ", key: "я", ctrlKey: true }));
@@ -5017,6 +5031,470 @@ test("private transfer acknowledgements surface dropped links and waypoints", ()
     assert.ok(warnings.some(text => text.includes("Dropped 1 link")), "the link drop is shown");
     assert.ok(warnings.some(text => text.includes("Dropped 2 route waypoint")),
       "the waypoint drop is shown separately");
+  } finally {
+    app._onClose();
+    host.remove();
+  }
+});
+
+test("shared multi-delete asks first, deletes only after confirmation, and reports recovery", async () => {
+  await requestWrite({ type: "createNote", title: "Delete Alpha", x: 6000, y: 0 });
+  await requestWrite({ type: "createNote", title: "Delete Beta", x: 6300, y: 0 });
+  await settle();
+  const alpha = sharedByName("Delete Alpha");
+  const beta = sharedByName("Delete Beta");
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  try {
+    await redraw();
+    const canvasRoot = host.querySelector(".jn-canvas");
+    clickCanvasCard({ root: canvasRoot }, alpha.id);
+    clickCanvasCard({ root: canvasRoot }, beta.id, { ctrlKey: true });
+    const beforeCancel = env.notifications.length;
+    answers.push(false);
+    canvasRoot.dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true, cancelable: true }));
+    await settle();
+    assert.equal(alpha.system.deleted, null, "cancelling leaves the first note live");
+    assert.equal(beta.system.deleted, null, "cancelling leaves the second note live");
+    assert.equal(env.notifications.slice(beforeCancel).filter(([level]) => level === "info").length, 0,
+      "cancelling shows no deletion notice");
+
+    answers.push(true);
+    const beforeDelete = env.notifications.length;
+    canvasRoot.dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true, cancelable: true }));
+    await settle();
+    assert.ok(alpha.system.deleted, "confirming trashes the first note");
+    assert.ok(beta.system.deleted, "confirming trashes the second note");
+    assert.ok(env.notifications.slice(beforeDelete).some(([level, text]) =>
+      level === "info" && text.includes("Deleted 2 note(s)") && text.includes("Ctrl+Z")),
+    "the multi-delete notice explains trash and undo recovery");
+
+    await redraw();
+    const trash = host.querySelector(".journalinator-trash");
+    const count = notesStore.getTrashedNotes().length;
+    assert.equal(trash.querySelector(".jn-toolbar-badge").textContent, String(count),
+      "the shared Trash button shows the recoverable note count");
+    assert.match(trash.getAttribute("aria-label"), new RegExp(`\\(${count}\\)`),
+      "the badge count is also in the accessible label");
+
+    trash.click();
+    await settle();
+    const content = dialogWaits.at(-1)?.content ?? "";
+    assert.ok(content.includes(game.i18n.localize("JN.Trash.RecoverableHint")), "shared trash explains recovery");
+    assert.ok(content.includes(game.user.name), "the trash dialog names who deleted the note");
+    assert.ok(content.includes(String(new Date().getFullYear())), "the trash dialog shows the deletion date");
+  } finally {
+    app._onClose();
+    host.remove();
+    for (const note of [alpha, beta]) {
+      if (note?.system.deleted) await requestWrite({ type: "restoreNote", noteId: note.id });
+    }
+  }
+});
+
+test("private multi-delete confirms, then badges and dates the private trash", async () => {
+  const user = makeUser("DeletePip000001", { name: "Delete Pip" });
+  const restoreUsers = installExtraUsers([user]);
+  const { page, ids } = await addPrivateFixtureNotes(user, ["Private Delete A", "Private Delete B"]);
+  game.user = user;
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  try {
+    await redraw();
+    await openPrivateView(app, host, redraw);
+    const canvasRoot = host.querySelector(".jn-canvas");
+    clickCanvasCard({ root: canvasRoot }, ids[0]);
+    clickCanvasCard({ root: canvasRoot }, ids[1], { ctrlKey: true });
+
+    answers.push(false);
+    canvasRoot.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true, cancelable: true }));
+    await settle();
+    let workspace = privateStore.read(page);
+    assert.ok(workspace.notes[ids[0]] && workspace.notes[ids[1]], "cancelling keeps both private notes");
+
+    answers.push(true);
+    const beforeDelete = env.notifications.length;
+    canvasRoot.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true, cancelable: true }));
+    await settle();
+    await redraw();
+    workspace = privateStore.read(page);
+    assert.equal(workspace.notes[ids[0]], undefined, "confirming removes the first private note");
+    assert.equal(workspace.notes[ids[1]], undefined, "confirming removes the second private note");
+    assert.equal(workspace.trash.length, 2, "both private notes are recoverable in the private trash");
+    assert.ok(env.notifications.slice(beforeDelete).some(([level, text]) =>
+      level === "info" && text.includes("Deleted 2 note(s)")),
+    "the private multi-delete notice explains recovery");
+
+    const trash = host.querySelector(".journalinator-trash");
+    assert.equal(trash.querySelector(".jn-toolbar-badge").textContent, "2",
+      "the private Trash button shows its recoverable count");
+    trash.click();
+    await settle();
+    const content = dialogWaits.at(-1)?.content ?? "";
+    assert.ok(content.includes(game.i18n.localize("JN.Trash.RecoverableHint")), "private trash explains recovery");
+    assert.ok(content.includes("Deleted by you"), "private trash names the deleting user");
+    assert.ok(content.includes(String(new Date().getFullYear())), "private trash shows when the notes were deleted");
+  } finally {
+    restoreUsers();
+    app._onClose();
+    host.remove();
+    game.user = gmUser;
+    await privateStore.remove(page);
+  }
+});
+
+test("shared delete notice waits for the GM ack and undo survives a failed write", async () => {
+  await requestWrite({ type: "createNote", title: "Ack Wait Note", x: 6600, y: 0 });
+  await settle();
+  const note = sharedByName("Ack Wait Note");
+  const player = makeUser("AckWaitPip00001", { name: "Ack Wait Pip" });
+  const restoreUsers = installExtraUsers([player]);
+  game.user = player;
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  try {
+    await redraw();
+    const canvasRoot = host.querySelector(".jn-canvas");
+    clickCanvasCard({ root: canvasRoot }, note.id);
+    const before = env.notifications.length;
+    canvasRoot.dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true, cancelable: true }));
+    await settle();
+    assert.equal(note.system.deleted, null, "the player's delete is only a request; no GM applied it");
+    assert.equal(env.notifications.slice(before).filter(([level, text]) =>
+      level === "info" && text.includes("Deleted")).length, 0,
+    "no success notice is shown before the GM acknowledges the delete");
+
+    const beforeUndo = env.socketLog.length;
+    canvasRoot.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "z", code: "KeyZ", ctrlKey: true, bubbles: true, cancelable: true
+    }));
+    await settle();
+    const sent = env.socketLog.slice(beforeUndo).map(entry => entry.message);
+    assert.ok(sent.some(message => message.type === "restoreNote" && message.noteId === note.id),
+      "Ctrl+Z still consumes the queued delete and asks for a restore when the write never landed");
+  } finally {
+    restoreUsers();
+    app._onClose();
+    host.remove();
+    game.user = gmUser;
+    await requestWrite({ type: "deleteNote", noteId: note.id });
+    await requestWrite({ type: "restoreNote", noteId: note.id });
+  }
+});
+
+test("rapid repeated shared Delete opens a single confirmation", async () => {
+  await requestWrite({ type: "createNote", title: "Rapid Delete Alpha", x: 6900, y: 0 });
+  await requestWrite({ type: "createNote", title: "Rapid Delete Beta", x: 7200, y: 0 });
+  await settle();
+  const alpha = sharedByName("Rapid Delete Alpha");
+  const beta = sharedByName("Rapid Delete Beta");
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  const dialog = foundry.applications.api.DialogV2;
+  const originalConfirm = dialog.confirm;
+  let confirmations = 0;
+  dialog.confirm = async () => { confirmations += 1; return false; };
+  try {
+    await redraw();
+    const canvasRoot = host.querySelector(".jn-canvas");
+    clickCanvasCard({ root: canvasRoot }, alpha.id);
+    clickCanvasCard({ root: canvasRoot }, beta.id, { ctrlKey: true });
+    const pressDelete = () => canvasRoot.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Backspace", bubbles: true, cancelable: true })
+    );
+    pressDelete();
+    pressDelete();
+    pressDelete();
+    assert.equal(confirmations, 1, "a held or mashed Delete key cannot stack confirmations");
+    await settle();
+    assert.equal(alpha.system.deleted, null, "a cancelled confirmation deletes nothing");
+    assert.equal(beta.system.deleted, null, "a cancelled confirmation deletes nothing");
+    pressDelete();
+    assert.equal(confirmations, 2, "after cancelling, Delete can ask again");
+    await settle();
+  } finally {
+    dialog.confirm = originalConfirm;
+    app._onClose();
+    host.remove();
+  }
+});
+
+test("rapid repeated private Delete opens a single confirmation", async () => {
+  const user = makeUser("RapidPip0000001", { name: "Rapid Pip" });
+  const restoreUsers = installExtraUsers([user]);
+  const { page, ids } = await addPrivateFixtureNotes(user, ["Rapid Private A", "Rapid Private B"]);
+  game.user = user;
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  const dialog = foundry.applications.api.DialogV2;
+  const originalConfirm = dialog.confirm;
+  let confirmations = 0;
+  dialog.confirm = async () => { confirmations += 1; return false; };
+  try {
+    await redraw();
+    await openPrivateView(app, host, redraw);
+    const canvasRoot = host.querySelector(".jn-canvas");
+    clickCanvasCard({ root: canvasRoot }, ids[0]);
+    clickCanvasCard({ root: canvasRoot }, ids[1], { ctrlKey: true });
+    const pressDelete = () => canvasRoot.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Delete", bubbles: true, cancelable: true })
+    );
+    pressDelete();
+    pressDelete();
+    pressDelete();
+    assert.equal(confirmations, 1, "a held or mashed Delete key cannot stack private confirmations");
+    await settle();
+    const workspace = privateStore.read(page);
+    assert.ok(workspace.notes[ids[0]] && workspace.notes[ids[1]], "cancelling keeps both private notes");
+    pressDelete();
+    assert.equal(confirmations, 2, "after cancelling, private Delete can ask again");
+    await settle();
+  } finally {
+    dialog.confirm = originalConfirm;
+    restoreUsers();
+    app._onClose();
+    host.remove();
+    game.user = gmUser;
+    await privateStore.remove(page);
+  }
+});
+
+test("private multi-delete then Ctrl+Z restores the whole batch", async () => {
+  const user = makeUser("UndoPip00000001", { name: "Undo Pip" });
+  const restoreUsers = installExtraUsers([user]);
+  const { page, ids } = await addPrivateFixtureNotes(user, ["Undo Private A", "Undo Private B"]);
+  game.user = user;
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  try {
+    await redraw();
+    await openPrivateView(app, host, redraw);
+    const canvasRoot = host.querySelector(".jn-canvas");
+    clickCanvasCard({ root: canvasRoot }, ids[0]);
+    clickCanvasCard({ root: canvasRoot }, ids[1], { ctrlKey: true });
+    answers.push(true);
+    canvasRoot.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true, cancelable: true }));
+    await settle();
+    await redraw();
+    let workspace = privateStore.read(page);
+    assert.equal(workspace.notes[ids[0]], undefined, "both notes were deleted");
+    assert.equal(workspace.notes[ids[1]], undefined, "both notes were deleted");
+    assert.equal(workspace.trash.length, 2, "the batch is recoverable from the private trash");
+
+    const afterDelete = host.querySelector(".jn-canvas");
+    afterDelete.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "z", code: "KeyZ", ctrlKey: true, bubbles: true, cancelable: true
+    }));
+    await settle();
+    await redraw();
+    workspace = privateStore.read(page);
+    assert.ok(workspace.notes[ids[0]], "Ctrl+Z restores the first note in the batch");
+    assert.ok(workspace.notes[ids[1]], "Ctrl+Z restores the second note in the batch");
+    assert.equal(workspace.trash.length, 0, "the restored batch leaves the trash empty");
+  } finally {
+    restoreUsers();
+    app._onClose();
+    host.remove();
+    game.user = gmUser;
+    await privateStore.remove(page);
+  }
+});
+
+test("private trash restores legacy entries by note id and empties on confirmation", async () => {
+  const user = makeUser("LegacyTrashPip01", { name: "Legacy Trash Pip" });
+  const restoreUsers = installExtraUsers([user]);
+  const { page } = await addPrivateFixtureNotes(user, []);
+  game.user = user;
+  const workspace = new PrivateWorkspace({ onChange() {} });
+  const makeLegacyTrash = async title => {
+    const data = privateStore.read(page);
+    const made = privateStore.makeNote({
+      title, style: "memo", x: 8000, y: 8000, cards: data.layout.cards
+    });
+    made.note.blocks = [{ blockId: foundry.utils.randomID(), text: `${title} body` }];
+    data.trash.unshift({ note: made.note, card: made.card, deletedAt: Date.now() });
+    await privateStore.save(page, data, privateStore.flags(page).rev ?? 0);
+    return made.note.id;
+  };
+  try {
+    const legacyId = await makeLegacyTrash("Legacy Trash Note");
+    const withOrphan = privateStore.read(page);
+    withOrphan.trash.unshift({ card: { x: 0, y: 0 }, deletedAt: Date.now() });
+    await privateStore.save(page, withOrphan, privateStore.flags(page).rev ?? 0);
+    workspace.setPage(page);
+    await workspace.openTrash();
+    const restoreDialog = renderLastDialog();
+    assert.equal(restoreDialog.element.querySelector('[data-id="undefined"]'), null,
+      "a legacy card-only entry is not offered as a restore row");
+    const restoreButton = restoreDialog.element.querySelector(`.jn-trash-restore[data-id="${legacyId}"]`);
+    assert.ok(restoreButton, "a trash entry without undoId is keyed by its note id");
+    restoreButton.click();
+    await settle();
+    let data = privateStore.read(page);
+    assert.ok(data.notes[legacyId], "clicking Restore brings the legacy entry back");
+    assert.equal(data.trash.length, 1, "the restored legacy entry leaves the trash; the unusable orphan stays");
+
+    const firstId = await makeLegacyTrash("Empty Trash One");
+    const secondId = await makeLegacyTrash("Empty Trash Two");
+    workspace.setPage(page);
+    await workspace.openTrash();
+    const emptyDialog = renderLastDialog();
+    answers.push(true);
+    emptyDialog.element.querySelector(".jn-trash-empty").click();
+    await settle();
+    data = privateStore.read(page);
+    assert.equal(data.trash.length, 0, "confirmed Empty Trash clears every recoverable entry");
+    assert.equal(data.notes[firstId], undefined, "emptied notes are not restored");
+    assert.equal(data.notes[secondId], undefined, "emptied notes are not restored");
+
+    await workspace.openTrash();
+    const emptyState = renderLastDialog();
+    assert.ok(emptyState.element.textContent.includes(game.i18n.localize("JN.Trash.Empty")),
+      "an empty trash says so");
+    assert.equal(emptyState.element.querySelector(".jn-trash-empty"), null,
+      "there is nothing to empty when the trash is already empty");
+  } finally {
+    restoreUsers();
+    workspace.destroy();
+    game.user = gmUser;
+    await privateStore.remove(page);
+  }
+});
+
+test("shared trash restore clicks return a note to the board", async () => {
+  await requestWrite({ type: "createNote", title: "Trash Restore Click", x: 7500, y: 0 });
+  await settle();
+  const note = sharedByName("Trash Restore Click");
+  await requestWrite({ type: "deleteNote", noteId: note.id });
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  try {
+    await redraw();
+    host.querySelector(".journalinator-trash").click();
+    await settle();
+    const dialog = renderLastDialog();
+    const restoreButton = dialog.element.querySelector(`.jn-trash-restore[data-id="${note.id}"]`);
+    assert.ok(restoreButton, "the trashed note has a Restore button");
+    restoreButton.click();
+    await settle();
+    assert.equal(note.system.deleted, null, "clicking Restore brings the shared note back");
+    assert.deepEqual(dialog.closed, [true], "the trash dialog closes after restoring");
+  } finally {
+    app._onClose();
+    host.remove();
+  }
+});
+
+test("private save conflicts explain the reload and keep the latest workspace", async () => {
+  const user = makeUser("ConflictPip0001", { name: "Conflict Pip" });
+  const restoreUsers = installExtraUsers([user]);
+  const { page, ids } = await addPrivateFixtureNotes(user, ["Conflict Note"]);
+  game.user = user;
+  const workspace = new PrivateWorkspace({ onChange() {} });
+  workspace.setPage(page);
+  const originalSave = privateStore.save;
+  const before = env.notifications.length;
+  try {
+    privateStore.save = async () => { throw new Error(game.i18n.localize("JN.Private.SaveConflict")); };
+    const saved = await workspace.updateNote(ids[0], { label: "Unsaved local label" });
+    assert.equal(saved, false, "a conflicting save is reported as not applied");
+    const warnings = env.notifications.slice(before).filter(([level]) => level === "warn").map(([, text]) => text);
+    assert.ok(warnings.some(text => /another tab/i.test(text) && /unsaved local changes/i.test(text)),
+      "the warning explains who changed the space and that local changes were not saved");
+    assert.notEqual(privateStore.read(page).notes[ids[0]].label, "Unsaved local label",
+      "the latest reloaded workspace does not contain the unsaved local edit");
+  } finally {
+    privateStore.save = originalSave;
+    restoreUsers();
+    workspace.destroy();
+    game.user = gmUser;
+    await privateStore.remove(page);
+  }
+});
+
+test("search and filters show how many live notes are hidden, not deleted", async () => {
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  try {
+    await redraw();
+    const indicator = host.querySelector(".jn-filter-indicator");
+    assert.equal(indicator.hidden, true, "no indicator without a search or filter");
+
+    const search = host.querySelector(".journalinator-search");
+    search.value = "Tavern";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    assert.equal(indicator.hidden, false, "searching reveals the filter indicator");
+    assert.match(indicator.textContent, /hidden by filter/, "the indicator names the hidden live notes");
+    assert.ok(Number(indicator.dataset.hiddenCount) > 0, "the hidden count is available to tests and users");
+
+    search.value = "";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    assert.equal(indicator.hidden, true, "clearing the search hides the indicator");
+
+    const style = host.querySelector('.journalinator-filters [data-kind="style"][value="document"]');
+    style.checked = true;
+    style.dispatchEvent(new Event("change", { bubbles: true }));
+    assert.equal(indicator.hidden, false, "an active style filter also reveals the indicator");
+    assert.ok(indicator.textContent.trim().length > 0, "the indicator always has a label while filtering");
+    style.checked = false;
+    style.dispatchEvent(new Event("change", { bubbles: true }));
+    assert.equal(indicator.hidden, true, "removing the last filter hides the indicator");
   } finally {
     app._onClose();
     host.remove();

@@ -33,6 +33,29 @@ These notes start with the small board and toolbar polish patches and cover the 
   another. The badge is derived per client from documents that client can already see; actor
   state is never copied into the shared journal.
 
+## 0.9.1 — Safe deletion and control-mode fixes
+
+- **Scene control no longer reopens on deactivation.** Foundry calls a scene control's
+  `onChange(event, active)` on both activation and deactivation. Journalinator now opens only for
+  the activating call, reuses the one rendered window, brings it to the front, and never renders a
+  closed instance. Closing the window returns the left control bar to **Tokens**; choosing another
+  control leaves Journalinator closed.
+- **Deletion confirmation and recovery.** Deleting a single note stays immediate but now says
+  **"Deleted N note(s). Restore from Trash or press Ctrl+Z."** Selecting several notes (shared or
+  private) asks for confirmation first; cancelling deletes nothing, including selected labels.
+- **Trash shows deletion details.** Each trash row now names who deleted a shared note and when,
+  or shows a neutral fallback when older data has no deletion metadata. Private trash rows show
+  when the notes were deleted. Both dialogs explain that trash contents are recoverable.
+- **Trash badge.** The Trash toolbar button shows a count badge while the shared or private trash
+  is non-empty, so missing notes are discoverable without opening the dialog. The badge floats in
+  the toolbar and reserves no canvas space.
+- **Private save conflicts are clearer.** The revision guard still refuses stale writes, and the
+  warning now explains that another tab or GM changed the private space, that the latest data was
+  reloaded, and that unsaved local changes were not saved.
+- **Filter state is visible.** A compact top-bar indicator reports **"N hidden by filter"** (or
+  **"Filtered"**) while search or style/author filters are active, so dimmed cards are not mistaken
+  for deleted notes. The stats window continues to disclose **trash not counted**.
+
 ## 0.9.0 — Fit view, private transfers, and live stats
 
 - **Fit all:** a new canvas control frames every note at once, with a safe zoom limit so tiny and

@@ -305,7 +305,7 @@ Layout:
 
 ## Branches
 
-- **`main`** — Journalinator, the active module (`fvtt-journalinator`, v0.9.0).
+- **`main`** — Journalinator, the active module (`fvtt-journalinator`, v0.9.1).
 - **`investigation-board`** — an earlier, independent realization of the same design, originally
   built by Larkar. It is a separate Foundry module
   (`investigation-board`, 0.3.0-alpha.1), kept for reference. It does

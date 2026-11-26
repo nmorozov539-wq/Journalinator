@@ -10,6 +10,7 @@ import { defaultNoteTitle, noteCreationPresentation, noteCreationStyle, promptNe
 import { noteFilterKey, noteMatchesQuery, notePresentationLabelKey, noteSearchLabel } from "./note-search.mjs";
 import { computeJournalStats, deriveSessions, selectLiveSharedNotes } from "../stats.mjs";
 import { CARD_STYLES, cardStyleKey } from "../styles/registry.mjs";
+import { defaultControlTarget } from "./scene-control.mjs";
 import { applyTheme, getTheme, listThemes } from "../styles/themes.mjs";
 import { SCENE_THEME_ID, clearSceneThemeCache, sceneTheme } from "../scene-palette.mjs";
 import { canUseGmTier } from "../secrets/access.mjs";
@@ -56,12 +57,47 @@ function tooltipAttrs(label) {
   return `${game.tooltip ? `data-tooltip="${text}" data-tooltip-direction="DOWN"` : `title="${text}"`} aria-label="${text}"`;
 }
 
-function toolbarButton(className, icon, label, disabled = false) {
+function toolbarButton(className, icon, label, disabled = false, badge = null) {
+  const count = Number.isFinite(badge) && badge > 0
+    ? `<span class="jn-toolbar-badge" aria-hidden="true">${badge}</span>` : "";
   return `<button type="button" class="jn-toolbar-icon ${className}"${disabled ? " disabled" : ""} ${tooltipAttrs(label)}>
-    <i class="fa-solid ${icon}" aria-hidden="true"></i></button>`;
+    <i class="fa-solid ${icon}" aria-hidden="true"></i>${count}</button>`;
 }
 
 const { ApplicationV2 } = foundry.applications.api;
+
+/**
+ * True while `_onClose` is restoring the token control. SceneControls fires a deactivating
+ * onChange for the journalinator control during that restore; init.mjs consults this guard so a
+ * close can never bounce back into opening the app again.
+ */
+let sceneControlRestoreDepth = 0;
+
+export function isRestoringSceneControl() {
+  return sceneControlRestoreDepth > 0;
+}
+
+/** Release the guard after the asynchronous SceneControls activation settles. */
+function restoreControlMode() {
+  const controls = globalThis.ui?.controls;
+  if (!controls || typeof controls.activate !== "function") return;
+  // Closing always returns to tokens/select. Foundry v14 stores the current control as a record,
+  // not a string, so there is no reliable "user picked something else" comparison to make here.
+  const target = defaultControlTarget(controls.controls);
+  if (!target) return;
+  sceneControlRestoreDepth += 1;
+  let result;
+  try {
+    result = controls.activate(target);
+  } catch (err) {
+    sceneControlRestoreDepth = Math.max(0, sceneControlRestoreDepth - 1);
+    console.error("Journalinator: could not restore the token control", err);
+    return;
+  }
+  Promise.resolve(result)
+    .catch(err => console.error("Journalinator: could not restore the token control", err))
+    .finally(() => { sceneControlRestoreDepth = Math.max(0, sceneControlRestoreDepth - 1); });
+}
 
 /** Filter keys are presentation semantics, not legacy style storage keys. */
 const NOTE_FILTERS = Object.freeze([
@@ -112,6 +148,11 @@ export default class JournalApp extends ApplicationV2 {
   // so a rejected or rolled-back operation can never consume a Ctrl+Z.
   #history = [];
   #clipboard = [];
+  // Undo entries are pushed when a delete request is sent so Ctrl+Z still works if the GM write
+  // later fails. The success notice, however, is delayed until every note in the batch is
+  // acknowledged; a rejected/rolled-back write sends no ack, so no false "Deleted N" appears.
+  #pendingDeleteAcks = new Map();
+  #deleteConfirmPending = false;
   #replacingHTML = false;
   #editor = new NoteEditor({
     boardOnly: true,
@@ -580,6 +621,10 @@ export default class JournalApp extends ApplicationV2 {
         this.#onPrivateTransferApplied(message);
         return;
       }
+      if (message.kind === "delete") {
+        this.#onDeleteApplied(message);
+        return;
+      }
       if (typeof message.undoId !== "string" || !message.undoId) return;
       if (message.kind === "route") {
         this.#pushHistory({ kind: "route", undoId: message.undoId });
@@ -670,7 +715,8 @@ export default class JournalApp extends ApplicationV2 {
 
       if (this.#view === "private") {
         if (!this.#private.canvas.root.contains(ev.target)) return;
-        if (ev.key === "Backspace" && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey) {
+        if ((ev.key === "Backspace" || ev.key === "Delete")
+            && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey) {
           consume();
           if (!ev.repeat) this.#private.deleteSelected();
           return;
@@ -685,7 +731,8 @@ export default class JournalApp extends ApplicationV2 {
 
       if (!this.#canvas.root.contains(ev.target) || !game.users.activeGM) return;
 
-      if (ev.key === "Backspace" && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey) {
+      if ((ev.key === "Backspace" || ev.key === "Delete")
+          && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey) {
         consume();
         if (ev.repeat) return;
         const labelIds = this.#canvas.getSelectedLabelIds();
@@ -695,13 +742,32 @@ export default class JournalApp extends ApplicationV2 {
           return page && !page.system.deleted;
         });
         if (!shared.length && !labelIds.length) return;
-        this.#canvas.clearSelection();
-        for (const labelId of labelIds) this.#removeLabel(labelId);
-        if (shared.length) {
+        const deleteSelection = () => {
+          this.#canvas.clearSelection();
+          for (const labelId of labelIds) this.#removeLabel(labelId);
+          if (!shared.length) return;
           const undoId = foundry.utils.randomID();
           this.#pushHistory({ kind: "delete", noteIds: shared, undoId });
+          this.#expectDeleteAcks(undoId, shared.length);
           for (const noteId of shared) requestWrite({ type: "deleteNote", noteId, undoId });
+        };
+        // One note stays a single, immediate action; a multi-selection is destructive enough to
+        // require an explicit confirmation. Cancelling must also leave selected labels untouched.
+        if (shared.length <= 1) {
+          deleteSelection();
+          return;
         }
+        // Ignore repeats (including key auto-repeat) while the confirmation is open, so holding
+        // or mashing Delete cannot stack several dialogs and delete the same selection twice.
+        if (this.#deleteConfirmPending) return;
+        this.#deleteConfirmPending = true;
+        void foundry.applications.api.DialogV2.confirm({
+          window: { title: t("JN.Delete.ConfirmTitle") },
+          content: `<p>${t("JN.Delete.ConfirmMultiple", { count: shared.length })}</p>`
+        }).then(confirmed => {
+          if (confirmed) deleteSelection();
+        }).catch(err => console.error("Journalinator: delete confirmation failed", err))
+          .finally(() => { this.#deleteConfirmPending = false; });
         return;
       }
 
@@ -743,12 +809,37 @@ export default class JournalApp extends ApplicationV2 {
     }
     this.#onToolbarPointerDown = null;
     this.#toolbarPointerTarget = null;
+    // Leaving the Journalinator control active after the window closes is what made the next
+    // SceneControls deactivation bounce the app open again. Return to tokens before announcing
+    // the close, and let init.mjs drop its instance reference through the hook.
+    restoreControlMode();
+    Hooks.callAll("journalinatorAppClosed", this);
   }
 
   #matchesQuery(note, q) {
     if (!q) return true;
     const author = game.users.get(note.system.authorId)?.name ?? "";
     return noteMatchesQuery(note, q, author);
+  }
+
+  /**
+   * Begins collecting per-note delete acknowledgements for one undo batch. The GM sends one ack
+   * per note; they are aggregated here by undoId so a multi-delete shows a single notice.
+   */
+  #expectDeleteAcks(undoId, count) {
+    if (typeof undoId !== "string" || !undoId || count < 1) return;
+    this.#pendingDeleteAcks.set(undoId, { expected: count, acked: 0 });
+  }
+
+  /** Counts a confirmed note deletion and shows the recovery notice once the batch is complete. */
+  #onDeleteApplied(message) {
+    if (typeof message.undoId !== "string" || !message.undoId) return;
+    const pending = this.#pendingDeleteAcks.get(message.undoId);
+    if (!pending) return;
+    pending.acked += 1;
+    if (pending.acked < pending.expected) return;
+    this.#pendingDeleteAcks.delete(message.undoId);
+    ui.notifications?.info(t("JN.Delete.Notice", { count: pending.acked }));
   }
 
   /** Append to the single chronological undo stack, capped like the old per-kind arrays. */
@@ -1074,7 +1165,12 @@ export default class JournalApp extends ApplicationV2 {
         { id: SCENE_THEME_ID, label: t("JN.Theme.Scene") }
       ],
       authors,
-      query: q
+      query: q,
+      // Toolbar badges only report recoverable notes; they float inside the button and never
+      // reserve canvas space.
+      trashCount: isPrivate
+        ? (privateData?.trash?.length ?? 0)
+        : notesStore.getTrashedNotes().length
     };
   }
 
@@ -1093,6 +1189,8 @@ export default class JournalApp extends ApplicationV2 {
     const offline = !context.gmOnline;
     const privatePage = context.privatePage;
     const incomingCount = privateView ? this.#pendingIncoming().length : 0;
+    const trashCount = context.trashCount ?? 0;
+    const trashLabel = t(trashCount > 0 ? "JN.TopBar.TrashCount" : "JN.TopBar.Trash", { count: trashCount });
     const filters = (items, selected, kind) => items.map(([id, label, color]) =>
       `<label class="jn-menu-option"><input type="checkbox" data-kind="${kind}" value="${escape(id)}"
         ${selected.has(id) ? "checked" : ""}>${color ? `<span class="jn-dot" style="background:${escape(String(color))}"></span>` : ""}
@@ -1125,7 +1223,7 @@ export default class JournalApp extends ApplicationV2 {
         ${themePicker}
       </div>
       <div class="jn-toolbar-group">
-        ${toolbarButton("journalinator-trash", "fa-trash", t("JN.TopBar.Trash"))}
+        ${toolbarButton("journalinator-trash", "fa-trash", trashLabel, false, trashCount)}
         ${toolbarButton("journalinator-stats", "fa-chart-column", t("JN.TopBar.Stats"))}
         ${toolbarButton("journalinator-fit", "fa-expand", t("JN.TopBar.FitAll"))}
       </div>`;
@@ -1154,7 +1252,7 @@ export default class JournalApp extends ApplicationV2 {
       </div>
       <div class="jn-toolbar-group">
         ${privatePage ? toolbarButton("journalinator-private-stats", "fa-chart-column", t("JN.TopBar.Stats")) : ""}
-        ${privatePage ? toolbarButton("journalinator-trash", "fa-trash", t("JN.TopBar.Trash")) : ""}
+        ${privatePage ? toolbarButton("journalinator-trash", "fa-trash", trashLabel, false, trashCount) : ""}
         ${privatePage ? toolbarButton("journalinator-private-fit", "fa-expand", t("JN.TopBar.FitAll")) : ""}
         ${toolbarButton("journalinator-private-send", "fa-paper-plane",
           offline ? t("JN.Private.NeedGM") : t("JN.Transfer.SendTo"), true)}
@@ -1183,6 +1281,7 @@ export default class JournalApp extends ApplicationV2 {
             placeholder="${t(privateView ? "JN.Private.Search" : "JN.TopBar.Search")}" value="${foundry.utils.escapeHTML(this.#query)}">
           <div class="jn-switcher"></div>
         </div>
+        <span class="jn-filter-indicator" role="status" aria-live="polite" hidden></span>
         <div class="jn-toolbar-tools">
           ${privateView ? privateToolbar : sharedToolbar}
         </div>
@@ -1204,6 +1303,8 @@ export default class JournalApp extends ApplicationV2 {
         <div class="jn-transfer-popover journalinator-transfer-inbox-panel" role="dialog"
           aria-labelledby="jn-transfer-inbox-title" hidden></div>` : ""}
     `;
+
+    this.#updateFilterIndicator(root);
 
     if (privateView) {
       this.#private.setPage(privatePage);
@@ -1492,6 +1593,7 @@ export default class JournalApp extends ApplicationV2 {
       });
     });
     this.#syncSelectionControls();
+    this.#updateFilterIndicator(root);
   }
 
   #switcherList(allNotes) {
@@ -1506,6 +1608,34 @@ export default class JournalApp extends ApplicationV2 {
     const match = note => this.#matchesQuery(note, q) && this.#matchesFilters(note);
     if (this.#view === "private") this.#private.setDimMatch(match);
     else this.#canvas.setDimMatch(match);
+    this.#updateFilterIndicator();
+  }
+
+  /**
+   * Small, non-interactive search/filter status in the top bar. Dimmed cards can look like
+   * missing notes; this says how many live notes are hidden and disappears when no filter is on.
+   */
+  #updateFilterIndicator(root = this.element) {
+    const indicator = root?.querySelector?.(".jn-filter-indicator");
+    if (!indicator) return;
+    const active = !!this.#query.trim() || this.#filterStyles.size > 0 || this.#filterAuthors.size > 0;
+    if (!active) {
+      indicator.hidden = true;
+      indicator.textContent = "";
+      delete indicator.dataset.hiddenCount;
+      indicator.removeAttribute("title");
+      return;
+    }
+    const q = this.#query.trim().toLowerCase();
+    const allNotes = this.#activeNotes();
+    const visible = allNotes.filter(note => this.#matchesQuery(note, q) && this.#matchesFilters(note)).length;
+    const hidden = Math.max(0, allNotes.length - visible);
+    indicator.hidden = false;
+    indicator.dataset.hiddenCount = String(hidden);
+    indicator.textContent = hidden > 0
+      ? t("JN.Filter.HiddenCount", { count: hidden })
+      : t("JN.Filter.Active");
+    indicator.title = t("JN.Filter.IndicatorHint");
   }
 
   #renderSwitcher(root, allNotes) {
@@ -1668,13 +1798,28 @@ export default class JournalApp extends ApplicationV2 {
   async #openTrash() {
     const offline = !game.users.activeGM;
     const trashed = notesStore.getTrashedNotes();
+    const dateText = at => Number.isFinite(at)
+      ? new Date(at).toLocaleString(game.i18n?.lang || undefined) : "";
+    const metadata = note => {
+      const deleted = note.system?.deleted;
+      const by = deleted?.by ? game.users.get(deleted.by)?.name ?? t("JN.Common.Unknown") : "";
+      const date = dateText(deleted?.at);
+      if (!by && !date) return `<span class="jn-trash-meta">${t("JN.Trash.MetadataUnknown")}</span>`;
+      const text = by && date
+        ? t("JN.Trash.DeletedMeta", { name: foundry.utils.escapeHTML(by), date: foundry.utils.escapeHTML(date) })
+        : (by
+          ? t("JN.Trash.DeletedBy", { name: foundry.utils.escapeHTML(by) })
+          : t("JN.Trash.DeletedDate", { date: foundry.utils.escapeHTML(date) }));
+      return `<span class="jn-trash-meta">${text}</span>`;
+    };
     const rows = trashed
-      .map(n => `<div class="jn-trash-row"><span>${foundry.utils.escapeHTML(n.name)}</span><button type="button" class="jn-trash-restore" data-id="${n._id}"${offline ? " disabled" : ""}>${t("JN.Common.Restore")}</button></div>`)
+      .map(n => `<div class="jn-trash-row"><span class="jn-trash-title">${foundry.utils.escapeHTML(n.name)}</span>${metadata(n)}<button type="button" class="jn-trash-restore" data-id="${n._id}"${offline ? " disabled" : ""}>${t("JN.Common.Restore")}</button></div>`)
       .join("") || `<p class="journalinator-empty">${t("JN.Trash.Empty")}</p>`;
 
     await foundry.applications.api.DialogV2.wait({
       window: { title: t("JN.Trash.Title") },
-      content: `<div class="jn-trash-list">${rows}</div>` +
+      content: (trashed.length ? `<p class="jn-trash-hint">${t("JN.Trash.RecoverableHint")}</p>` : "")
+        + `<div class="jn-trash-list">${rows}</div>` +
         (game.user.isGM && trashed.length ? `<button type="button" class="jn-trash-empty">${t("JN.Trash.EmptyButton")}</button>` : ""),
       buttons: [{ action: "close", label: t("JN.Common.Close"), default: true }],
       rejectClose: false,

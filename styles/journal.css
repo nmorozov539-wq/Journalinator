@@ -320,6 +320,38 @@
   cursor: not-allowed;
 }
 
+/* Counts sit inside the existing icon button, so they are visible without reserving board space. */
+.jn-toolbar-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--jn-danger);
+  color: #fff;
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+  pointer-events: none;
+}
+
+/* Search/filter status beside the search box: dimmed cards are still present, just filtered. */
+.jn-filter-indicator {
+  flex: none;
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 4px 7px;
+  border: 1px solid var(--jn-line);
+  border-radius: 999px;
+  color: var(--jn-muted);
+  font-size: 11px;
+  cursor: default;
+}
+
 /* Private transfer inbox badge and screen-space panels. They float over the canvas/topbar
    instead of consuming layout space, matching the existing toolbar popovers. */
 .jn-transfer-badge {
@@ -572,6 +604,24 @@
   background: var(--jn-bg);
   border: 1px solid var(--jn-line);
   border-radius: 6px;
+}
+.jn-trash-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.jn-trash-meta {
+  flex: none;
+  color: var(--jn-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.jn-trash-hint {
+  margin: 0 0 8px;
+  color: var(--jn-muted);
+  font-size: 12px;
 }
 .jn-trash-restore,
 .jn-trash-empty {

@@ -580,6 +580,7 @@ export default class NoteEditor {
       }
       this.#stopEditing();
       requestWrite({ type: "deleteNote", noteId });
+      ui.notifications?.info(t("JN.Delete.Notice", { count: 1 }));
     });
 
     this.root.querySelectorAll(".journalinator-chip").forEach(el => {
