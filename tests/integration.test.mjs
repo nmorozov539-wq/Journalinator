@@ -622,6 +622,85 @@ test("presentation, label and attachment handlers roundtrip and reject invalid b
   assert.equal(note.name, originalName);
 });
 
+test("bulk cosmetic batch writes cover every selected note and leave content, labels, images and links alone", async () => {
+  await fromPlayer({ type: "createNote", title: "Bulk One", x: 0, y: 400 });
+  await fromPlayer({ type: "createNote", title: "Bulk Two", x: 300, y: 400 });
+  const one = sharedByName("Bulk One");
+  const two = sharedByName("Bulk Two");
+  await requestWrite({ type: "setNoteLabel", noteId: one.id, label: "One label" });
+  await requestWrite({ type: "setNoteImage", noteId: one.id, image: "assets/stylized/cork.svg" });
+  await requestWrite({ type: "createLink", sourceId: one.id, targetId: two.id, sourceSide: "right", targetSide: "left" });
+  const snapshot = note => JSON.parse(JSON.stringify({
+    label: note.system.label,
+    blocks: note.system.blocks,
+    image: note.system.image,
+    links: note.system.links,
+    kind: note.system.kind,
+    attachment: note.system.attachment
+  }));
+  const beforeOne = snapshot(one);
+  const beforeTwo = snapshot(two);
+  const linkBefore = JSON.stringify(one.system.links);
+
+  await fromPlayer({
+    type: "setNotePresentation", noteIds: [one.id, two.id],
+    fields: { extendedStyle: "document", font: "serif", pictureLayout: "right", torn: true }
+  });
+  for (const note of [one, two]) {
+    assert.equal(note.system.presentation.extendedStyle, "document");
+    assert.equal(note.system.presentation.font, "serif");
+    assert.equal(note.system.presentation.pictureLayout, "right");
+    assert.equal(note.system.presentation.torn, true);
+    assert.equal(note.system.presentation.forceExtended, false, "bulk never forces extended");
+  }
+  assert.equal(one.system.label, beforeOne.label, "label untouched");
+  assert.deepEqual(one.system.blocks, beforeOne.blocks, "content untouched");
+  assert.equal(one.system.image, beforeOne.image, "image untouched");
+  assert.equal(JSON.stringify(one.system.links), linkBefore, "link topology untouched");
+  assert.deepEqual(two.system.blocks, beforeTwo.blocks);
+
+  await fromPlayer({
+    type: "setNoteAttachment", noteIds: [one.id, two.id], fields: { pinStyle: "iron" }
+  });
+  for (const note of [one, two]) {
+    assert.equal(note.system.attachment.pinStyle, "iron");
+    assert.equal(note.system.attachment.mainPinEnabled, true, "bulk never disables a pin");
+    assert.equal(note.system.attachment.mainSnapRadius, 24, "bulk never changes snap radii");
+    assert.equal(note.system.attachment.minorSnapRadius, 6);
+  }
+  assert.equal(two.system.label, beforeTwo.label);
+  assert.equal(two.system.image, beforeTwo.image);
+  assert.equal(JSON.stringify(one.system.links), linkBefore);
+});
+
+test("setNotePresentation rejects forceExtended on any batch, including duplicate ids", async () => {
+  const one = sharedByName("Bulk One");
+  const two = sharedByName("Bulk Two");
+  await fromPlayer({
+    type: "setNotePresentation", noteIds: [one.id, two.id],
+    fields: { forceExtended: false }
+  });
+  assert.equal(one.system.presentation.forceExtended, false, "two ids reject the whole batch");
+  assert.equal(two.system.presentation.forceExtended, false);
+
+  await fromPlayer({
+    type: "setNotePresentation", noteIds: [one.id, one.id],
+    fields: { forceExtended: true, font: "serif" }
+  });
+  assert.equal(one.system.presentation.forceExtended, false,
+    "duplicate ids are still a batch and never widen force-context");
+  assert.equal(one.system.presentation.font, "serif",
+    "the whole patch is rejected, not partially written");
+
+  await fromPlayer({
+    type: "setNotePresentation", noteIds: [one.id], fields: { forceExtended: true }
+  });
+  assert.equal(one.system.presentation.forceExtended, true, "a true single-note request still works");
+  await fromPlayer({
+    type: "setNotePresentation", noteIds: [one.id], fields: { forceExtended: false }
+  });
+});
+
 test("presentation force/font/layout roundtrip keeps the internal name separate from the label", async () => {
   const note = sharedByName("Presentation Fixture");
   const originalName = note.name;

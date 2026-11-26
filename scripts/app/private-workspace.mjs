@@ -7,7 +7,7 @@ import { anchorSide, validAnchorId } from "../anchors.mjs";
 import { isLinkColor, normalizeLinkColor } from "../link-colors.mjs";
 import {
   LINK_ENDS, LINK_MATERIALS, LINK_PATTERNS, LINK_SLACK, LINK_THICKNESS, MAX_CARD_ANCHORS,
-  NOTE_FONT_KEYS, PICTURE_LAYOUTS, PRESENTATION_STYLES,
+  NOTE_FONT_KEYS, PICTURE_LAYOUTS, PIN_STYLES, PRESENTATION_STYLES,
   defaultLinkCosmetics, isGeneratedTitle, legacyStylePresentation, resolveAttachment,
   resolvePresentation, sanitizeCardAnchors, stripSecretPrefix
 } from "../presentation.mjs";
@@ -75,7 +75,9 @@ export default class PrivateWorkspace {
       onDeleteLink: (noteId, linkId) => this.deleteLink(noteId, linkId),
       onAddCardAnchor: (noteId, anchor) => this.addCardAnchor(noteId, anchor),
       onMoveCardAnchor: (noteId, anchorId, x, y) => this.moveCardAnchor(noteId, anchorId, x, y),
-      onRemoveCardAnchor: (noteId, anchorId) => this.removeCardAnchor(noteId, anchorId)
+      onRemoveCardAnchor: (noteId, anchorId) => this.removeCardAnchor(noteId, anchorId),
+      onSetPresentation: (ids, fields) => this.setNotesPresentation(ids, fields),
+      onSetAttachment: (ids, fields) => this.setNotesAttachment(ids, fields)
     });
 
     this.editor = new PrivateNoteEditor({
@@ -279,6 +281,53 @@ export default class PrivateWorkspace {
       }
       if (Array.isArray(patch.blocks) && patch.blocks.length) note.blocks = patch.blocks;
       note.updatedAt = Date.now();
+    });
+  }
+
+  /**
+   * Cosmetic presentation batch for the floating toolbar. One save for the whole selection and
+   * only the allowlisted presentation fields; labels, blocks, images and links stay untouched.
+   */
+  setNotesPresentation(ids, fields = {}) {
+    const targets = ids.filter(id => this.workspace?.notes?.[id]);
+    if (!targets.length || !fields || typeof fields !== "object") return false;
+    const allowed = {};
+    if (PRESENTATION_STYLES.includes(fields.extendedStyle)) allowed.extendedStyle = fields.extendedStyle;
+    if (NOTE_FONT_KEYS.includes(fields.font)) allowed.font = fields.font;
+    if (PICTURE_LAYOUTS.includes(fields.pictureLayout)) allowed.pictureLayout = fields.pictureLayout;
+    if (typeof fields.torn === "boolean") allowed.torn = fields.torn;
+    if (typeof fields.forceExtended === "boolean" && targets.length === 1) {
+      allowed.forceExtended = fields.forceExtended;
+    }
+    if (!Object.keys(allowed).length) return false;
+    return this.#save(data => {
+      for (const id of targets) {
+        const note = data.notes[id];
+        if (!note) continue;
+        const resolved = resolvePresentation({ name: note.title, system: note });
+        const { label: _ignored, ...presentationFields } = resolved;
+        note.presentation = { ...presentationFields, ...allowed };
+        note.schemaVersion = 1;
+        note.updatedAt = Date.now();
+      }
+    });
+  }
+
+  /** Cosmetic pin appearance only; pin enable and snap radii stay out of bulk edits. */
+  setNotesAttachment(ids, fields = {}) {
+    const targets = ids.filter(id => this.workspace?.notes?.[id]);
+    if (!targets.length || !PIN_STYLES.includes(fields.pinStyle)) return false;
+    return this.#save(data => {
+      for (const id of targets) {
+        const note = data.notes[id];
+        if (!note) continue;
+        const current = resolveAttachment({ system: { attachment: note.attachment } });
+        note.attachment = resolveAttachment({
+          system: { attachment: { ...current, pinStyle: fields.pinStyle } }
+        });
+        note.schemaVersion = 1;
+        note.updatedAt = Date.now();
+      }
     });
   }
 

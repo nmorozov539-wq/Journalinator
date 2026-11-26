@@ -1316,6 +1316,9 @@ async function handleMessage(message, senderUserId) {
       const pages = liveSharedNotePages(shared, message.noteIds);
       const fields = sanitizePresentationFields(message.fields);
       if (!pages || !fields) return;
+      // `forceExtended` widens one card's renderer and is a single-note control only. A batch
+      // (or duplicate ids standing in for one) is rejected outright, never silently stripped.
+      if ("forceExtended" in fields && (pages.length !== 1 || message.noteIds.length !== 1)) return;
       for (const page of pages) {
         // Base on the resolved record, not just the stored block: a partial patch on a legacy
         // note must keep its legacy style/force/torn instead of dropping them.

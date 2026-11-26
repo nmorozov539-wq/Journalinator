@@ -1137,3 +1137,277 @@
     transition: none;
   }
 }
+
+/* --- Floating contextual toolbar ----------------------------------------------------------
+ * Screen-space child of .jn-canvas, outside the transformed .jn-world. Right-anchored, absolute
+ * and pointer-events scoped to its own surface, so it never reserves canvas width or changes
+ * pan/zoom/layout. Neutral dark application chrome, deliberately not parchment. */
+
+.jn-floating-toolbar {
+  position: absolute;
+  right: 13px;
+  top: 15px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  max-width: calc(100% - 26px);
+  padding: 4px;
+  border: 1px solid #4a3b2c;
+  border-radius: 10px;
+  background: #1b1611;
+  background: color-mix(in srgb, #1b1611 94%, transparent);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, .42);
+  color: #ece0cc;
+  font: 12px/1.25 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.jn-floating-toolbar[hidden],
+.jn-floating-popover[hidden] {
+  display: none;
+}
+
+.jn-ft-btn {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0;
+  min-width: 32px;
+  height: 30px;
+  padding: 0 7px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  transition: background-color .14s ease, border-color .14s ease, gap .16s ease;
+}
+.jn-ft-btn:hover,
+.jn-ft-btn:focus-visible {
+  gap: 6px;
+  background: #2a231b;
+  border-color: #5a472f;
+}
+.jn-ft-btn:focus-visible {
+  outline: 2px solid #e4c07a;
+  outline-offset: 1px;
+}
+.jn-ft-btn:disabled {
+  opacity: .4;
+  cursor: not-allowed;
+}
+.jn-ft-btn:disabled:hover,
+.jn-ft-btn:disabled:focus-visible {
+  gap: 0;
+  background: transparent;
+  border-color: transparent;
+  outline: none;
+}
+.jn-ft-btn:disabled:hover .jn-ft-label,
+.jn-ft-btn:disabled:focus-visible .jn-ft-label {
+  max-width: 0;
+  opacity: 0;
+}
+.jn-ft-label {
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  white-space: nowrap;
+  transition: max-width .16s ease, opacity .16s ease;
+}
+.jn-ft-btn:hover .jn-ft-label,
+.jn-ft-btn:focus-visible .jn-ft-label {
+  max-width: 220px;
+  opacity: 1;
+}
+.jn-ft-btn > i {
+  flex: 0 0 16px;
+  width: 16px;
+  text-align: center;
+  font-size: 13px;
+}
+
+.jn-floating-popover {
+  position: absolute;
+  z-index: 5;
+  box-sizing: border-box;
+  width: min(250px, calc(100% - 76px));
+  max-height: calc(100% - 30px);
+  padding: 9px;
+  overflow: auto;
+  border: 1px solid #4a3b2c;
+  border-radius: 10px;
+  background: #1b1611;
+  background: color-mix(in srgb, #1b1611 96%, transparent);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .5);
+  color: #ece0cc;
+  font: 12px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.jn-ft-pop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #3d3023;
+}
+.jn-ft-pop-head b {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .01em;
+}
+.jn-ft-close {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #b8a98f;
+  cursor: pointer;
+}
+.jn-ft-close:hover,
+.jn-ft-close:focus-visible {
+  color: #ece0cc;
+  border-color: #55432f;
+}
+.jn-ft-close:focus-visible {
+  outline: 2px solid #e4c07a;
+  outline-offset: 1px;
+}
+
+.jn-ft-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 8px;
+  color: #cdbfa9;
+  font-size: 12px;
+}
+.jn-ft-field > span {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.jn-ft-field output {
+  color: #e4c07a;
+  font-variant-numeric: tabular-nums;
+}
+.jn-ft-input,
+.jn-ft-field input[type="number"],
+.jn-ft-field input[type="text"] {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 5px 6px;
+  border: 1px solid #55432f;
+  border-radius: 6px;
+  background: #241d16;
+  color: #ece0cc;
+}
+.jn-ft-input:focus-visible,
+.jn-ft-field input:focus-visible,
+.jn-ft-preset:focus-visible,
+.jn-ft-swatch:focus-visible,
+.jn-ft-auto:focus-visible {
+  outline: 2px solid #e4c07a;
+  outline-offset: 1px;
+}
+.jn-ft-field input[type="range"] {
+  width: 100%;
+  accent-color: #e4c07a;
+}
+.jn-ft-row {
+  display: flex;
+  gap: 8px;
+}
+.jn-ft-row .jn-ft-field {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.jn-ft-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 4px;
+  padding: 3px 1px;
+  color: #ece0cc;
+  cursor: pointer;
+}
+.jn-ft-check input {
+  accent-color: #e4c07a;
+}
+.jn-ft-auto {
+  width: 100%;
+  margin-top: 2px;
+  padding: 6px 8px;
+  border: 1px solid #55432f;
+  border-radius: 6px;
+  background: #241d16;
+  color: #ece0cc;
+  cursor: pointer;
+}
+.jn-ft-auto:hover {
+  border-color: #e4c07a;
+}
+
+.jn-ft-colors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 0 6px;
+}
+.jn-ft-swatch {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid #55432f;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.jn-ft-swatch.on {
+  box-shadow: 0 0 0 2px #ece0cc;
+}
+.jn-ft-swatch-default { background: var(--jn-thread, #caa56a); }
+.jn-ft-swatch-link1 { background: var(--jn-link-1, #c9c07a); }
+.jn-ft-swatch-link2 { background: var(--jn-link-2, #9fb59a); }
+.jn-ft-swatch-link3 { background: var(--jn-link-3, #b79bb5); }
+
+.jn-ft-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.jn-ft-preset {
+  padding: 5px 8px;
+  border: 1px solid #55432f;
+  border-radius: 6px;
+  background: #241d16;
+  color: #ece0cc;
+  cursor: pointer;
+}
+.jn-ft-preset:hover {
+  border-color: #e4c07a;
+}
+.jn-ft-note {
+  margin: 0;
+  color: #cdbfa9;
+  line-height: 1.45;
+}
+
+@media (max-width: 480px) {
+  .jn-floating-popover {
+    width: min(220px, calc(100% - 68px));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jn-ft-btn,
+  .jn-ft-label {
+    transition: none;
+  }
+}

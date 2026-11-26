@@ -171,3 +171,18 @@ Delivered:
 - Deleting/soft-deleting a routed note removes only its waypoints from all links (including trashed owners); links survive, restore does not reattach. Delete thread leaves note. Detach action/undo exposed.
 - Server rejection notices for cap/duplicate/stale/pin-off/typed/missing; stale route entries pruned-and-continue; secret/hidden routing rejected; final leak dump remains last.
 - Tests: **347 pass / 0 fail**; syntax pass; 19+ new route tests. Ongoing limitation: session-local active-GM undo, split crash window on fake-Foundry fallback only.
+
+### Phase 7 — floating contextual toolbar and cosmetic bulk edits
+
+Implementation agent: `ses_de6d64d55ffezpgznJRimB4JFk`; fixes `ses_de6bb29d6ffe1njMT26iDSs5xF`.
+Validation: `ses_de6c64aa6ffeCU1EAiq4YClWZk`.
+
+Delivered:
+- Screen-space floating toolbar as a direct `.jn-canvas` child at the right edge; no reserved width, no world/pan/layout changes; icon-only resting with leftward hover/focus label expansion; anchored popovers with outside/Escape/selection-close, focus entry/return, keyboard labels, reduced motion.
+- Single-note controls: style, force extended, font, picture layout, torn, pin appearance, dimensions + Auto. Multi-note: intersection of cosmetic controls only, Mixed state, no bulk force/dimensions/label/content/image/permissions/links/topology/anchors/pin enable/snap. Secret multi-selection disabled with explanation.
+- Link controls: material, thickness, slack, color, pattern, ends, label, presets; change-only writes. Existing link toolbar/context menu/editor retained.
+- Bulk writes: shared batches via setNotePresentation/setNoteAttachment; single secret via vault; private via one save. Client aborts stale/mixed-tier selections; socket strips forceExtended for multi-note batches.
+- Popover clamps inside canvas at 320/430/1400 widths and re-clamps on resize; focus retention across re-render; selection no longer forces a full app render.
+- Tests: **361 pass / 0 fail**; syntax pass; browser probe for narrow/wide popover bounds and no layout shift.
+
+Known scope note: multi-link bulk selection is not implemented (canvas has a single selected link); documented in code. Cosmetic edits inherit the existing collaborative write model.

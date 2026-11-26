@@ -9,7 +9,10 @@ import { noteImageSource } from "../image-url.mjs";
 import { hasAnyLock } from "../locks.mjs";
 import { renderMarkdown } from "../markdown.mjs";
 import { t } from "../i18n.mjs";
-import { classifyNote, resolveAttachment, resolveLinkCosmetics, resolvePresentation } from "../presentation.mjs";
+import {
+  NOTE_FONT_KEYS, PICTURE_LAYOUTS, PIN_STYLES,
+  classifyNote, resolveAttachment, resolveLinkCosmetics, resolvePresentation
+} from "../presentation.mjs";
 import { tearPoints, tearPolygon, tearSeed } from "../tear.mjs";
 import { MAX_ROUTE_ANCHORS } from "../route-notes.mjs";
 import { DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, STAMP_CORNERS, STAMP_IDS, stampUrl } from "../stamps.mjs";
@@ -83,6 +86,59 @@ const CREATE_WIDTHS = Object.freeze({
   location: 245
 });
 
+const FONT_LABEL_KEYS = Object.freeze({
+  default: "JN.Font.Default",
+  serif: "JN.Font.Serif",
+  hand: "JN.Font.Hand",
+  display: "JN.Font.Display"
+});
+const PICTURE_LABEL_KEYS = Object.freeze({
+  above: "JN.Picture.Above",
+  below: "JN.Picture.Below",
+  left: "JN.Picture.Left",
+  right: "JN.Picture.Right"
+});
+const STYLE_LABEL_KEYS = Object.freeze({
+  memo: "JN.Style.Memo",
+  document: "JN.Style.Document",
+  target: "JN.Style.Target"
+});
+const PIN_STYLE_LABEL_KEYS = Object.freeze({
+  default: "JN.Pin.Styles.Default",
+  enamel: "JN.Pin.Styles.Enamel",
+  brass: "JN.Pin.Styles.Brass",
+  iron: "JN.Pin.Styles.Iron",
+  wood: "JN.Pin.Styles.Wood",
+  decorative: "JN.Pin.Styles.Decorative",
+  wax: "JN.Pin.Styles.Wax"
+});
+
+// Floating-toolbar groups. Icons and label keys are data so the button list and popover
+// builder cannot drift apart. Cosmetic-only: no label/content/image/permission/topology action.
+const NOTE_TOOL_GROUPS = Object.freeze({
+  style: { icon: "fa-palette", label: "JN.Toolbar.Style" },
+  force: { icon: "fa-expand", label: "JN.Editor.ForceExtended" },
+  font: { icon: "fa-font", label: "JN.Editor.Font" },
+  picture: { icon: "fa-image", label: "JN.Editor.PictureLayout" },
+  torn: { icon: "fa-scissors", label: "JN.Editor.Torn" },
+  pin: { icon: "fa-thumbtack", label: "JN.Pin.Style" },
+  dimensions: { icon: "fa-ruler", label: "JN.Toolbar.Dimensions" },
+  locked: { icon: "fa-lock", label: "JN.Toolbar.BulkDisabled" }
+});
+// A26 multi-link bulk is intentionally out of scope for this canvas: selection is a single
+// `selectedLinkId`, so choosing another thread replaces it and the link popover edits one link.
+// (Multi-note cosmetic batches remain supported through `selectedNoteIds`.)
+const LINK_TOOL_GROUPS = Object.freeze({
+  material: { icon: "fa-layer-group", label: "JN.Link.Material" },
+  thickness: { icon: "fa-grip-lines", label: "JN.Link.Thickness" },
+  slack: { icon: "fa-wind", label: "JN.Link.Slack" },
+  color: { icon: "fa-palette", label: "JN.Link.Color.default" },
+  pattern: { icon: "fa-bars-staggered", label: "JN.Link.Pattern" },
+  ends: { icon: "fa-scissors", label: "JN.Link.Ends" },
+  label: { icon: "fa-tag", label: "JN.Link.Label" },
+  presets: { icon: "fa-wand-magic-sparkles", label: "JN.Link.Presets" }
+});
+
 /**
  * The note canvas: pan/zoom viewport, absolutely-positioned cards, free text labels, and now
  * drawn links between cards. Owns its own DOM subtree and pan/zoom state persistently —
@@ -100,6 +156,7 @@ export default class JournalCanvas {
     this.view = { x: 0, y: 0, k: 1 };
     this.hasCentered = false;
     this.notes = [];
+    this.notesById = new Map();
     this.layout = { cards: {}, labels: {}, viewport: null };
     this.cardEls = new Map();
     this.cardSizes = new Map();
@@ -129,6 +186,10 @@ export default class JournalCanvas {
     this.lastLinkClick = null;
     this.linkDrawTimer = null;
     this.cardResizeObserver = null;
+    // Screen-space overlays are clamped to the canvas. Their bounds are re-applied when the
+    // window or the canvas root changes size, with listeners owned by the canvas lifecycle.
+    this.rootResizeObserver = null;
+    this.windowResize = null;
     this.inlineText = null;
     this.linkPlacement = null;
     // Dropping a single note near a thread previews the target link. The chooser is built only
@@ -166,6 +227,8 @@ export default class JournalCanvas {
       <div class="jn-selection-box"></div>
       <div class="jn-context-menu"></div>
       <div class="jn-link-toolbar"></div>
+      <div class="jn-floating-toolbar" role="toolbar" aria-orientation="vertical" aria-label="${t("JN.Toolbar.Title")}" hidden></div>
+      <div class="jn-floating-popover" role="dialog" aria-label="${t("JN.Toolbar.Title")}" hidden></div>
       <div class="jn-link-placement-hint" role="status" hidden></div>
     `;
     this.world = this.root.querySelector(".jn-world");
@@ -175,6 +238,17 @@ export default class JournalCanvas {
     this.contextMenu = this.root.querySelector(".jn-context-menu");
     this.linkToolbar = this.root.querySelector(".jn-link-toolbar");
     this.linkPlacementHint = this.root.querySelector(".jn-link-placement-hint");
+    this.floatingToolbar = this.root.querySelector(".jn-floating-toolbar");
+    this.floatingPopover = this.root.querySelector(".jn-floating-popover");
+    this.floatingPopoverId = `jn-floating-popover-${threadMaskSequence}`;
+    this.floatingPopover.id = this.floatingPopoverId;
+    this.floatingToolbarSignature = "none";
+    this.floatingPopoverDismiss = null;
+    this.floatingPopoverKeydown = null;
+    this.floatingPopoverReturnFocus = null;
+    // Kept while the popover is open so a viewport/root resize can re-clamp it without
+    // guessing where the trigger went.
+    this.floatingPopoverAnchor = null;
     this.patchNotes = new PatchNotesPanel();
     this.patchNotes.appendTo(this.root);
 
@@ -183,6 +257,7 @@ export default class JournalCanvas {
 
   update(notes, layout, { dimMatch, deferGeometry = false } = {}) {
     this.notes = notes;
+    this.notesById = new Map(notes.map(note => [note._id, note]));
     this.layout = layout ?? { cards: {}, labels: {} };
     // A fresh layout is authoritative: any optimistic minor-pin override has either been
     // committed by now or was superseded by another client.
@@ -235,6 +310,7 @@ export default class JournalCanvas {
     }
 
     if (!deferGeometry) this.refreshGeometry();
+    this.#syncFloatingToolbar();
   }
 
   refreshGeometry() {
@@ -244,6 +320,9 @@ export default class JournalCanvas {
     }
     this.#applyTransform();
     this.#flushLinkDraw();
+    // Bind the overlay resize observer before the card observer so UI tests that stub the
+    // global ResizeObserver still receive card-size callbacks (the card observer is created last).
+    this.#bindGeometryResize();
     if (!this.cardResizeObserver && typeof ResizeObserver === "function") {
       this.cardResizeObserver = new ResizeObserver(entries => {
         // Drop only the cards that actually changed size; a plain drag keeps its cached box.
@@ -258,12 +337,55 @@ export default class JournalCanvas {
     }
   }
 
+  /**
+   * Screen-space overlays stay inside the canvas when the app window or canvas root resizes.
+   * Both listeners belong to the canvas instance and are removed in disconnectGeometry().
+   */
+  #bindGeometryResize() {
+    const view = this.root.ownerDocument.defaultView;
+    if (view && !this.windowResize) {
+      this.windowResize = () => this.#repositionFloatingPopoverOnResize();
+      view.addEventListener("resize", this.windowResize);
+    }
+    if (!this.rootResizeObserver && typeof ResizeObserver === "function") {
+      this.rootResizeObserver = new ResizeObserver(() => this.#repositionFloatingPopoverOnResize());
+      this.rootResizeObserver.observe(this.root, { box: "border-box" });
+    }
+  }
+
+  #unbindGeometryResize() {
+    if (this.windowResize) {
+      this.root.ownerDocument.defaultView?.removeEventListener("resize", this.windowResize);
+      this.windowResize = null;
+    }
+    this.rootResizeObserver?.disconnect();
+    this.rootResizeObserver = null;
+  }
+
+  #repositionFloatingPopoverOnResize() {
+    if (this.floatingPopover.hidden) return;
+    const anchor = this.floatingPopoverAnchor;
+    const rootRect = this.root.getBoundingClientRect();
+    if (!anchor?.isConnected || !this.root.isConnected
+        || rootRect.width <= 0 || rootRect.height <= 0) {
+      this.#closeFloatingPopover();
+      return;
+    }
+    this.#positionFloatingPopover(anchor, this.floatingPopover);
+  }
+
   disconnectGeometry() {
     this.cardResizeObserver?.disconnect();
     this.cardResizeObserver = null;
+    this.#unbindGeometryResize();
     if (this.linkDrawTimer !== null) clearTimeout(this.linkDrawTimer);
     this.linkDrawTimer = null;
     this.#unbindToolbarDismiss();
+    this.#closeFloatingPopover();
+    this.#hideLinkToolbar();
+    this.floatingToolbar.hidden = true;
+    this.floatingToolbar.replaceChildren();
+    this.floatingToolbarSignature = "none";
     if (this.threadFrame !== null) this.root.ownerDocument.defaultView.cancelAnimationFrame(this.threadFrame);
     if (this.zoomFrame !== null) this.root.ownerDocument.defaultView.cancelAnimationFrame(this.zoomFrame);
     this.threadFrame = this.threadTime = null;
@@ -1369,6 +1491,7 @@ export default class JournalCanvas {
     this.linkDrawTimer = null;
     this.#drawLinks();
     this.#syncLinkToolbar();
+    this.#syncFloatingToolbar();
   }
 
   #positionLinkToolbar(link) {
@@ -1381,6 +1504,7 @@ export default class JournalCanvas {
     const doc = this.root.ownerDocument;
     this.toolbarDismiss = ev => {
       if (this.linkToolbar.contains(ev.target)) return;
+      if (ev.target.closest?.(".jn-floating-toolbar, .jn-floating-popover")) return;
       this.#closeLinkToolbar();
     };
     doc.addEventListener("pointerdown", this.toolbarDismiss, true);
@@ -1576,6 +1700,514 @@ export default class JournalCanvas {
     for (const group of this.svg.querySelectorAll("g[data-id]")) {
       group.classList.toggle("jn-link-selected", group.dataset.id === this.selectedLinkId);
     }
+    this.#syncFloatingToolbar();
+  }
+
+  // --- Floating contextual toolbar ---------------------------------------------------------
+  // Screen-space overlay anchored to the canvas edge, never inside `.jn-world`. It only opens a
+  // popover on demand, so selection sync is O(selected) and never builds controls per render.
+
+  #floatingSelection() {
+    const link = this.selectedLinkId ? this.linksById.get(this.selectedLinkId) : null;
+    if (link) return { kind: "link", link, ids: [], notes: [] };
+    const ids = this.getSelectedNoteIds();
+    if (!ids.length) return null;
+    const notes = ids.map(id => this.notesById.get(id)).filter(Boolean);
+    return notes.length ? { kind: "notes", notes, ids: notes.map(note => note._id) } : null;
+  }
+
+  #syncFloatingToolbar() {
+    const selection = this.#floatingSelection();
+    const signature = selection
+      ? (selection.kind === "link"
+        ? `link:${selection.link.id}:${this.readOnly ? 1 : 0}`
+        : `notes:${selection.ids.join(",")}:${this.readOnly ? 1 : 0}:${selection.notes.some(note => note.secret) ? 1 : 0}:${this.#pinsOn() ? 1 : 0}`)
+      : "none";
+    if (signature === this.floatingToolbarSignature) return;
+    this.floatingToolbarSignature = signature;
+    this.#closeFloatingPopover();
+    if (!selection) {
+      this.floatingToolbar.hidden = true;
+      this.floatingToolbar.replaceChildren();
+      return;
+    }
+    this.floatingToolbar.replaceChildren(...this.#floatingButtons(selection));
+    this.floatingToolbar.hidden = false;
+  }
+
+  #floatingButton(group, definition, disabled) {
+    const label = t(definition.label);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `jn-ft-btn jn-ft-btn-${group}`;
+    button.dataset.group = group;
+    const accessible = disabled
+      ? `${label} — ${t(this.readOnly ? "JN.Toolbar.ReadOnly" : "JN.Toolbar.Disabled")}`
+      : label;
+    button.setAttribute("aria-label", accessible);
+    button.setAttribute("title", accessible);
+    button.setAttribute("aria-haspopup", "dialog");
+    button.setAttribute("aria-controls", this.floatingPopoverId);
+    button.setAttribute("aria-expanded", "false");
+    button.disabled = !!disabled;
+    button.innerHTML = `<span class="jn-ft-label" aria-hidden="true">${foundry.utils.escapeHTML(label)}</span>`
+      + `<i class="fa-solid ${definition.icon}" aria-hidden="true"></i>`;
+    if (!disabled) {
+      button.addEventListener("click", event => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.#openFloatingPopover(group, button);
+      });
+    }
+    return button;
+  }
+
+  #floatingButtons(selection) {
+    if (selection.kind === "link") {
+      return Object.entries(LINK_TOOL_GROUPS).map(([group, definition]) =>
+        this.#floatingButton(group, definition, this.readOnly));
+    }
+    const single = selection.notes.length === 1;
+    const secretMixed = !single && selection.notes.some(note => note.secret);
+    const disabled = this.readOnly || secretMixed;
+    const groups = ["style"];
+    if (single) groups.push("force");
+    groups.push("font", "picture", "torn");
+    if (this.#pinsOn()) groups.push("pin");
+    if (single) groups.push("dimensions");
+    const buttons = [];
+    // Mixed shared + GM-only multi-selection: bulk writes are disabled with an explicit reason
+    // instead of partially applying to one tier and leaking the difference.
+    if (secretMixed) buttons.push(this.#floatingButton("locked", NOTE_TOOL_GROUPS.locked, false));
+    for (const group of groups) buttons.push(this.#floatingButton(group, NOTE_TOOL_GROUPS[group], disabled));
+    return buttons;
+  }
+
+  #openFloatingPopover(group, button) {
+    const selection = this.#floatingSelection();
+    if (!selection) return;
+    if (selection.kind === "link" && !LINK_TOOL_GROUPS[group]) return;
+    if (selection.kind === "notes") {
+      if (!NOTE_TOOL_GROUPS[group]) return;
+      if ((group === "force" || group === "dimensions") && selection.notes.length !== 1) return;
+      if (this.readOnly && group !== "locked") return;
+      if (group !== "locked" && selection.notes.length > 1 && selection.notes.some(note => note.secret)) return;
+    } else if (this.readOnly) return;
+
+    const payload = selection.kind === "link"
+      ? this.#linkPopover(group, selection.link)
+      : this.#notePopover(group, selection);
+    if (!payload) return;
+
+    this.#closeFloatingPopover();
+    const el = this.floatingPopover;
+    const closeLabel = t("JN.Toolbar.Close");
+    el.dataset.group = group;
+    el.innerHTML = `
+      <div class="jn-ft-pop-head">
+        <b>${foundry.utils.escapeHTML(payload.title)}</b>
+        <button type="button" class="jn-ft-close" aria-label="${foundry.utils.escapeHTML(closeLabel)}"
+          title="${foundry.utils.escapeHTML(closeLabel)}"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+      </div>
+      <div class="jn-ft-pop-body">${payload.html}</div>
+    `;
+    el.hidden = false;
+    this.floatingPopoverReturnFocus = button;
+    this.floatingPopoverAnchor = button;
+    button.setAttribute("aria-expanded", "true");
+    this.#positionFloatingPopover(button, el);
+
+    el.querySelector(".jn-ft-close").addEventListener("click", () => {
+      this.#closeFloatingPopover({ restoreFocus: true });
+    });
+    payload.bind(el);
+    this.#tagPopoverFocus(el);
+
+    const target = el.querySelector(".jn-ft-pop-body select, .jn-ft-pop-body input, .jn-ft-pop-body button")
+      ?? el.querySelector(".jn-ft-close");
+    target?.focus?.({ preventScroll: true });
+
+    const doc = this.root.ownerDocument;
+    this.floatingPopoverDismiss = event => {
+      if (this.floatingPopover.hidden) return;
+      if (this.floatingPopover.contains(event.target)
+          || event.target.closest?.(".jn-floating-toolbar")) return;
+      this.#closeFloatingPopover();
+    };
+    this.floatingPopoverKeydown = event => {
+      if (event.key !== "Escape" || this.floatingPopover.hidden) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.#closeFloatingPopover({ restoreFocus: true });
+    };
+    doc.addEventListener("pointerdown", this.floatingPopoverDismiss, true);
+    doc.addEventListener("keydown", this.floatingPopoverKeydown, true);
+  }
+
+  #closeFloatingPopover({ restoreFocus = false } = {}) {
+    const doc = this.root.ownerDocument;
+    if (this.floatingPopoverDismiss) {
+      doc.removeEventListener("pointerdown", this.floatingPopoverDismiss, true);
+      this.floatingPopoverDismiss = null;
+    }
+    if (this.floatingPopoverKeydown) {
+      doc.removeEventListener("keydown", this.floatingPopoverKeydown, true);
+      this.floatingPopoverKeydown = null;
+    }
+    const returnFocus = this.floatingPopoverReturnFocus;
+    returnFocus?.setAttribute("aria-expanded", "false");
+    this.floatingPopoverReturnFocus = null;
+    this.floatingPopoverAnchor = null;
+    if (!this.floatingPopover.hidden || this.floatingPopover.childElementCount) {
+      this.floatingPopover.hidden = true;
+      this.floatingPopover.replaceChildren();
+      this.floatingPopover.removeAttribute("style");
+      delete this.floatingPopover.dataset.group;
+    }
+    if (restoreFocus && returnFocus?.isConnected) {
+      returnFocus.focus({ preventScroll: true });
+    }
+  }
+
+  /** Gives each popover control a stable key so a rebuild can restore focus to the same field. */
+  #tagPopoverFocus(el) {
+    const controls = el.querySelectorAll("button, select, input, textarea, a[href]");
+    for (const [index, node] of [...controls].entries()) {
+      const classes = typeof node.className === "string" ? node.className.trim().split(/\s+/).filter(Boolean) : [];
+      const key = `pop-${index}-${classes.join("-") || node.tagName.toLowerCase()}`
+        .replace(/[^A-Za-z0-9_-]+/g, "-");
+      node.dataset.jnFocusKey = key;
+    }
+  }
+
+  #positionFloatingPopover(button, el) {
+    const rootRect = this.root.getBoundingClientRect();
+    const buttonRect = button.getBoundingClientRect();
+    const gap = 8;
+    const margin = 6;
+    // Re-measure from the CSS width every time: a previous narrow-canvas clamp must not stick
+    // after the app window grows again. `box-sizing: border-box` makes this the real outer width.
+    el.style.removeProperty("width");
+    el.style.removeProperty("max-width");
+    let popoverRect = el.getBoundingClientRect();
+    const maxWidth = Math.max(0, rootRect.width - margin * 2);
+    if (popoverRect.width > maxWidth) {
+      el.style.width = `${maxWidth}px`;
+      popoverRect = el.getBoundingClientRect();
+    }
+    // Prefer sitting to the left of the toolbar trigger; if that would overflow, place it to the
+    // right of the trigger and, finally, clamp both left and right edges inside the canvas.
+    const buttonLeft = buttonRect.left - rootRect.left;
+    const buttonRight = buttonRect.right - rootRect.left;
+    let left = buttonLeft - popoverRect.width - gap;
+    if (left < margin) left = buttonRight + gap;
+    const maxLeft = Math.max(margin, rootRect.width - popoverRect.width - margin);
+    left = Math.max(margin, Math.min(left, maxLeft));
+    const right = Math.max(margin, rootRect.width - left - popoverRect.width);
+    const maxTop = Math.max(margin, rootRect.height - popoverRect.height - margin);
+    const top = Math.max(margin, Math.min(buttonRect.top - rootRect.top, maxTop));
+    // Pin the measured border-box width too: left and right then describe the same box even in
+    // an RTL containing block, where an over-constrained absolute box prefers `right`.
+    if (popoverRect.width > 0) el.style.width = `${popoverRect.width}px`;
+    el.style.left = `${left}px`;
+    el.style.right = `${right}px`;
+    el.style.top = `${top}px`;
+    el.style.maxWidth = `${maxWidth}px`;
+  }
+
+  #common(values) {
+    const value = values[0];
+    return { value, mixed: values.some(candidate => candidate !== value) };
+  }
+
+  #selectField({ className, label, options, value, mixed }) {
+    const safeLabel = foundry.utils.escapeHTML(label);
+    const mixedOption = mixed
+      ? `<option value="" selected>${foundry.utils.escapeHTML(t("JN.Toolbar.Mixed"))}</option>` : "";
+    const choices = options.map(([option, text]) =>
+      `<option value="${foundry.utils.escapeHTML(option)}"${!mixed && option === value ? " selected" : ""}>`
+      + `${foundry.utils.escapeHTML(text)}</option>`).join("");
+    return `<label class="jn-ft-field"><span>${safeLabel}</span>
+      <select class="jn-ft-input ${className}" aria-label="${safeLabel}">${mixedOption}${choices}</select>
+    </label>`;
+  }
+
+  #notePopover(group, selection) {
+    const { notes, ids } = selection;
+    const presentations = notes.map(note => resolvePresentation(note));
+    const attachments = notes.map(note => resolveAttachment(note));
+    if (group === "locked") {
+      return {
+        title: t("JN.Toolbar.BulkDisabled"),
+        html: `<p class="jn-ft-note">${foundry.utils.escapeHTML(t("JN.Toolbar.SecretBulkDisabled"))}</p>`,
+        bind: () => {}
+      };
+    }
+    if (group === "style") {
+      const state = this.#common(presentations.map(presentation => presentation.extendedStyle));
+      return {
+        title: t("JN.Toolbar.Style"),
+        html: this.#selectField({
+          className: "jn-ft-style", label: t("JN.Toolbar.Style"), value: state.value, mixed: state.mixed,
+          options: Object.entries(STYLE_LABEL_KEYS).map(([key, labelKey]) => [key, t(labelKey)])
+        }),
+        bind: el => {
+          el.querySelector(".jn-ft-style").onchange = event => {
+            const value = event.target.value;
+            if (!value) return;
+            this.callbacks.onSetPresentation?.(ids, { extendedStyle: value });
+          };
+        }
+      };
+    }
+    if (group === "force") {
+      const presentation = presentations[0];
+      return {
+        title: t("JN.Editor.ForceExtended"),
+        html: `<label class="jn-ft-check"><input type="checkbox" class="jn-ft-force"
+          ${presentation.forceExtended ? "checked" : ""}><span>${foundry.utils.escapeHTML(t("JN.Editor.ForceExtended"))}</span></label>`,
+        bind: el => {
+          el.querySelector(".jn-ft-force").onchange = event => {
+            this.callbacks.onSetPresentation?.(ids, { forceExtended: event.target.checked });
+          };
+        }
+      };
+    }
+    if (group === "font") {
+      const state = this.#common(presentations.map(presentation => presentation.font));
+      return {
+        title: t("JN.Editor.Font"),
+        html: this.#selectField({
+          className: "jn-ft-font", label: t("JN.Editor.Font"), value: state.value, mixed: state.mixed,
+          options: NOTE_FONT_KEYS.map(key => [key, t(FONT_LABEL_KEYS[key] ?? "JN.Font.Default")])
+        }),
+        bind: el => {
+          el.querySelector(".jn-ft-font").onchange = event => {
+            const value = event.target.value;
+            if (!value) return;
+            this.callbacks.onSetPresentation?.(ids, { font: value });
+          };
+        }
+      };
+    }
+    if (group === "picture") {
+      const state = this.#common(presentations.map(presentation => presentation.pictureLayout));
+      return {
+        title: t("JN.Editor.PictureLayout"),
+        html: this.#selectField({
+          className: "jn-ft-picture", label: t("JN.Editor.PictureLayout"),
+          value: state.value, mixed: state.mixed,
+          options: PICTURE_LAYOUTS.map(key => [key, t(PICTURE_LABEL_KEYS[key] ?? "JN.Picture.Above")])
+        }),
+        bind: el => {
+          el.querySelector(".jn-ft-picture").onchange = event => {
+            const value = event.target.value;
+            if (!value) return;
+            this.callbacks.onSetPresentation?.(ids, { pictureLayout: value });
+          };
+        }
+      };
+    }
+    if (group === "torn") {
+      const state = this.#common(presentations.map(presentation => presentation.torn));
+      return {
+        title: t("JN.Editor.Torn"),
+        html: this.#selectField({
+          className: "jn-ft-torn", label: t("JN.Editor.Torn"), mixed: state.mixed,
+          value: state.value ? "on" : "off",
+          options: [["on", t("JN.Toolbar.On")], ["off", t("JN.Toolbar.Off")]]
+        }),
+        bind: el => {
+          el.querySelector(".jn-ft-torn").onchange = event => {
+            const value = event.target.value;
+            if (!value) return;
+            this.callbacks.onSetPresentation?.(ids, { torn: value === "on" });
+          };
+        }
+      };
+    }
+    if (group === "pin") {
+      const state = this.#common(attachments.map(attachment => attachment.pinStyle));
+      return {
+        title: t("JN.Pin.Style"),
+        html: this.#selectField({
+          className: "jn-ft-pin", label: t("JN.Pin.Style"), value: state.value, mixed: state.mixed,
+          options: PIN_STYLES.map(key => [key, t(PIN_STYLE_LABEL_KEYS[key] ?? "JN.Pin.Styles.Default")])
+        }),
+        bind: el => {
+          el.querySelector(".jn-ft-pin").onchange = event => {
+            const value = event.target.value;
+            if (!value) return;
+            this.callbacks.onSetAttachment?.(ids, { pinStyle: value });
+          };
+        }
+      };
+    }
+    if (group === "dimensions") {
+      const id = ids[0];
+      const card = this.layout.cards?.[id] ?? {};
+      const box = this.#cardBox(id);
+      const width = Math.round(Number.isFinite(card.width) && card.width > 0 ? card.width : box.w);
+      const height = Math.round(Number.isFinite(card.height) && card.height > 0 ? card.height : box.h);
+      const label = text => foundry.utils.escapeHTML(text);
+      return {
+        title: t("JN.Toolbar.Dimensions"),
+        html: `<div class="jn-ft-row">
+          <label class="jn-ft-field"><span>${label(t("JN.Toolbar.Width"))}</span>
+            <input type="number" class="jn-ft-width" min="130" step="1" value="${width}"
+              aria-label="${label(t("JN.Toolbar.Width"))}"></label>
+          <label class="jn-ft-field"><span>${label(t("JN.Toolbar.Height"))}</span>
+            <input type="number" class="jn-ft-height" min="80" step="1" value="${height}"
+              aria-label="${label(t("JN.Toolbar.Height"))}"></label>
+        </div>
+        <button type="button" class="jn-ft-auto">${label(t("JN.Toolbar.AutoSize"))}</button>`,
+        bind: el => {
+          const widthInput = el.querySelector(".jn-ft-width");
+          const heightInput = el.querySelector(".jn-ft-height");
+          const commit = () => {
+            const nextWidth = Number(widthInput.value);
+            const nextHeight = Number(heightInput.value);
+            if (!Number.isFinite(nextWidth) || !Number.isFinite(nextHeight)) return;
+            this.callbacks.onResizeCard?.(
+              id, Math.max(130, Math.round(nextWidth)), Math.max(80, Math.round(nextHeight))
+            );
+          };
+          widthInput.onchange = commit;
+          heightInput.onchange = commit;
+          el.querySelector(".jn-ft-auto").onclick = () => {
+            this.callbacks.onResetCardSize?.(id);
+            this.#closeFloatingPopover({ restoreFocus: true });
+          };
+        }
+      };
+    }
+    return null;
+  }
+
+  #linkPopover(group, link) {
+    const update = fields => this.callbacks.onUpdateLink?.(link.sourceId, link.id, fields);
+    const cosmetics = resolveLinkCosmetics(link);
+    const esc = text => foundry.utils.escapeHTML(text);
+    if (group === "material") {
+      return {
+        title: t("JN.Link.Material"),
+        html: this.#selectField({
+          className: "jn-ft-material", label: t("JN.Link.Material"), value: cosmetics.material, mixed: false,
+          options: [["linen", t("JN.Link.MaterialOption.linen")], ["double", t("JN.Link.MaterialOption.double")]]
+        }),
+        bind: el => {
+          el.querySelector(".jn-ft-material").onchange = event => update({ material: event.target.value });
+        }
+      };
+    }
+    if (group === "thickness") {
+      const value = cosmetics.thickness.toFixed(1);
+      return {
+        title: t("JN.Link.Thickness"),
+        html: `<label class="jn-ft-field"><span>${esc(t("JN.Link.Thickness"))}
+          <output class="jn-ft-thickness-out">${value} px</output></span>
+          <input type="range" class="jn-ft-thickness" min="0.8" max="5" step="0.1" value="${value}"
+            aria-label="${esc(t("JN.Link.Thickness"))}"></label>`,
+        bind: el => {
+          const thickness = el.querySelector(".jn-ft-thickness");
+          const out = el.querySelector(".jn-ft-thickness-out");
+          thickness.oninput = () => { out.textContent = `${Number(thickness.value).toFixed(1)} px`; };
+          thickness.onchange = () => update({ thickness: Number(thickness.value) });
+        }
+      };
+    }
+    if (group === "slack") {
+      const value = String(Math.round(cosmetics.slack * 100));
+      return {
+        title: t("JN.Link.Slack"),
+        html: `<label class="jn-ft-field"><span>${esc(t("JN.Link.Slack"))}
+          <output class="jn-ft-slack-out">${value}%</output></span>
+          <input type="range" class="jn-ft-slack" min="0" max="25" step="1" value="${value}"
+            aria-label="${esc(t("JN.Link.Slack"))}"></label>`,
+        bind: el => {
+          const slack = el.querySelector(".jn-ft-slack");
+          const out = el.querySelector(".jn-ft-slack-out");
+          slack.oninput = () => { out.textContent = `${Math.round(Number(slack.value))}%`; };
+          slack.onchange = () => update({ slack: Number(slack.value) / 100 });
+        }
+      };
+    }
+    if (group === "color") {
+      const current = normalizeLinkColor(link.color);
+      const swatches = LINK_COLOR_OPTIONS.map(slot => {
+        const label = t(slot ? `JN.Link.Color.${slot}` : "JN.Link.Color.default");
+        return `<button type="button" class="jn-ft-swatch jn-ft-swatch-${slot || "default"}${slot === current ? " on" : ""}"
+          data-color="${esc(slot)}" title="${esc(label)}" aria-label="${esc(label)}"
+          aria-pressed="${slot === current}"></button>`;
+      }).join("");
+      return {
+        title: t("JN.Link.Color.default"),
+        html: `<span class="jn-ft-colors" role="group" aria-label="${esc(t("JN.Link.Color.default"))}">${swatches}</span>`,
+        bind: el => {
+          el.querySelectorAll(".jn-ft-swatch").forEach(button => {
+            button.onclick = () => update({ color: button.dataset.color });
+          });
+        }
+      };
+    }
+    if (group === "pattern" || group === "ends") {
+      const isPattern = group === "pattern";
+      const values = isPattern
+        ? ["continuous", "interrupted", "alternating"]
+        : ["standard", "loose"];
+      const labelKey = isPattern ? "JN.Link.PatternOption" : "JN.Link.EndOption";
+      return {
+        title: t(isPattern ? "JN.Link.Pattern" : "JN.Link.Ends"),
+        html: this.#selectField({
+          className: `jn-ft-${group}`, label: t(isPattern ? "JN.Link.Pattern" : "JN.Link.Ends"),
+          value: isPattern ? cosmetics.pattern : cosmetics.ends, mixed: false,
+          options: values.map(value => [value, t(`${labelKey}.${value}`)])
+        }),
+        bind: el => {
+          el.querySelector(`.jn-ft-${group}`).onchange = event => {
+            update(isPattern ? { pattern: event.target.value } : { ends: event.target.value });
+          };
+        }
+      };
+    }
+    if (group === "label") {
+      return {
+        title: t("JN.Link.Label"),
+        html: `<label class="jn-ft-field"><span>${esc(t("JN.Link.Label"))}</span>
+          <input type="text" class="jn-ft-link-label" maxlength="200" value="${esc(link.label ?? "")}"
+            placeholder="${esc(t("JN.Link.Label"))}" aria-label="${esc(t("JN.Link.Label"))}"></label>`,
+        bind: el => {
+          // Commit on change, matching the link toolbar: one socket write per committed label.
+          el.querySelector(".jn-ft-link-label").onchange = event => update({ label: event.target.value });
+        }
+      };
+    }
+    if (group === "presets") {
+      const label = id => t(`JN.Link.Preset.${id.charAt(0).toUpperCase()}${id.slice(1)}`);
+      const presets = Object.entries(THREAD_PRESETS).map(([id, preset]) =>
+        `<button type="button" class="jn-ft-preset" data-preset="${id}"
+          title="${esc(label(id))} · ${preset.thickness.toFixed(1)} px · ${Math.round(preset.slack * 100)}%">${esc(label(id))}</button>`).join("");
+      return {
+        title: t("JN.Link.Presets"),
+        html: `<div class="jn-ft-presets" role="group" aria-label="${esc(t("JN.Link.Presets"))}">${presets}</div>`,
+        bind: el => {
+          el.querySelectorAll(".jn-ft-preset").forEach(button => {
+            button.onclick = () => {
+              const preset = THREAD_PRESETS[button.dataset.preset];
+              if (!preset) return;
+              update({
+                material: preset.material,
+                thickness: preset.thickness,
+                slack: preset.slack,
+                pattern: "continuous",
+                ends: "standard"
+              });
+            };
+          });
+        }
+      };
+    }
+    return null;
   }
 
   /** Clear the free board waypoints when a split is blocked by them; route data is untouched. */
@@ -1718,6 +2350,7 @@ export default class JournalCanvas {
     this.#syncLinkSelection();
     for (const [id, el] of this.cardEls) el.classList.toggle("selected", this.selectedNoteIds.has(id));
     this.#syncLinkToolbar();
+    this.#syncFloatingToolbar();
     this.callbacks.onSelectNote(primary);
   }
 
@@ -2172,7 +2805,7 @@ export default class JournalCanvas {
         this.callbacks.onEditCardImage?.(camera.closest(".jn-card").dataset.id);
         return;
       }
-      if (ev.button !== 0 || ev.target.closest(`.jn-context-menu, .jn-link-toolbar, .jn-route-chooser, ${PATCH_NOTES_SELECTOR}, input, textarea`)) return;
+      if (ev.button !== 0 || ev.target.closest(`.jn-context-menu, .jn-link-toolbar, .jn-floating-toolbar, .jn-floating-popover, .jn-route-chooser, ${PATCH_NOTES_SELECTOR}, input, textarea`)) return;
       if (ev.altKey && !this.linkPlacement) this.toggleLinkTool();
       if (!this.linkPlacement) return;
       ev.preventDefault();
@@ -2221,6 +2854,7 @@ export default class JournalCanvas {
     this.root.addEventListener("wheel", ev => {
       if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
       if (ev.target.closest(".jn-route-chooser")) return;
+      if (ev.target.closest(".jn-floating-toolbar, .jn-floating-popover")) return;
       if (ev.target.closest(".jn-card input, .jn-card textarea") && !ev.ctrlKey) return;
       ev.preventDefault();
       this.#closeContextMenu();
@@ -2230,6 +2864,7 @@ export default class JournalCanvas {
     this.root.addEventListener("pointerdown", ev => {
       if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
       if (ev.target.closest(".jn-route-chooser")) return;
+      if (ev.target.closest(".jn-floating-toolbar, .jn-floating-popover")) return;
       if (ev.target.closest(".jn-card-image-button")) return;
       if (!this.linkPlacement && !ev.altKey
           && ev.target.closest(".jn-card-block a[href], .jn-card-block input[type=\"checkbox\"]")) return;
@@ -2600,6 +3235,10 @@ export default class JournalCanvas {
         ev.preventDefault();
         return;
       }
+      if (ev.target.closest(".jn-floating-toolbar, .jn-floating-popover")) {
+        ev.preventDefault();
+        return;
+      }
       if (ev.target.closest(".jn-card input, .jn-card textarea")) return;
       ev.preventDefault();
       ev.stopPropagation();
@@ -2615,6 +3254,7 @@ export default class JournalCanvas {
 
     this.root.addEventListener("dblclick", ev => {
       if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
+      if (ev.target.closest(".jn-floating-toolbar, .jn-floating-popover")) return;
       if (ev.target.closest("[data-stamp-label-id], .jn-label")) return;
       if (ev.target.closest(".jn-card-resize")) {
         if (this.readOnly) return this.#warnReadOnly();

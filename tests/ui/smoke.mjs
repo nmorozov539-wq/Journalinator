@@ -1608,6 +1608,682 @@ test("link toolbar focuses on open and closes on Escape or an outside pointerdow
   }
 });
 
+/** Pointer click helper shared by the floating-toolbar tests. */
+function clickCanvasCard(canvas, id, { ctrlKey = false } = {}) {
+  const card = canvas.root.querySelector(`.jn-card[data-id="${id}"]`);
+  assert.ok(card, `card ${id}`);
+  card.dispatchEvent(new MouseEvent("pointerdown", {
+    bubbles: true, button: 0, clientX: 10, clientY: 10, ctrlKey
+  }));
+  canvas.root.dispatchEvent(new MouseEvent("pointerup", {
+    bubbles: true, button: 0, clientX: 10, clientY: 10, ctrlKey
+  }));
+}
+
+function clickCanvasLink(canvas, id) {
+  const hit = canvas.root.querySelector(`.jn-link-hit[data-id="${id}"]`);
+  assert.ok(hit, `link hit ${id}`);
+  hit.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+  canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+}
+
+test("floating toolbar sits on the screen-space right edge and only appears with a selection", () => {
+  const canvas = new JournalCanvas({ onSelectNote() {} });
+  document.body.appendChild(canvas.root);
+  const notes = [
+    {
+      _id: "a", name: "A",
+      system: {
+        style: "sticky", blocks: [], links: [],
+        presentation: { extendedStyle: "memo", font: "default", pictureLayout: "above", torn: false },
+        attachment: { pinStyle: "brass" }
+      }
+    },
+    { _id: "b", name: "B", system: { style: "sticky", blocks: [], links: [] } }
+  ];
+  const layout = { cards: { a: { x: 0, y: 0 }, b: { x: 300, y: 0 } }, labels: {} };
+  try {
+    canvas.update(notes, layout);
+    const toolbar = canvas.floatingToolbar;
+    assert.equal(toolbar.parentElement, canvas.root, "toolbar is a direct canvas child");
+    assert.equal(canvas.world.contains(toolbar), false, "toolbar is outside the transformed world");
+    assert.equal(toolbar.hidden, true, "no selection hides the toolbar");
+
+    const transform = canvas.world.style.transform;
+    clickCanvasCard(canvas, "a");
+    assert.equal(toolbar.hidden, false, "selecting a note reveals the toolbar");
+    assert.equal(canvas.world.style.transform, transform, "toolbar never changes pan/zoom");
+    assert.equal(canvas.root.querySelector(".jn-floating-toolbar").parentElement, canvas.root);
+
+    const groups = [...toolbar.querySelectorAll(".jn-ft-btn")].map(button => button.dataset.group);
+    assert.deepEqual(groups, ["style", "force", "font", "picture", "torn", "pin", "dimensions"]);
+    for (const button of toolbar.querySelectorAll(".jn-ft-btn")) {
+      assert.ok(button.getAttribute("aria-label"), "each button has an accessible name");
+      assert.ok(button.getAttribute("title"), "each button has a tooltip");
+      assert.equal(button.getAttribute("aria-haspopup"), "dialog");
+      assert.equal(button.getAttribute("aria-expanded"), "false");
+      assert.ok(button.querySelector(".jn-ft-label").textContent.trim(), "expanding text label exists");
+      assert.ok(button.querySelector("i.fa-solid"), "resting state is icon-only");
+    }
+
+    const css = readFileSync(new URL("../../styles/stylized.css", import.meta.url), "utf8");
+    assert.match(css, /\.jn-floating-toolbar\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?right:\s*13px;[\s\S]*?top:\s*15px;/,
+      "toolbar is anchored to the viewport edge");
+    assert.match(css, /\.jn-ft-btn:hover \.jn-ft-label,[\s\S]*?max-width:\s*220px;/,
+      "hover/focus expands the label leftward");
+    assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.jn-ft-label\s*\{\s*transition:\s*none;/,
+      "label expansion respects reduced motion");
+    assert.match(css, /\.jn-floating-toolbar[\s\S]*?background:\s*#1b1611/,
+      "toolbar paints a dark application surface, not parchment");
+
+    canvas.readOnly = true;
+    canvas.update(notes, layout);
+    assert.equal(toolbar.hidden, false, "read-only still shows the selection context");
+    assert.ok([...toolbar.querySelectorAll(".jn-ft-btn")].every(button => button.disabled),
+      "read-only disables the cosmetic controls");
+
+    canvas.readOnly = false;
+    canvas.clearSelection();
+    assert.equal(toolbar.hidden, true, "clearing selection hides the toolbar");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("floating note popover closes on outside/Escape/selection change and returns focus", () => {
+  const canvas = new JournalCanvas({ onSelectNote() {} });
+  document.body.appendChild(canvas.root);
+  const notes = [
+    { _id: "a", name: "A", system: { style: "sticky", blocks: [], links: [] } },
+    { _id: "b", name: "B", system: { style: "sticky", blocks: [], links: [] } }
+  ];
+  try {
+    canvas.update(notes, { cards: { a: { x: 0, y: 0 }, b: { x: 300, y: 0 } }, labels: {} });
+    clickCanvasCard(canvas, "a");
+    const toolbar = canvas.floatingToolbar;
+    const popover = canvas.floatingPopover;
+    const button = group => toolbar.querySelector(`.jn-ft-btn[data-group="${group}"]`);
+
+    button("style").click();
+    assert.equal(popover.hidden, false);
+    assert.equal(popover.dataset.group, "style");
+    assert.equal(button("style").getAttribute("aria-expanded"), "true");
+    assert.ok(popover.contains(document.activeElement), "focus moves into the popover");
+
+    button("font").click();
+    assert.equal(popover.dataset.group, "font", "only one popover is open");
+    assert.equal(button("style").getAttribute("aria-expanded"), "false");
+    assert.equal(button("font").getAttribute("aria-expanded"), "true");
+
+    document.activeElement.dispatchEvent(new KeyboardEvent("keydown", {
+      bubbles: true, cancelable: true, key: "Escape"
+    }));
+    assert.equal(popover.hidden, true, "Escape closes the popover");
+    assert.equal(document.activeElement, button("font"), "focus returns to the trigger button");
+    assert.equal(button("font").getAttribute("aria-expanded"), "false");
+
+    button("font").click();
+    document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    assert.equal(popover.hidden, true, "outside pointerdown closes the popover");
+
+    button("font").click();
+    clickCanvasCard(canvas, "b");
+    assert.equal(popover.hidden, true, "selection change closes the popover");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("note popovers apply cosmetic fields; multi-selection shows Mixed and hides single-only controls", () => {
+  const presentationCalls = [];
+  const attachmentCalls = [];
+  const resizeCalls = [];
+  const resetCalls = [];
+  const canvas = new JournalCanvas({
+    onSelectNote() {},
+    onSetPresentation: (ids, fields) => presentationCalls.push([ids, fields]),
+    onSetAttachment: (ids, fields) => attachmentCalls.push([ids, fields]),
+    onResizeCard: (...args) => resizeCalls.push(args),
+    onResetCardSize: (...args) => resetCalls.push(args)
+  });
+  document.body.appendChild(canvas.root);
+  const notes = [
+    {
+      _id: "a", name: "A",
+      system: {
+        style: "sticky", blocks: [],
+        presentation: { extendedStyle: "memo", forceExtended: false, font: "default", pictureLayout: "above", torn: false },
+        attachment: { pinStyle: "default" }
+      }
+    },
+    {
+      _id: "b", name: "B",
+      system: {
+        style: "sticky", blocks: [],
+        presentation: { extendedStyle: "document", forceExtended: true, font: "hand", pictureLayout: "right", torn: true },
+        attachment: { pinStyle: "brass" }
+      }
+    }
+  ];
+  const layout = {
+    cards: { a: { x: 0, y: 0, width: 200, height: 120 }, b: { x: 300, y: 0, width: 250, height: 140 } },
+    labels: {}
+  };
+  try {
+    canvas.update(notes, layout);
+    clickCanvasCard(canvas, "a");
+    const toolbar = canvas.floatingToolbar;
+    const popover = canvas.floatingPopover;
+    const button = group => toolbar.querySelector(`.jn-ft-btn[data-group="${group}"]`);
+    const open = group => {
+      const trigger = button(group);
+      trigger.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+      trigger.click();
+      assert.equal(popover.dataset.group, group);
+    };
+    const choose = (selector, value) => {
+      const field = popover.querySelector(selector);
+      field.value = value;
+      field.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+
+    open("style");
+    choose(".jn-ft-style", "document");
+    assert.deepEqual(presentationCalls.at(-1), [["a"], { extendedStyle: "document" }],
+      "style changes only the renderer");
+
+    open("force");
+    const force = popover.querySelector(".jn-ft-force");
+    force.checked = true;
+    force.dispatchEvent(new Event("change", { bubbles: true }));
+    assert.deepEqual(presentationCalls.at(-1), [["a"], { forceExtended: true }]);
+
+    open("font");
+    choose(".jn-ft-font", "hand");
+    assert.deepEqual(presentationCalls.at(-1), [["a"], { font: "hand" }]);
+
+    open("picture");
+    choose(".jn-ft-picture", "left");
+    assert.deepEqual(presentationCalls.at(-1), [["a"], { pictureLayout: "left" }]);
+
+    open("torn");
+    choose(".jn-ft-torn", "on");
+    assert.deepEqual(presentationCalls.at(-1), [["a"], { torn: true }]);
+
+    open("pin");
+    choose(".jn-ft-pin", "brass");
+    assert.deepEqual(attachmentCalls.at(-1), [["a"], { pinStyle: "brass" }],
+      "pin appearance goes through the attachment callback");
+
+    open("dimensions");
+    assert.equal(popover.querySelector(".jn-ft-width").value, "200");
+    assert.equal(popover.querySelector(".jn-ft-height").value, "120");
+    choose(".jn-ft-width", "260");
+    assert.deepEqual(resizeCalls.at(-1), ["a", 260, 120], "dimensions commit on change");
+    popover.querySelector(".jn-ft-auto").click();
+    assert.deepEqual(resetCalls.at(-1), ["a"], "auto reset uses the existing size callback");
+    assert.equal(popover.hidden, true, "auto reset closes the popover");
+
+    clickCanvasCard(canvas, "b", { ctrlKey: true });
+    assert.deepEqual([...toolbar.querySelectorAll(".jn-ft-btn")].map(item => item.dataset.group),
+      ["style", "font", "picture", "torn", "pin"],
+      "multi-selection shows only the cosmetic intersection");
+
+    open("style");
+    const styleSelect = popover.querySelector(".jn-ft-style");
+    assert.equal(styleSelect.value, "", "mixed values select the Mixed option");
+    assert.ok([...styleSelect.options].some(option => option.textContent === game.i18n.localize("JN.Toolbar.Mixed")));
+    choose(".jn-ft-style", "target");
+    assert.deepEqual(presentationCalls.at(-1), [["a", "b"], { extendedStyle: "target" }]);
+
+    open("font");
+    assert.equal(popover.querySelector(".jn-ft-font").value, "");
+    choose(".jn-ft-font", "serif");
+    assert.deepEqual(presentationCalls.at(-1), [["a", "b"], { font: "serif" }]);
+
+    open("torn");
+    assert.equal(popover.querySelector(".jn-ft-torn").value, "");
+    choose(".jn-ft-torn", "off");
+    assert.deepEqual(presentationCalls.at(-1), [["a", "b"], { torn: false }]);
+
+    open("pin");
+    choose(".jn-ft-pin", "iron");
+    assert.deepEqual(attachmentCalls.at(-1), [["a", "b"], { pinStyle: "iron" }],
+      "pin appearance is the only bulk attachment field");
+
+    const allowedPresentation = new Set(["extendedStyle", "font", "pictureLayout", "torn", "forceExtended"]);
+    for (const [, fields] of presentationCalls) {
+      assert.ok(Object.keys(fields).every(key => allowedPresentation.has(key)),
+        "bulk presentation never touches content, label, image or permissions");
+    }
+    for (const [, fields] of attachmentCalls) {
+      assert.deepEqual(Object.keys(fields), ["pinStyle"], "bulk attachment only changes pin appearance");
+    }
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("mixed GM-only multi-selection disables bulk cosmetics with an explanation", () => {
+  const presentationCalls = [];
+  const canvas = new JournalCanvas({
+    onSelectNote() {},
+    onSetPresentation: (ids, fields) => presentationCalls.push([ids, fields])
+  });
+  document.body.appendChild(canvas.root);
+  const notes = [
+    { _id: "shared", name: "Shared", system: { style: "sticky", blocks: [], links: [] } },
+    { _id: "secret", name: "GM secret", secret: true, system: { style: "sticky", blocks: [], links: [] } }
+  ];
+  try {
+    canvas.update(notes, { cards: { shared: { x: 0, y: 0 }, secret: { x: 300, y: 0 } }, labels: {} });
+    clickCanvasCard(canvas, "secret");
+    const toolbar = canvas.floatingToolbar;
+    assert.equal(toolbar.querySelector('[data-group="locked"]'), null, "single GM-only note stays editable");
+    assert.ok([...toolbar.querySelectorAll(".jn-ft-btn")].every(button => !button.disabled));
+
+    clickCanvasCard(canvas, "shared", { ctrlKey: true });
+    const locked = toolbar.querySelector('[data-group="locked"]');
+    assert.ok(locked, "mixed secret selection exposes a lock explanation");
+    assert.ok([...toolbar.querySelectorAll(".jn-ft-btn")].every(button =>
+      button.dataset.group === "locked" || button.disabled), "bulk controls are disabled");
+    locked.click();
+    const popover = canvas.floatingPopover;
+    assert.equal(popover.hidden, false);
+    assert.match(popover.textContent, new RegExp(
+      game.i18n.localize("JN.Toolbar.SecretBulkDisabled").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.equal(presentationCalls.length, 0, "no partial tier write is attempted");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("link selection shows only link controls and commits fields, labels and presets on change", () => {
+  const calls = [];
+  const canvas = new JournalCanvas({
+    onSelectNote() {},
+    onUpdateLink: (...args) => calls.push(args)
+  });
+  document.body.appendChild(canvas.root);
+  const notes = [
+    {
+      _id: "a", name: "A",
+      system: {
+        style: "sticky", blocks: [], links: [
+          { id: "l", targetId: "b", label: "Route", color: "link1", sourceSide: "right", targetSide: "left" }
+        ]
+      }
+    },
+    { _id: "b", name: "B", system: { style: "sticky", blocks: [], links: [] } }
+  ];
+  try {
+    canvas.update(notes, { cards: { a: { x: 0, y: 0 }, b: { x: 400, y: 0 } }, labels: {} });
+    clickCanvasLink(canvas, "l");
+    const toolbar = canvas.floatingToolbar;
+    const popover = canvas.floatingPopover;
+    assert.deepEqual([...toolbar.querySelectorAll(".jn-ft-btn")].map(item => item.dataset.group),
+      ["material", "thickness", "slack", "color", "pattern", "ends", "label", "presets"],
+      "links never show note rendering controls");
+    const button = group => toolbar.querySelector(`.jn-ft-btn[data-group="${group}"]`);
+    const open = group => {
+      const trigger = button(group);
+      trigger.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+      trigger.click();
+      assert.equal(popover.dataset.group, group);
+    };
+    const choose = (selector, value) => {
+      const field = popover.querySelector(selector);
+      field.value = value;
+      field.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+
+    open("material");
+    choose(".jn-ft-material", "double");
+    assert.deepEqual(calls.at(-1), ["a", "l", { material: "double" }]);
+
+    open("thickness");
+    const count = calls.length;
+    const thickness = popover.querySelector(".jn-ft-thickness");
+    thickness.value = "3.3";
+    thickness.dispatchEvent(new Event("input", { bubbles: true }));
+    assert.equal(calls.length, count, "thickness never writes per step");
+    assert.equal(popover.querySelector(".jn-ft-thickness-out").textContent, "3.3 px");
+    thickness.dispatchEvent(new Event("change", { bubbles: true }));
+    assert.deepEqual(calls.at(-1), ["a", "l", { thickness: 3.3 }]);
+
+    open("slack");
+    choose(".jn-ft-slack", "25");
+    assert.deepEqual(calls.at(-1), ["a", "l", { slack: 0.25 }]);
+
+    open("color");
+    popover.querySelector(".jn-ft-swatch-link3").click();
+    assert.deepEqual(calls.at(-1), ["a", "l", { color: "link3" }]);
+
+    open("pattern");
+    choose(".jn-ft-pattern", "alternating");
+    assert.deepEqual(calls.at(-1), ["a", "l", { pattern: "alternating" }]);
+
+    open("ends");
+    choose(".jn-ft-ends", "loose");
+    assert.deepEqual(calls.at(-1), ["a", "l", { ends: "loose" }]);
+
+    open("label");
+    const beforeLabel = calls.length;
+    const label = popover.querySelector(".jn-ft-link-label");
+    label.value = "Renamed";
+    label.dispatchEvent(new Event("input", { bubbles: true }));
+    assert.equal(calls.length, beforeLabel, "labels do not write per keystroke");
+    label.dispatchEvent(new Event("change", { bubbles: true }));
+    assert.deepEqual(calls.at(-1), ["a", "l", { label: "Renamed" }]);
+
+    open("presets");
+    assert.equal(popover.querySelectorAll(".jn-ft-preset").length, 4);
+    popover.querySelector('.jn-ft-preset[data-preset="heavy"]').click();
+    assert.deepEqual(calls.at(-1), ["a", "l", {
+      material: "double", thickness: 4, slack: 0.19, pattern: "continuous", ends: "standard"
+    }]);
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+/** Border-box rectangle for jsdom, which has no layout engine. */
+function fakeRect(left, top, width, height) {
+  return { left, top, width, height, right: left + width, bottom: top + height, x: left, y: top };
+}
+
+test("floating popover clamps its real border-box inside narrow/wide canvases and follows resize", () => {
+  const canvas = new JournalCanvas({ onSelectNote() {} });
+  document.body.appendChild(canvas.root);
+  const notes = [{ _id: "a", name: "A", system: { style: "sticky", blocks: [], links: [] } }];
+  let rootWidth = 1400;
+  try {
+    canvas.update(notes, { cards: { a: { x: 0, y: 0 } }, labels: {} });
+    const rootRect = () => fakeRect(0, 0, rootWidth, 700);
+    canvas.root.getBoundingClientRect = rootRect;
+    clickCanvasCard(canvas, "a");
+    const trigger = canvas.floatingToolbar.querySelector('[data-group="style"]');
+    const popover = canvas.floatingPopover;
+    trigger.getBoundingClientRect = () => fakeRect(rootWidth - 45, 100, 32, 30);
+    popover.getBoundingClientRect = () => {
+      const declared = Number.parseFloat(popover.style.width);
+      return fakeRect(0, 0, Number.isFinite(declared) ? declared : 264, 180);
+    };
+    trigger.click();
+
+    for (const width of [1400, 430, 320, 160]) {
+      rootWidth = width;
+      dom.window.dispatchEvent(new Event("resize"));
+      const left = Number.parseFloat(popover.style.left);
+      const top = Number.parseFloat(popover.style.top);
+      const actualWidth = Number.parseFloat(popover.style.width) || 264;
+      const right = Number.parseFloat(popover.style.right);
+      assert.equal(popover.hidden, false, `${width}: the open popover survives a resize`);
+      assert.ok(left >= 6, `${width}: left edge is clamped inside`);
+      assert.ok(right >= 6, `${width}: right edge is clamped inside`);
+      assert.ok(left + actualWidth + right <= width + 0.01, `${width}: both edges stay inside`);
+      assert.ok(top >= 6 && top <= 700 - 180 - 6, `${width}: top edge is clamped inside`);
+    }
+    const css = readFileSync(new URL("../../styles/stylized.css", import.meta.url), "utf8");
+    assert.match(css, /\.jn-floating-popover\s*\{[\s\S]*?box-sizing:\s*border-box;/,
+      "the popover measures its border box");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("selecting a card or link updates the editor without a full JournalApp render", async () => {
+  await requestWrite({ type: "createNote", title: "Render Guard One", x: 800, y: 800 });
+  await requestWrite({ type: "createNote", title: "Render Guard Two", x: 1100, y: 800 });
+  await settle();
+  const one = sharedByName("Render Guard One");
+  const two = sharedByName("Render Guard Two");
+  await requestWrite({
+    type: "createLink", sourceId: one.id, targetId: two.id, sourceSide: "right", targetSide: "left"
+  });
+  await settle();
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  const originalRender = app.render;
+  try {
+    await redraw();
+    const canvasRoot = host.querySelector(".jn-canvas");
+    let renders = 0;
+    app.render = (...args) => { renders++; return originalRender.call(app, ...args); };
+
+    clickCanvasCard({ root: canvasRoot }, one.id);
+    assert.equal(renders, 0, "card selection is a targeted editor update");
+    assert.equal(host.querySelector(".journalinator-editor .jn-inline-title")?.textContent, "Render Guard One",
+      "the editor follows the selected note without an app render");
+
+    const link = sharedByName("Render Guard One").system.links[0];
+    assert.ok(link, "the link fixture exists");
+    clickCanvasLink({ root: canvasRoot }, link.id);
+    assert.equal(renders, 0, "link selection does not re-render the app");
+    assert.equal(host.querySelector(".journalinator-editor .jn-inline-title"), null,
+      "link selection clears the editor only");
+  } finally {
+    delete app.render;
+    app._onClose();
+    host.remove();
+  }
+});
+
+test("changing a popover value keeps focus inside the popover across the write render", async () => {
+  await requestWrite({ type: "createNote", title: "Focus Popover", x: 1200, y: 800 });
+  await settle();
+  const note = sharedByName("Focus Popover");
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  try {
+    await redraw();
+    const canvasRoot = host.querySelector(".jn-canvas");
+    clickCanvasCard({ root: canvasRoot }, note.id);
+    const trigger = canvasRoot.querySelector('.jn-floating-toolbar .jn-ft-btn[data-group="style"]');
+    trigger.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    trigger.click();
+    const popover = canvasRoot.querySelector(".jn-floating-popover");
+    const select = popover.querySelector(".jn-ft-style");
+    select.focus();
+    assert.ok(popover.contains(document.activeElement), "focus starts inside the popover");
+
+    select.value = "document";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    assert.equal(popover.hidden, false, "the popover survives the document-sync render");
+    assert.ok(popover.contains(document.activeElement), "focus stays inside the rebuilt popover");
+    assert.equal(document.activeElement.dataset.jnFocusKey, select.dataset.jnFocusKey,
+      "the same field is restored by its stable key");
+  } finally {
+    const toolbar = host.querySelector(".jn-floating-toolbar");
+    app._onClose();
+    assert.equal(toolbar?.hidden, true, "closing the app hides the floating toolbar");
+    assert.equal(host.querySelector(".jn-floating-popover")?.hidden, true,
+      "closing the app closes the popover");
+    host.remove();
+  }
+});
+
+test("read-only link selection is inspect-only; disconnect closes overlays and removes resize hooks", () => {
+  const calls = [];
+  const canvas = new JournalCanvas(new Proxy({}, {
+    get: (_, name) => (...args) => calls.push([String(name), ...args])
+  }));
+  document.body.appendChild(canvas.root);
+  const notes = [
+    {
+      _id: "a", name: "A",
+      system: {
+        style: "sticky", blocks: [], links: [
+          { id: "l", targetId: "b", sourceSide: "right", targetSide: "left" }
+        ]
+      }
+    },
+    { _id: "b", name: "B", system: { style: "sticky", blocks: [], links: [] } }
+  ];
+  try {
+    canvas.readOnly = false;
+    canvas.update(notes, { cards: { a: { x: 0, y: 0 }, b: { x: 400, y: 0 } }, labels: {} });
+    clickCanvasCard(canvas, "a");
+    assert.equal(calls.some(([name]) => name === "onMoveCard"), false, "selection alone never writes");
+    const card = canvas.root.querySelector('.jn-card[data-id="a"]');
+    card.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+    canvas.root.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, button: 0, clientX: 40, clientY: 40 }));
+    assert.equal(calls.some(([name]) => name === "onMoveCard"), false,
+      "a drag preview is local-only until release");
+    canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 40, clientY: 40 }));
+    assert.equal(calls.filter(([name]) => name === "onMoveCard").length, 1,
+      "the move is committed only on release");
+    calls.length = 0;
+
+    canvas.readOnly = true;
+    canvas.update(notes, { cards: { a: { x: 0, y: 0 }, b: { x: 400, y: 0 } }, labels: {} });
+    clickCanvasCard(canvas, "a");
+    assert.equal(calls.some(([name]) => name === "onMoveCard"), false, "read-only selection never writes");
+    assert.ok([...canvas.floatingToolbar.querySelectorAll(".jn-ft-btn")].every(button => button.disabled),
+      "read-only cosmetic controls are disabled");
+
+    clickCanvasLink(canvas, "l");
+    assert.equal(canvas.selectedLinkId, "l", "a read-only link is still inspectable");
+    assert.equal(canvas.linkToolbar.style.display, "none", "read-only link toolbar stays closed");
+    assert.ok([...canvas.floatingToolbar.querySelectorAll(".jn-ft-btn")].every(button => button.disabled));
+    clickCanvasLink(canvas, "l");
+    assert.equal(calls.some(([name]) => name === "onDeleteLink"), false,
+      "read-only double-click never deletes a link");
+
+    canvas.root.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+    canvas.root.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, button: 0, clientX: 12, clientY: 12 }));
+    assert.equal(calls.some(([name]) => name === "onMoveCard"), false,
+      "a drag preview is local-only until release");
+
+    canvas.disconnectGeometry();
+    assert.equal(canvas.floatingToolbar.hidden, true, "disconnect hides the floating toolbar");
+    assert.equal(canvas.floatingPopover.hidden, true, "disconnect hides the popover");
+    assert.equal(canvas.linkToolbar.style.display, "none", "disconnect hides the link toolbar");
+    assert.equal(canvas.windowResize, null, "the window resize listener is removed");
+    assert.equal(canvas.rootResizeObserver, null, "the root resize observer is removed");
+  } finally {
+    canvas.root.remove();
+  }
+});
+
+test("client cosmetic batches abort with localized warnings on stale, mixed or many-secret ids", async () => {
+  await requestWrite({ type: "createNote", title: "Batch Guard One", x: 1400, y: 800 });
+  await requestWrite({ type: "createNote", title: "Batch Guard Two", x: 1700, y: 800 });
+  await settle();
+  const one = sharedByName("Batch Guard One");
+  const two = sharedByName("Batch Guard Two");
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  const fakeSecret = id => {
+    vaultStore.data.notes[id] = { id, name: "Fake secret" };
+  };
+  const openPopover = group => {
+    const toolbar = host.querySelector(".jn-floating-toolbar");
+    const trigger = toolbar.querySelector(`.jn-ft-btn[data-group="${group}"]`);
+    trigger.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    trigger.click();
+    return host.querySelector(".jn-floating-popover");
+  };
+  try {
+    await redraw();
+    const canvasRoot = host.querySelector(".jn-canvas");
+
+    // A stale/trashed id aborts before any subset is written.
+    clickCanvasCard({ root: canvasRoot }, one.id);
+    const staleStyle = one.system.presentation?.extendedStyle;
+    let popover = openPopover("style");
+    let select = popover.querySelector(".jn-ft-style");
+    one.system.deleted = Date.now();
+    env.notifications.length = 0;
+    select.value = "document";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    assert.equal(one.system.presentation?.extendedStyle, staleStyle,
+      "a trashed note is never partially updated");
+    assert.ok(env.notifications.some(([, text]) => text === game.i18n.localize("JN.Toolbar.BatchStale")),
+      "the stale batch is explained in the user's language");
+    one.system.deleted = null;
+
+    // A popover opened for two shared notes is refused if the selection later becomes mixed.
+    clickCanvasCard({ root: canvasRoot }, two.id, { ctrlKey: true });
+    const mixedStyle = sharedByName("Batch Guard One").system.presentation?.extendedStyle;
+    popover = openPopover("style");
+    select = popover.querySelector(".jn-ft-style");
+    fakeSecret(two.id);
+    env.notifications.length = 0;
+    select.value = "target";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    assert.equal(sharedByName("Batch Guard One").system.presentation?.extendedStyle, mixedStyle,
+      "the shared note is untouched when the batch is mixed");
+    assert.ok(env.notifications.some(([, text]) => text === game.i18n.localize("JN.Toolbar.BatchMixed")),
+      "mixing tiers is refused as a whole");
+    delete vaultStore.data.notes[two.id];
+
+    // Several GM-only notes cannot be bulk-edited either.
+    popover = openPopover("style");
+    select = popover.querySelector(".jn-ft-style");
+    fakeSecret(one.id);
+    fakeSecret(two.id);
+    env.notifications.length = 0;
+    select.value = "document";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    assert.ok(env.notifications.some(([, text]) => text === game.i18n.localize("JN.Toolbar.BatchManySecrets")),
+      "multiple secret ids are refused instead of writing one of them");
+    delete vaultStore.data.notes[one.id];
+    delete vaultStore.data.notes[two.id];
+
+    // The attachment batch resolves stale ids first too; no pin write reaches either note.
+    clickCanvasCard({ root: canvasRoot }, one.id);
+    const pinBefore = one.system.attachment?.pinStyle ?? "";
+    popover = openPopover("pin");
+    select = popover.querySelector(".jn-ft-pin");
+    one.system.deleted = Date.now();
+    env.notifications.length = 0;
+    select.value = "brass";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    assert.equal(one.system.attachment?.pinStyle ?? "", pinBefore,
+      "a stale attachment batch leaves pin appearance untouched");
+    assert.ok(env.notifications.some(([, text]) => text === game.i18n.localize("JN.Toolbar.BatchStale")));
+    one.system.deleted = null;
+  } finally {
+    delete vaultStore.data.notes[one.id];
+    delete vaultStore.data.notes[two.id];
+    app._onClose();
+    host.remove();
+  }
+});
+
 test("hover and editing fade only matching silhouettes without rebuilding threads", () => {
   const canvas = new JournalCanvas({ onSelectNote() {} });
   document.body.appendChild(canvas.root);
@@ -1892,6 +2568,59 @@ test("offline mode disables write controls and says the board is read-only", asy
     app._onClose();
     host.remove();
     gmUser.active = true;
+  }
+});
+
+test("JournalApp floating toolbar writes bulk cosmetics through the shared batch path", async () => {
+  await requestWrite({ type: "createNote", title: "App Bulk One", x: 40, y: 40 });
+  await requestWrite({ type: "createNote", title: "App Bulk Two", x: 340, y: 40 });
+  await settle();
+  const first = sharedByName("App Bulk One");
+  const second = sharedByName("App Bulk Two");
+  assert.ok(first && second);
+
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  try {
+    app._onFirstRender();
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+    const canvasRoot = host.querySelector(".jn-canvas");
+    const canvas = { root: canvasRoot };
+    clickCanvasCard(canvas, first.id);
+    clickCanvasCard(canvas, second.id, { ctrlKey: true });
+    const toolbar = canvasRoot.querySelector(".jn-floating-toolbar");
+    assert.equal(toolbar.hidden, false);
+    assert.deepEqual([...toolbar.querySelectorAll(".jn-ft-btn")].map(item => item.dataset.group),
+      ["style", "font", "picture", "torn", "pin"]);
+
+    const open = group => {
+      const trigger = toolbar.querySelector(`.jn-ft-btn[data-group="${group}"]`);
+      trigger.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+      trigger.click();
+      return canvasRoot.querySelector(".jn-floating-popover");
+    };
+    const popover = open("style");
+    const style = popover.querySelector(".jn-ft-style");
+    style.value = "document";
+    style.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    assert.equal(sharedByName("App Bulk One").system.presentation.extendedStyle, "document");
+    assert.equal(sharedByName("App Bulk Two").system.presentation.extendedStyle, "document");
+
+    const pinPopover = open("pin");
+    const pin = pinPopover.querySelector(".jn-ft-pin");
+    pin.value = "iron";
+    pin.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    assert.equal(sharedByName("App Bulk One").system.attachment.pinStyle, "iron");
+    assert.equal(sharedByName("App Bulk Two").system.attachment.pinStyle, "iron");
+    assert.equal(sharedByName("App Bulk One").system.attachment.mainPinEnabled, true);
+  } finally {
+    app._onClose();
+    host.remove();
   }
 });
 
@@ -2254,6 +2983,61 @@ test("private link edits accept cosmetics and anchors but never identity or targ
     assert.equal(rejected.ends, "loose");
     assert.equal(rejected.sourceAnchorId, "main");
     assert.equal(rejected.secondaryColor, "", "a bad secondary dye degrades to none");
+  } finally {
+    workspace.destroy();
+    await privateStore.remove(page);
+  }
+});
+
+test("private workspace applies bulk cosmetic fields in one save and never widens them", async () => {
+  const user = makeUser("Player000000099", { name: "Private Bulk" });
+  const page = await privateStore.createFor(user);
+  const workspace = new PrivateWorkspace({ onChange() {} });
+  workspace.setPage(page);
+  try {
+    const firstId = await workspace.createNoteAt({ title: "Bulk private one", x: 0, y: 0 });
+    const secondId = await workspace.createNoteAt({ title: "Bulk private two", x: 300, y: 0 });
+    await workspace.updateNote(firstId, { label: "Keep this label", blocks: [{ blockId: "bulkblock0000001", text: "Keep this text" }] });
+    await workspace.createLink(firstId, secondId, { sourceSide: "right", targetSide: "left" });
+    const labelBefore = workspace.workspace.notes[firstId].label;
+    const blocksBefore = JSON.stringify(workspace.workspace.notes[firstId].blocks);
+    const linksBefore = JSON.stringify(workspace.workspace.notes[firstId].links);
+    const revBefore = privateStore.flags(page).rev ?? 0;
+
+    assert.equal(await workspace.setNotesPresentation([firstId, secondId], {
+      extendedStyle: "document", font: "hand", pictureLayout: "right", torn: true,
+      label: "must be ignored", heading: "must be ignored", forceExtended: true
+    }), true);
+    assert.equal(privateStore.flags(page).rev, revBefore + 1, "both notes share one private save");
+    for (const id of [firstId, secondId]) {
+      const note = workspace.workspace.notes[id];
+      assert.equal(note.presentation.extendedStyle, "document");
+      assert.equal(note.presentation.font, "hand");
+      assert.equal(note.presentation.pictureLayout, "right");
+      assert.equal(note.presentation.torn, true);
+      assert.equal(note.presentation.forceExtended, false, "force is not widened to a bulk set");
+    }
+    assert.equal(workspace.workspace.notes[firstId].label, labelBefore);
+    assert.equal(JSON.stringify(workspace.workspace.notes[firstId].blocks), blocksBefore);
+    assert.equal(JSON.stringify(workspace.workspace.notes[firstId].links), linksBefore);
+
+    const revBeforeAttachment = privateStore.flags(page).rev ?? 0;
+    assert.equal(await workspace.setNotesAttachment([firstId, secondId], {
+      pinStyle: "wax", mainPinEnabled: false, mainSnapRadius: 1, minorSnapRadius: 1
+    }), true);
+    assert.equal(privateStore.flags(page).rev, revBeforeAttachment + 1);
+    for (const id of [firstId, secondId]) {
+      const note = workspace.workspace.notes[id];
+      assert.equal(note.attachment.pinStyle, "wax");
+      assert.equal(note.attachment.mainPinEnabled, true, "pin enable stays out of bulk");
+      assert.equal(note.attachment.mainSnapRadius, 24, "snap radii stay out of bulk");
+      assert.equal(note.attachment.minorSnapRadius, 6);
+    }
+    assert.equal(await workspace.setNotesPresentation([firstId, secondId], { forceExtended: true }), false,
+      "a multi-note force-extended request is refused at the data layer");
+    assert.equal(await workspace.setNotesPresentation([firstId], { forceExtended: true }), true,
+      "the single-note control still works");
+    assert.equal(workspace.workspace.notes[firstId].presentation.forceExtended, true);
   } finally {
     workspace.destroy();
     await privateStore.remove(page);

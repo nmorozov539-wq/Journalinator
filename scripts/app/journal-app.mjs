@@ -17,7 +17,7 @@ import { openVaultDialog } from "../secrets/vault-ui.mjs";
 import * as secrets from "../secrets/secret-actions.mjs";
 import { t } from "../i18n.mjs";
 import { stripSecretPrefix } from "../secrets/model.mjs";
-import { resolvePresentation } from "../presentation.mjs";
+import { NOTE_FONT_KEYS, PICTURE_LAYOUTS, PIN_STYLES, PRESENTATION_STYLES, resolvePresentation } from "../presentation.mjs";
 import { resolveActorStatus } from "../actor-status.mjs";
 
 /** Runs a GM vault action and surfaces failures (e.g. the vault was locked meanwhile). */
@@ -119,13 +119,13 @@ export default class JournalApp extends ApplicationV2 {
       if (slot && this.#selectedNoteId === id) this.#editor.editBoardBlock(id, blockId, slot);
     },
     onFocusNote: id => this.#canvas.focusNote(id),
-    onSelectNote: id => { this.#selectedNoteId = id; this.render(); },
+    onSelectNote: id => { this.#selectedNoteId = id; this.#editor.open(id); this.#editor.render(); },
     onSetMainPinEnabled: (id, enabled) => this.#setMainPinEnabled(id, enabled)
   });
   // Every canvas action is routed by what it touches: GM-only things go to the vault in this
   // client, everything else is a normal shared write request (spec §14).
   #canvas = new JournalCanvas({
-    onSelectNote: id => { this.#selectedNoteId = id; this.render(); },
+    onSelectNote: id => { this.#selectedNoteId = id; this.#editor.open(id); this.#editor.render(); },
     onReadCardText: (id, kind) => {
       const note = notesStore.getNote(id);
       if (!note) return "";
@@ -190,6 +190,10 @@ export default class JournalApp extends ApplicationV2 {
     onUpdateLink: (noteId, linkId, fields) => notesStore.isHiddenLink(noteId, linkId)
       ? gm(() => secrets.updateHiddenLink(noteId, linkId, fields))
       : requestWrite({ type: "updateLink", noteId, linkId, fields }),
+    // Floating-toolbar cosmetic batches. Presentation changes never touch label/content/images;
+    // attachment batches are restricted to the cosmetic pin appearance (never pin enable/radius).
+    onSetPresentation: (ids, fields) => this.#setNotePresentation(ids, fields),
+    onSetAttachment: (ids, fields) => this.#setNoteAttachment(ids, fields),
     onDeleteLink: (noteId, linkId) => notesStore.isHiddenLink(noteId, linkId)
       ? gm(() => secrets.deleteHiddenLink(noteId, linkId))
       : requestWrite({ type: "deleteLink", noteId, linkId }),
@@ -224,6 +228,86 @@ export default class JournalApp extends ApplicationV2 {
   #removeLabel(labelId) {
     if (notesStore.isHiddenLabel(labelId)) return gm(() => secrets.removeHiddenLabel(labelId));
     return requestWrite({ type: "removeLabel", labelId });
+  }
+
+  #warnBatch(key) {
+    ui.notifications?.warn(t(key));
+  }
+
+  /**
+   * Resolve every requested cosmetic target before deciding where the batch goes. A stale/
+   * trashed id, a mixed shared + GM-only selection, or several GM-only notes is refused as a
+   * whole so the batch can never apply to a silent subset.
+   */
+  #resolveCosmeticBatch(ids) {
+    const shared = [];
+    const secret = [];
+    const seen = new Set();
+    for (const id of ids) {
+      if (typeof id !== "string" || !id || seen.has(id)) return { error: "stale" };
+      seen.add(id);
+      if (notesStore.isSecretNote(id)) {
+        secret.push(id);
+        continue;
+      }
+      const page = notesStore.getSharedPage(id);
+      if (!page || page.system.deleted) return { error: "stale" };
+      shared.push(id);
+    }
+    if (shared.length && secret.length) return { error: "mixed" };
+    if (secret.length > 1) return { error: "manySecrets" };
+    return { shared, secret };
+  }
+
+  #batchErrorKey(error) {
+    if (error === "mixed") return "JN.Toolbar.BatchMixed";
+    if (error === "manySecrets") return "JN.Toolbar.BatchManySecrets";
+    return "JN.Toolbar.BatchStale";
+  }
+
+  /**
+   * Cosmetic presentation batch for the floating toolbar. Shared notes go through the validated
+   * batch socket request; a GM-only note stays on the vault path. Mixing tiers is refused rather
+   * than silently writing one side. Labels, blocks, images and link topology are never included.
+   */
+  #setNotePresentation(ids, fields) {
+    if (!Array.isArray(ids) || !ids.length || !fields || typeof fields !== "object") return;
+    if (this.#canvas.readOnly) return;
+    const batch = this.#resolveCosmeticBatch(ids);
+    if (batch.error) return this.#warnBatch(this.#batchErrorKey(batch.error));
+    const clean = {};
+    if (PRESENTATION_STYLES.includes(fields.extendedStyle)) clean.extendedStyle = fields.extendedStyle;
+    if (NOTE_FONT_KEYS.includes(fields.font)) clean.font = fields.font;
+    if (PICTURE_LAYOUTS.includes(fields.pictureLayout)) clean.pictureLayout = fields.pictureLayout;
+    if (typeof fields.torn === "boolean") clean.torn = fields.torn;
+    // Force-extended is a single-note control; never let a batch widen the set unexpectedly.
+    if (typeof fields.forceExtended === "boolean") {
+      if (ids.length !== 1) return this.#warnBatch("JN.Toolbar.BatchSingle");
+      clean.forceExtended = fields.forceExtended;
+    }
+    if (!Object.keys(clean).length) return;
+    if (batch.secret.length) {
+      return gm(() => secrets.setSecretNotePresentation(batch.secret[0], clean));
+    }
+    return requestWrite({ type: "setNotePresentation", noteIds: batch.shared, fields: clean });
+  }
+
+  /**
+   * Cosmetic attachment batch. The generic attachment socket request deliberately rejects
+   * `mainPinEnabled`, and the toolbar only ever offers pin appearance for a selection, so snap
+   * radii, pin enable/disable and redistribution stay out of bulk edits.
+   */
+  #setNoteAttachment(ids, fields) {
+    if (!Array.isArray(ids) || !ids.length || !fields || typeof fields !== "object") return;
+    if (this.#canvas.readOnly) return;
+    if (!PIN_STYLES.includes(fields.pinStyle)) return;
+    const batch = this.#resolveCosmeticBatch(ids);
+    if (batch.error) return this.#warnBatch(this.#batchErrorKey(batch.error));
+    const clean = { pinStyle: fields.pinStyle };
+    if (batch.secret.length) {
+      return gm(() => secrets.setSecretNoteAttachment(batch.secret[0], clean));
+    }
+    return requestWrite({ type: "setNoteAttachment", noteIds: batch.shared, fields: clean });
   }
 
   /** Main-pin removal is undoable; enabling only reveals the pin again. */
@@ -899,6 +983,14 @@ export default class JournalApp extends ApplicationV2 {
   _replaceHTML(result, content) {
     const oldSearch = content.querySelector(".journalinator-search");
     const restoreSearch = oldSearch && oldSearch === document.activeElement;
+    // The canvas subtree survives a re-render (it is moved into the new root), but moving it
+    // blurs the focused control. Capture a stable key from screen-space overlays first so a
+    // popover field keeps focus across a write/render cycle.
+    const active = content.ownerDocument?.activeElement ?? document.activeElement;
+    const popoverFocusKey = active?.closest?.(".jn-floating-popover")
+      ? active.dataset.jnFocusKey : null;
+    const toolbarGroup = active?.closest?.(".jn-floating-toolbar")
+      ? active.dataset.group : null;
     this.#replacingHTML = true;
     try {
       content.replaceChildren(result);
@@ -912,6 +1004,20 @@ export default class JournalApp extends ApplicationV2 {
       search.focus({ preventScroll: true });
       search.setSelectionRange(oldSearch.selectionStart, oldSearch.selectionEnd, oldSearch.selectionDirection);
       return;
+    }
+    if (popoverFocusKey) {
+      const field = result.querySelector(`[data-jn-focus-key="${CSS.escape(popoverFocusKey)}"]`);
+      if (field?.isConnected) {
+        field.focus({ preventScroll: true });
+        return;
+      }
+    }
+    if (toolbarGroup) {
+      const button = result.querySelector(`.jn-floating-toolbar [data-group="${CSS.escape(toolbarGroup)}"]`);
+      if (button?.isConnected) {
+        button.focus({ preventScroll: true });
+        return;
+      }
     }
     const editorInput = result.querySelector(".jn-card-text-input, .jn-block-input");
     if (editorInput) editorInput.focus({ preventScroll: true });
