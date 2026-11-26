@@ -1613,24 +1613,32 @@ input.jn-task-checkbox:disabled { cursor: default; }
 }
 .jn-thread-pin {
   display: inline;
-  r: var(--jn-link-pin-radius);
+  r: calc(var(--jn-link-pin-radius) * var(--jn-zoom-comp, 1));
   fill: var(--jn-link-pin-fill);
   stroke: var(--jn-link-pin-stroke);
   stroke-width: 1px;
+}
+.jn-links .jn-board-pin[data-pin-index] {
+  r: calc(var(--jn-link-pin-radius) * var(--jn-zoom-comp, 1));
 }
 .jn-link-color-default .jn-thread { stroke: var(--jn-thread); }
 .jn-link-color-link1 .jn-thread { stroke: var(--jn-link-1); }
 .jn-link-color-link2 .jn-thread { stroke: var(--jn-link-2); }
 .jn-link-color-link3 .jn-thread { stroke: var(--jn-link-3); }
-.jn-link-arrow { fill: var(--jn-thread); transform-box: view-box; pointer-events: none; }
+.jn-link-arrow {
+  fill: var(--jn-thread);
+  transform: scale(calc(var(--jn-link-arrow-scale) * var(--jn-zoom-comp, 1)));
+  transform-box: view-box;
+  pointer-events: none;
+}
 .jn-link-color-link1 .jn-link-arrow { fill: var(--jn-link-1); }
 .jn-link-color-link2 .jn-link-arrow { fill: var(--jn-link-2); }
 .jn-link-color-link3 .jn-link-arrow { fill: var(--jn-link-3); }
 .jn-link-label {
-  font-size: var(--jn-link-label-size);
+  font-size: calc(var(--jn-link-label-size) * var(--jn-zoom-comp, 1));
   fill: var(--jn-link-label-color);
   stroke: var(--jn-link-halo);
-  stroke-width: var(--jn-link-halo-width);
+  stroke-width: calc(var(--jn-link-halo-width) * var(--jn-zoom-comp, 1));
   stroke-linejoin: round;
   paint-order: stroke;
   text-anchor: middle;
@@ -1668,10 +1676,10 @@ input.jn-task-checkbox:disabled { cursor: default; }
     drop-shadow(0 0 7px color-mix(in srgb, var(--jn-link-select) 50%, transparent));
 }
 .jn-link-selected .jn-thread-pin {
-  r: calc(var(--jn-link-pin-radius) * 1.35);
+  r: calc(var(--jn-link-pin-radius) * var(--jn-zoom-comp, 1) * 1.35);
 }
 .jn-link-selected .jn-link-arrow {
-  transform: scale(calc(var(--jn-link-arrow-scale) * 1.15));
+  transform: scale(calc(var(--jn-link-arrow-scale) * var(--jn-zoom-comp, 1) * 1.15));
 }
 
 .jn-link-preview {

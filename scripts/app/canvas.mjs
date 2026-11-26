@@ -40,6 +40,7 @@ export default class JournalCanvas {
     this.movingThreads = new Set();
     this.threadFrame = null;
     this.threadTime = null;
+    this.zoomFrame = null;
     this.selectedNoteId = null;
     this.selectedLabelIds = new Set();
     this.selectedNoteIds = new Set();
@@ -145,7 +146,9 @@ export default class JournalCanvas {
     if (this.linkDrawTimer !== null) clearTimeout(this.linkDrawTimer);
     this.linkDrawTimer = null;
     if (this.threadFrame !== null) this.root.ownerDocument.defaultView.cancelAnimationFrame(this.threadFrame);
+    if (this.zoomFrame !== null) this.root.ownerDocument.defaultView.cancelAnimationFrame(this.zoomFrame);
     this.threadFrame = this.threadTime = null;
+    this.zoomFrame = null;
     this.threads.clear();
     this.pinDrag = null;
     this.movingThreads.clear();
@@ -641,6 +644,28 @@ export default class JournalCanvas {
     this.root.style.setProperty("--jn-board-pattern-size", `${pattern}px`);
     this.root.style.setProperty("--jn-board-pattern-pos", `${this.view.x}px ${this.view.y}px`);
     this.root.classList.toggle("jn-far-zoom", this.view.k < 0.48);
+    this.#queueZoomComp();
+  }
+
+  /**
+   * Pins, arrows and labels live inside the CSS-scaled world while thread strokes are
+   * non-scaling. Dividing by the zoom keeps their on-screen size steady for k in [0.5, 2]
+   * and eases off outside that range so extreme zooms still feel like zooming.
+   */
+  #syncZoomComp() {
+    const k = this.view.k || 1;
+    const comp = Math.min(2, Math.max(0.5, 1 / k));
+    this.root.style.setProperty("--jn-zoom-comp", String(Math.round(comp * 1000) / 1000));
+  }
+
+  #queueZoomComp() {
+    if (this.zoomFrame !== null) return;
+    const win = this.root.ownerDocument.defaultView;
+    if (!win?.requestAnimationFrame) { this.#syncZoomComp(); return; }
+    this.zoomFrame = win.requestAnimationFrame(() => {
+      this.zoomFrame = null;
+      this.#syncZoomComp();
+    });
   }
 
   /**
