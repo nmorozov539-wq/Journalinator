@@ -1622,7 +1622,7 @@ input.jn-task-checkbox:disabled { cursor: default; }
 .jn-link-color-link1 .jn-thread { stroke: var(--jn-link-1); }
 .jn-link-color-link2 .jn-thread { stroke: var(--jn-link-2); }
 .jn-link-color-link3 .jn-thread { stroke: var(--jn-link-3); }
-.jn-link-arrow { fill: var(--jn-thread); pointer-events: none; }
+.jn-link-arrow { fill: var(--jn-thread); transform-box: view-box; pointer-events: none; }
 .jn-link-color-link1 .jn-link-arrow { fill: var(--jn-link-1); }
 .jn-link-color-link2 .jn-link-arrow { fill: var(--jn-link-2); }
 .jn-link-color-link3 .jn-link-arrow { fill: var(--jn-link-3); }
@@ -1649,12 +1649,30 @@ input.jn-task-checkbox:disabled { cursor: default; }
   stroke-opacity: 0.75;
   stroke-linecap: round;
 }
-.jn-link-selected .jn-thread { stroke-width: var(--jn-link-width-selected); }
 .jn-link-hidden .jn-link-label { fill: var(--jn-gm); }
 .jn-link-hint .jn-thread {
   filter: var(--jn-link-shadow) drop-shadow(0 0 3px var(--jn-hint));
 }
 .jn-link-hint .jn-link-label { fill: var(--jn-hint); }
+.jn-link-selected .jn-thread {
+  stroke-width: var(--jn-link-width-selected);
+  filter: var(--jn-link-shadow)
+    drop-shadow(0 0 2px color-mix(in srgb, var(--jn-link-select) 90%, transparent))
+    drop-shadow(0 0 7px color-mix(in srgb, var(--jn-link-select) 50%, transparent));
+}
+/* Selected + hint keeps both glows instead of the later filter replacing the hint. */
+.jn-link-hint.jn-link-selected .jn-thread {
+  filter: var(--jn-link-shadow)
+    drop-shadow(0 0 3px var(--jn-hint))
+    drop-shadow(0 0 2px color-mix(in srgb, var(--jn-link-select) 90%, transparent))
+    drop-shadow(0 0 7px color-mix(in srgb, var(--jn-link-select) 50%, transparent));
+}
+.jn-link-selected .jn-thread-pin {
+  r: calc(var(--jn-link-pin-radius) * 1.35);
+}
+.jn-link-selected .jn-link-arrow {
+  transform: scale(calc(var(--jn-link-arrow-scale) * 1.15));
+}
 
 .jn-link-preview {
   fill: none;

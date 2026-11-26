@@ -415,7 +415,8 @@ export default class JournalCanvas {
         const points = directed ? arrowHead(anchor, lead) : null;
         return `<circle class="jn-thread-pin" cx="${anchor.x - anchor.nx * THREAD_PIN_RADIUS}"
           cy="${anchor.y - anchor.ny * THREAD_PIN_RADIUS}"/>
-          ${points ? `<polygon class="jn-link-arrow" points="${points}"/>` : ""}`;
+          ${points ? `<polygon class="jn-link-arrow" points="${points}"
+            style="transform-origin:${anchor.x}px ${anchor.y}px"/>` : ""}`;
       };
       const dimmed = dimmedIds.has(note._id) || dimmedIds.has(link.targetId);
       const dashed = !link.hidden && link.lineStyle === "dashed";
