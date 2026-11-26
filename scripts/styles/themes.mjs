@@ -17,6 +17,7 @@
  * repaints everything that defaults to `text`.
  */
 import { CARD_STYLES } from "./registry.mjs";
+import { LINK_COLOR_SLOTS } from "../link-colors.mjs";
 
 export const COLOR_TOKENS = Object.freeze([
   "bg", "panel", "text", "muted", "line", "acc", "gm", "hint", "thread",
@@ -31,8 +32,6 @@ export const ALIGNMENTS = Object.freeze(["left", "center", "right"]);
 export const FONT_KEYS = Object.freeze(["system", "serif", "mono", "rounded"]);
 export const SHADOW_KEYS = Object.freeze(["none", "flat", "paper", "raised", "deep"]);
 export const LINK_SHADOW_KEYS = Object.freeze(["none", "soft"]);
-
-const LINK_SLOTS = Object.freeze(["link1", "link2", "link3"]);
 
 const FONTS = Object.freeze({
   system: "system-ui, sans-serif",
@@ -144,7 +143,7 @@ function normalizeLinks(raw, board) {
   const input = isObject(raw) ? raw : {};
   const colorInput = isObject(input.colors) ? input.colors : {};
   const colors = {};
-  for (const slot of LINK_SLOTS) {
+  for (const slot of LINK_COLOR_SLOTS) {
     colors[slot] = colorRef(colorInput[slot], DEFAULT_LINK_COLORS[slot]);
   }
   return {
@@ -470,7 +469,7 @@ export function themeToVars(theme) {
   vars["--jn-link-halo"] = resolveColor(links.halo ?? BASE_LINKS.halo, colors);
   vars["--jn-link-halo-width"] = pixel(links.haloWidth ?? BASE_LINKS.haloWidth);
   vars["--jn-link-select"] = resolveColor(links.selectColor ?? BASE_LINKS.selectColor, colors);
-  for (const [index, slot] of LINK_SLOTS.entries()) {
+  for (const [index, slot] of LINK_COLOR_SLOTS.entries()) {
     vars[`--jn-link-${index + 1}`] = resolveColor(linkColors[slot] ?? DEFAULT_LINK_COLORS[slot], colors);
   }
 

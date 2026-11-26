@@ -3,6 +3,7 @@ import {
   CARD_SIDES, MAX_THREAD_PINS, THREAD_PIN_RADIUS, cardEdgeAt, cardPointAnchor, moveThreadPin, threadAttachment, validThreadPin
 } from "../card-ports.mjs";
 import { arrowHead, pinnedThreadPath, ThreadMotion } from "../link-thread.mjs";
+import { LINK_COLOR_SLOTS, normalizeLinkColor } from "../link-colors.mjs";
 import { noteImageSource } from "../image-url.mjs";
 import { hasAnyLock } from "../locks.mjs";
 import { renderMarkdown } from "../markdown.mjs";
@@ -11,16 +12,8 @@ import { DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, STAMP_CORNERS, STAMP
 
 const DRAG_THRESHOLD = 5;
 let threadMaskSequence = 0;
-const LINK_COLORS = ["", "#a393f2", "#d6a45c", "#d77b91"];
-const LINK_DEFAULT_COLOR = "#8e8e9a";
+const LINK_COLOR_OPTIONS = ["", ...LINK_COLOR_SLOTS];
 const LINK_DIRECTIONS = new Set(["none", "one", "two"]);
-const SAFE_LINK_COLORS = new Set(LINK_COLORS);
-
-/** Maps anything outside the toolbar palette to the default color before it reaches SVG markup. */
-function safeLinkColor(color) {
-  const normalized = typeof color === "string" ? color.toLowerCase() : "";
-  return SAFE_LINK_COLORS.has(normalized) ? normalized : "";
-}
 
 /**
  * The note canvas: pan/zoom viewport, absolutely-positioned cards, free text labels, and now
@@ -414,22 +407,22 @@ export default class JournalCanvas {
       const pins = this.pinDrag?.id === link.id ? moveThreadPin(savedPins, this.pinDrag) ?? savedPins : savedPins;
       threads.set(link.id, { start: p, end: r, pins, motion });
       const { path: d, center: { x: mx, y: my }, startLead, endLead, start, end } = pinnedThreadPath(p, r, pins, motion);
-      const color = safeLinkColor(link.color) || LINK_DEFAULT_COLOR;
+      const color = normalizeLinkColor(link.color);
+      const colorClass = color ? `jn-link-color-${color}` : "jn-link-color-default";
       const direction = LINK_DIRECTIONS.has(link.direction) ? link.direction : "none";
       const selected = link.id === this.selectedLinkId;
       const endpoint = (anchor, directed, lead) => {
         const points = directed ? arrowHead(anchor, lead) : null;
         return `<circle class="jn-thread-pin" cx="${anchor.x - anchor.nx * THREAD_PIN_RADIUS}"
           cy="${anchor.y - anchor.ny * THREAD_PIN_RADIUS}"/>
-          ${points ? `<polygon class="jn-link-arrow${color === LINK_DEFAULT_COLOR ? " jn-thread-arrow-default" : ""}"
-          points="${points}" fill="${color}"/>` : ""}`;
+          ${points ? `<polygon class="jn-link-arrow" points="${points}"/>` : ""}`;
       };
       const dimmed = dimmedIds.has(note._id) || dimmedIds.has(link.targetId);
       const linkId = foundry.utils.escapeHTML(String(link.id ?? ""));
 
-      const linkClasses = [link.hidden ? "jn-link-hidden" : "", link.hint ? "jn-link-hint" : ""].join(" ").trim();
+      const linkClasses = [colorClass, link.hidden ? "jn-link-hidden" : "", link.hint ? "jn-link-hint" : ""].join(" ").trim();
       body += `<g data-id="${linkId}" class="${linkClasses}" opacity="${dimmed ? 0.15 : 1}">
-        <path class="jn-thread${color === LINK_DEFAULT_COLOR ? " jn-thread-default" : ""}" d="${d}" fill="none" stroke="${color}" stroke-width="${selected ? 3.5 : 2}"
+        <path class="jn-thread" d="${d}" fill="none" stroke-width="${selected ? 3.5 : 2}"
           ${link.hidden ? 'stroke-dasharray="2 6" stroke-linecap="round"' : link.lineStyle === "dashed" ? 'stroke-dasharray="7 6"' : ""}/>
         ${endpoint(start, direction === "two", startLead)}
         ${endpoint(end, direction !== "none", endLead)}
@@ -553,12 +546,17 @@ export default class JournalCanvas {
 
     this.#positionLinkToolbar(link);
     this.linkToolbar.style.display = "flex";
-    const currentColor = safeLinkColor(link.color);
+    const currentColor = normalizeLinkColor(link.color);
     const direction = LINK_DIRECTIONS.has(link.direction) ? link.direction : "none";
+    const swatch = slot => {
+      const label = t(slot ? `JN.Link.Color.${slot}` : "JN.Link.Color.default");
+      return `<button type="button" class="jn-link-color jn-link-swatch-${slot || "default"}${slot === currentColor ? " on" : ""}"
+        data-color="${slot}" title="${label}" aria-label="${label}" aria-pressed="${slot === currentColor}"></button>`;
+    };
     this.linkToolbar.innerHTML = `
       <input type="text" class="jn-link-label-input" placeholder="${t("JN.Link.Label")}" value="${foundry.utils.escapeHTML(link.label ?? "")}">
       <button type="button" class="jn-link-dir" title="${t("JN.Link.Direction")}">${{ none: "—", one: "→", two: "↔" }[direction]}</button>
-      <span class="jn-link-colors">${LINK_COLORS.map(c => `<button type="button" class="jn-link-color${c === currentColor ? " on" : ""}" data-color="${c}" style="background:${c || `var(--jn-thread, ${LINK_DEFAULT_COLOR})`}"></button>`).join("")}</span>
+      <span class="jn-link-colors">${LINK_COLOR_OPTIONS.map(swatch).join("")}</span>
       <button type="button" class="jn-link-dash" title="${t("JN.Link.LineStyle")}">${link.lineStyle === "dashed" ? "┄┄" : "──"}</button>
       ${this.#gmLinkButtons(link)}
       <button type="button" class="jn-link-delete" title="${t("JN.Link.Delete")}">✕</button>

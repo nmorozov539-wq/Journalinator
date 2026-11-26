@@ -1614,9 +1614,14 @@ input.jn-task-checkbox:disabled { cursor: default; }
   stroke: var(--jn-link-pin-stroke);
   stroke-width: 1px;
 }
-.jn-thread-default { stroke: var(--jn-thread); }
-.jn-thread-arrow-default { fill: var(--jn-thread); }
-.jn-link-arrow { pointer-events: none; }
+.jn-link-color-default .jn-thread { stroke: var(--jn-thread); }
+.jn-link-color-link1 .jn-thread { stroke: var(--jn-link-1); }
+.jn-link-color-link2 .jn-thread { stroke: var(--jn-link-2); }
+.jn-link-color-link3 .jn-thread { stroke: var(--jn-link-3); }
+.jn-link-arrow { fill: var(--jn-thread); pointer-events: none; }
+.jn-link-color-link1 .jn-link-arrow { fill: var(--jn-link-1); }
+.jn-link-color-link2 .jn-link-arrow { fill: var(--jn-link-2); }
+.jn-link-color-link3 .jn-link-arrow { fill: var(--jn-link-3); }
 .jn-link-label {
   font-size: var(--jn-link-label-size);
   fill: var(--jn-link-label-color);
@@ -1683,6 +1688,10 @@ input.jn-task-checkbox:disabled { cursor: default; }
   min-width: 18px;
   border-radius: 50%;
 }
+.jn-link-swatch-default { background: var(--jn-thread); }
+.jn-link-swatch-link1 { background: var(--jn-link-1); }
+.jn-link-swatch-link2 { background: var(--jn-link-2); }
+.jn-link-swatch-link3 { background: var(--jn-link-3); }
 .jn-link-color.on {
   border: 2px solid var(--jn-text);
 }

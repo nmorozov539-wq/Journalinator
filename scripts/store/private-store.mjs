@@ -1,6 +1,7 @@
 import { getContainerIds } from "./containers.mjs";
 import { CARD_STYLES, seedTilt } from "../styles/registry.mjs";
 import { CARD_SIDES, MAX_THREAD_PINS, validLinkPoint, validThreadPin } from "../card-ports.mjs";
+import { normalizeLinkColor } from "../link-colors.mjs";
 import { DEFAULT_STAMP_CORNER, STAMP_COLORS, isStampCorner, stampUrl } from "../stamps.mjs";
 import { t } from "../i18n.mjs";
 
@@ -36,7 +37,7 @@ function normalizeLink(link) {
     targetId: typeof link?.targetId === "string" ? link.targetId : "",
     label: typeof link?.label === "string" ? link.label.slice(0, 200) : "",
     direction,
-    color: typeof link?.color === "string" ? link.color : "",
+    color: normalizeLinkColor(link?.color),
     lineStyle,
     origin: link?.origin === "typed" ? "typed" : "drawn",
     edited: link?.edited === true,

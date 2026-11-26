@@ -204,6 +204,10 @@
   "JN.Canvas.By": "by {author}",
 
   "JN.Link.Label": "Label",
+  "JN.Link.Color.default": "Default color",
+  "JN.Link.Color.link1": "Link color 1",
+  "JN.Link.Color.link2": "Link color 2",
+  "JN.Link.Color.link3": "Link color 3",
   "JN.Link.Direction": "Direction",
   "JN.Link.LineStyle": "Line style",
   "JN.Link.Delete": "Delete link",

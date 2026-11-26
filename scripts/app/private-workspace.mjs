@@ -3,6 +3,7 @@ import PrivateNoteEditor from "./private-editor.mjs";
 import { privateStore } from "../store/private-store.mjs";
 import { CARD_STYLES, cardStyleKey } from "../styles/registry.mjs";
 import { linkAnchors, moveThreadPin } from "../card-ports.mjs";
+import { isLinkColor, normalizeLinkColor } from "../link-colors.mjs";
 import { attachedStampIds, DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, stampUrl } from "../stamps.mjs";
 import { toggleTaskListItem } from "../markdown.mjs";
 import { t } from "../i18n.mjs";
@@ -297,9 +298,7 @@ export default class PrivateWorkspace {
       if (!link) return;
       if (typeof fields.label === "string") link.label = fields.label.slice(0, 200);
       if (["none", "one", "two"].includes(fields.direction)) link.direction = fields.direction;
-      if (typeof fields.color === "string" && ["", "#a393f2", "#d6a45c", "#d77b91"].includes(fields.color)) {
-        link.color = fields.color;
-      }
+      if (isLinkColor(fields.color)) link.color = normalizeLinkColor(fields.color);
       if (fields.lineStyle === "solid" || fields.lineStyle === "dashed") link.lineStyle = fields.lineStyle;
       const pins = moveThreadPin(link.pins, fields.pinMove);
       if (pins) link.pins = pins;

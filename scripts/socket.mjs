@@ -2,6 +2,7 @@ import { getContainerIds } from "./store/containers.mjs";
 import { privateStore } from "./store/private-store.mjs";
 import { CARD_STYLES, seedTilt } from "./styles/registry.mjs";
 import { cardPorts, linkAnchors, moveThreadPin, validCardPorts } from "./card-ports.mjs";
+import { isLinkColor, normalizeLinkColor } from "./link-colors.mjs";
 import { noteImagePath } from "./image-url.mjs";
 import { reconcileTypedLinks } from "./wikilinks.mjs";
 import { maybeSnapshot } from "./snapshots.mjs";
@@ -25,7 +26,6 @@ const MIN_LABEL_SIZE = 8;
 const MAX_LABEL_SIZE = 96;
 const LINK_DIRECTIONS = new Set(["none", "one", "two"]);
 const LINK_LINE_STYLES = new Set(["solid", "dashed"]);
-const LINK_COLORS = new Set(["", "#a393f2", "#d6a45c", "#d77b91"]);
 const DOCUMENT_ID_RE = /^[a-zA-Z0-9]{16}$/;
 const MAX_DECLASSIFIED_BLOCKS = 500;
 const MAX_DECLASSIFIED_LINKS = 200;
@@ -104,16 +104,17 @@ function notifyUser(userId, reason) {
   game.socket.emit(CHANNEL, { type: "writeRejected", forUserId: userId, reason: text }, { recipients: [userId] });
 }
 
-/** Keeps only the fields a link toolbar is allowed to change, with validated values. */
-function sanitizeLinkFields(fields) {
+/**
+ * Keeps only the fields a link toolbar is allowed to change, with validated values.
+ * Colors accept "" (default), the three slot keys, or the three legacy hexes. In every
+ * accepted case the stored value is a slot key, so newly written data never carries a hex.
+ */
+export function sanitizeLinkFields(fields) {
   if (!fields || typeof fields !== "object") return null;
   const clean = {};
   if (typeof fields.label === "string") clean.label = fields.label.slice(0, MAX_LABEL_LENGTH);
   if (LINK_DIRECTIONS.has(fields.direction)) clean.direction = fields.direction;
-  if (typeof fields.color === "string") {
-    const color = fields.color.toLowerCase();
-    if (LINK_COLORS.has(color)) clean.color = color;
-  }
+  if (isLinkColor(fields.color)) clean.color = normalizeLinkColor(fields.color);
   if (LINK_LINE_STYLES.has(fields.lineStyle)) clean.lineStyle = fields.lineStyle;
   return Object.keys(clean).length ? clean : null;
 }
