@@ -557,6 +557,13 @@ function pixel(n) {
   return `${Math.round(n * 100) / 100}px`;
 }
 
+/** Mask luminance is painted as an opaque gray, so a fade of .15 becomes rgb(38,38,38). */
+function maskFill(value) {
+  const fade = Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
+  const channel = Math.round(fade * 255);
+  return `rgb(${channel},${channel},${channel})`;
+}
+
 /** A data path as an inline `url()`; theme images never leave the Foundry routes. */
 function cssUrl(path) {
   if (!path) return "none";
@@ -675,6 +682,9 @@ export function themeToVars(theme) {
   vars["--jn-sc-thread-accent"] = resolveColor(materials.threads.accent, colors);
   vars["--jn-sc-thread-shadow"] = resolveColor(materials.threads.shadow, colors);
   vars["--jn-sc-thread-fade"] = String(materials.threads.fade);
+  // The mask needs a paint value, not the opacity fraction: a theme fade of .15 paints the
+  // active silhouette at 15% luminance (rgb(38,38,38)) instead of a hard-coded gray.
+  vars["--jn-sc-thread-fade-fill"] = maskFill(materials.threads.fade);
   vars["--jn-sc-thread-fade-time"] = `${materials.threads.fadeTime}ms`;
 
   for (const [styleKey, style] of Object.entries(theme.styles)) {

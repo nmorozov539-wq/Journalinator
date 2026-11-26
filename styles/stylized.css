@@ -604,3 +604,203 @@
     animation: none;
   }
 }
+
+/* --- Threads: layered L3 linen and L6 double strand ---------------------------------------- */
+
+/* Primary dye comes from the existing link slot variables; the default slot uses the first
+   theme thread dye. Secondary/accent colour is the stored alternating dye or theme accent. */
+.jn-canvas .jn-link-color-default { --jn-thread-color: var(--jn-sc-thread-1, var(--jn-link-1, #b85d4d)); }
+.jn-canvas .jn-link-color-link1 { --jn-thread-color: var(--jn-link-1, #b85d4d); }
+.jn-canvas .jn-link-color-link2 { --jn-thread-color: var(--jn-link-2, #c7a45e); }
+.jn-canvas .jn-link-color-link3 { --jn-thread-color: var(--jn-link-3, #8fa574); }
+.jn-canvas .jn-link-accent-default { --jn-thread-accent: var(--jn-sc-thread-accent, #d8c49d); }
+.jn-canvas .jn-link-accent-link1 { --jn-thread-accent: var(--jn-link-1, #b85d4d); }
+.jn-canvas .jn-link-accent-link2 { --jn-thread-accent: var(--jn-link-2, #c7a45e); }
+.jn-canvas .jn-link-accent-link3 { --jn-thread-accent: var(--jn-link-3, #8fa574); }
+
+/* The group owns width/material/pattern/colour; every layer only carries its width factor,
+   opacity and sub-pixel offset. Offsets compensate zoom so strands keep their spacing while
+   strokes stay non-scaling. */
+.jn-canvas .jn-thread-layer {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: calc(var(--jn-thread-k, 1) * var(--jn-layer-width, 1) * var(--jn-thread-boost, 1) * 1px);
+  opacity: var(--jn-layer-opacity, 1);
+  transform: translate(
+    calc(var(--jn-layer-dx, 0) * var(--jn-thread-k, 1) * 1px * var(--jn-zoom-comp, 1)),
+    calc(var(--jn-layer-dy, 0) * var(--jn-thread-k, 1) * 1px * var(--jn-zoom-comp, 1))
+  );
+}
+.jn-canvas .jn-link-strokes { pointer-events: none; }
+
+.jn-canvas .jn-thread-shadow { stroke: var(--jn-sc-thread-shadow, #21150c); }
+.jn-canvas .jn-thread-dark {
+  stroke: color-mix(in srgb, var(--jn-thread-color, #b85d4d) 40%, #1e120b);
+}
+.jn-canvas .jn-thread-core,
+.jn-canvas .jn-thread-strand-a,
+.jn-canvas .jn-thread-strand-b { stroke: var(--jn-thread-color, #b85d4d); }
+.jn-canvas .jn-thread-highlight,
+.jn-canvas .jn-thread-fine,
+.jn-canvas .jn-thread-highlight-a,
+.jn-canvas .jn-thread-highlight-b {
+  stroke: color-mix(in srgb, var(--jn-thread-color, #b85d4d) 44%, #ffeac1);
+}
+
+/* Alternating colour: the second full stack recalculates its tones from the accent dye. */
+.jn-canvas .jn-link-stack-accent .jn-thread-dark {
+  stroke: color-mix(in srgb, var(--jn-thread-accent, #d8c49d) 40%, #1e120b);
+}
+.jn-canvas .jn-link-stack-accent .jn-thread-core,
+.jn-canvas .jn-link-stack-accent .jn-thread-strand-a,
+.jn-canvas .jn-link-stack-accent .jn-thread-strand-b { stroke: var(--jn-thread-accent, #d8c49d); }
+.jn-canvas .jn-link-stack-accent .jn-thread-highlight,
+.jn-canvas .jn-link-stack-accent .jn-thread-fine,
+.jn-canvas .jn-link-stack-accent .jn-thread-highlight-a,
+.jn-canvas .jn-link-stack-accent .jn-thread-highlight-b {
+  stroke: color-mix(in srgb, var(--jn-thread-accent, #d8c49d) 44%, #ffeac1);
+}
+
+/* L6's own broken highlight strands are part of the material, not the pattern. */
+.jn-canvas .jn-thread-highlight-a,
+.jn-canvas .jn-thread-highlight-b {
+  stroke-dasharray: calc(var(--jn-thread-k, 1) * 1.5px) calc(var(--jn-thread-k, 1) * 2px);
+}
+.jn-canvas .jn-thread-highlight-b {
+  stroke-dashoffset: calc(var(--jn-thread-k, 1) * 1.75px);
+}
+
+/* Interrupted: every layer breaks proportionally to the thread width. */
+.jn-canvas .jn-link-pattern-interrupted .jn-thread-layer {
+  stroke-dasharray:
+    max(10px, calc(var(--jn-thread-width, 2.6) * 6px))
+    max(5px, calc(var(--jn-thread-width, 2.6) * 3px));
+  stroke-dashoffset: 0;
+}
+/* Alternating: solid primary stack plus a full accent stack with long alternating dashes. */
+.jn-canvas .jn-link-pattern-alternating .jn-link-stack-accent .jn-thread-layer {
+  stroke-dasharray:
+    max(12px, calc(var(--jn-thread-width, 2.6) * 6px))
+    max(12px, calc(var(--jn-thread-width, 2.6) * 6px));
+  stroke-dashoffset: 0;
+}
+
+/* Loose end treatment: two small stacked tails at each fixed anchor. */
+.jn-canvas .jn-thread-tail {
+  fill: none;
+  stroke: var(--jn-thread-color, #b85d4d);
+  stroke-width: calc(var(--jn-thread-k, 1) * 1.3 * 1px);
+  stroke-linecap: round;
+}
+.jn-canvas .jn-thread-tail-fine {
+  stroke: color-mix(in srgb, var(--jn-thread-color, #b85d4d) 44%, #ffeac1);
+  stroke-width: calc(var(--jn-thread-k, 1) * 0.8 * 1px);
+}
+
+/* State precedence: hidden wins over pattern; selected/hint glows compose; dim is whole-group. */
+.jn-canvas .jn-link-hidden .jn-thread-layer {
+  stroke-dasharray: var(--jn-link-dash-hidden, 2 6);
+  stroke-opacity: 0.75;
+}
+.jn-canvas .jn-link-hidden .jn-link-label { fill: var(--jn-gm); }
+.jn-canvas .jn-link-hint .jn-link-strokes { filter: drop-shadow(0 0 3px var(--jn-hint)); }
+.jn-canvas .jn-link-hint .jn-link-label { fill: var(--jn-hint); }
+.jn-canvas .jn-link-selected { --jn-thread-boost: 1.15; }
+.jn-canvas .jn-link-selected .jn-link-strokes {
+  filter: drop-shadow(0 0 2px color-mix(in srgb, var(--jn-link-select, #b85d4d) 90%, transparent))
+    drop-shadow(0 0 7px color-mix(in srgb, var(--jn-link-select, #b85d4d) 50%, transparent));
+}
+.jn-canvas .jn-link-hint.jn-link-selected .jn-link-strokes {
+  filter: drop-shadow(0 0 3px var(--jn-hint))
+    drop-shadow(0 0 2px color-mix(in srgb, var(--jn-link-select, #b85d4d) 90%, transparent))
+    drop-shadow(0 0 7px color-mix(in srgb, var(--jn-link-select, #b85d4d) 50%, transparent));
+}
+
+/* --- Local overlap fade -------------------------------------------------------------------- */
+
+/* Every card silhouette is in one stable mask. White means "draw the thread"; an active
+   hovered/locked/editing note flips only its own polygon to the theme's fade luminance. */
+.jn-canvas .jn-thread-mask-shape {
+  fill: #fff;
+  transition:
+    fill var(--jn-sc-thread-fade-time, 160ms) linear,
+    opacity var(--jn-sc-thread-fade-time, 160ms) linear;
+}
+.jn-canvas .jn-thread-mask-shape.jn-thread-mask-active {
+  fill: var(--jn-sc-thread-fade-fill, #262626);
+}
+
+/* --- Link toolbar: screen-space, independent appearance controls --------------------------- */
+
+.jn-canvas .jn-link-toolbar {
+  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  width: min(420px, 92vw);
+  max-width: 92vw;
+  padding: 7px;
+}
+.jn-canvas .jn-link-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+.jn-canvas .jn-link-toolbar .jn-link-presets button {
+  flex: 1 1 auto;
+  font-size: 11px;
+  padding: 4px 6px;
+}
+.jn-canvas .jn-link-field {
+  display: flex;
+  flex: 1 1 110px;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  color: var(--jn-muted);
+  font-size: 10px;
+  letter-spacing: .02em;
+}
+.jn-canvas .jn-link-field output {
+  color: var(--jn-text);
+  font-variant-numeric: tabular-nums;
+}
+.jn-canvas .jn-link-toolbar select {
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--jn-line);
+  border-radius: 6px;
+  background: var(--jn-bg);
+  color: var(--jn-text);
+}
+.jn-canvas .jn-link-toolbar input[type="range"] {
+  width: 100%;
+  margin: 0;
+  accent-color: var(--jn-acc);
+}
+.jn-canvas .jn-link-toolbar .jn-link-label-input { flex: 1 1 120px; width: auto; }
+.jn-canvas .jn-link-actions { justify-content: flex-end; }
+.jn-canvas .jn-link-toolbar .jn-link-swatch-default {
+  /* "" means "use the theme's default dye" (currently thread dye 1). A two-tone chip keeps it
+     visually distinct from the explicit link1 swatch even when both resolve to that same dye. */
+  background: linear-gradient(135deg,
+    var(--jn-sc-thread-1, var(--jn-link-1, #b85d4d)) 0 50%,
+    var(--jn-sc-thread-accent, #d8c49d) 50% 100%);
+}
+.jn-canvas .jn-link-toolbar .jn-link-swatch-link1 { background: var(--jn-link-1); }
+.jn-canvas .jn-link-toolbar .jn-link-swatch-link2 { background: var(--jn-link-2); }
+.jn-canvas .jn-link-toolbar .jn-link-swatch-link3 { background: var(--jn-link-3); }
+.jn-canvas .jn-link-toolbar .jn-link-secondary-default {
+  background: var(--jn-sc-thread-accent, #d8c49d);
+}
+.jn-canvas .jn-link-toolbar .jn-link-secondary-link1 { background: var(--jn-link-1); }
+.jn-canvas .jn-link-toolbar .jn-link-secondary-link2 { background: var(--jn-link-2); }
+.jn-canvas .jn-link-toolbar .jn-link-secondary-link3 { background: var(--jn-link-3); }
+
+@media (prefers-reduced-motion: reduce) {
+  .jn-canvas .jn-thread-mask-shape {
+    transition: none;
+  }
+}

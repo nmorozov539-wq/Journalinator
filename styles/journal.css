@@ -725,7 +725,6 @@
 .jn-links { z-index: 3; }
 /* Mask luminance, not paint: white keeps the thread, the card silhouette cuts it out. */
 .jn-thread-mask-bg { fill: #fff; }
-.jn-thread-silhouette { fill: #777; }
 
 .jn-selection-box {
   display: none;
@@ -1852,15 +1851,6 @@ input.jn-task-checkbox:disabled { cursor: default; }
 .jn-link-color-link1 .jn-thread { stroke: var(--jn-link-1); }
 .jn-link-color-link2 .jn-thread { stroke: var(--jn-link-2); }
 .jn-link-color-link3 .jn-thread { stroke: var(--jn-link-3); }
-.jn-link-arrow {
-  fill: var(--jn-thread);
-  transform: scale(calc(var(--jn-link-arrow-scale) * var(--jn-zoom-comp, 1)));
-  transform-box: view-box;
-  pointer-events: none;
-}
-.jn-link-color-link1 .jn-link-arrow { fill: var(--jn-link-1); }
-.jn-link-color-link2 .jn-link-arrow { fill: var(--jn-link-2); }
-.jn-link-color-link3 .jn-link-arrow { fill: var(--jn-link-3); }
 .jn-link-label {
   font-size: calc(var(--jn-link-label-size) * var(--jn-zoom-comp, 1));
   fill: var(--jn-link-label-color);
@@ -1878,7 +1868,6 @@ input.jn-task-checkbox:disabled { cursor: default; }
  * - dimmed is a whole-group opacity used by search/filter dimming.
  */
 .jn-link-dimmed { opacity: var(--jn-link-dim-opacity); }
-.jn-link-dashed .jn-thread { stroke-dasharray: var(--jn-link-dash); }
 .jn-link-hidden .jn-thread {
   stroke-dasharray: var(--jn-link-dash-hidden);
   stroke-opacity: 0.75;
@@ -1904,9 +1893,6 @@ input.jn-task-checkbox:disabled { cursor: default; }
 }
 .jn-link-selected .jn-thread-pin {
   r: calc(var(--jn-link-pin-radius) * var(--jn-zoom-comp, 1) * 1.35);
-}
-.jn-link-selected .jn-link-arrow {
-  transform: scale(calc(var(--jn-link-arrow-scale) * var(--jn-zoom-comp, 1) * 1.15));
 }
 
 .jn-link-preview {

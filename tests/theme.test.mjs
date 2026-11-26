@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   applyTheme, BUILTIN_THEME_IDS, getTheme, listThemes, loadSavedThemes, MATERIAL_FONT_KEYS,
@@ -21,7 +22,8 @@ const STYLIZED_TOKENS = [
   "--jn-sc-pin-main-size", "--jn-sc-pin-minor-size", "--jn-sc-pin-route-size", "--jn-sc-pin-rim",
   "--jn-sc-pin-default", "--jn-sc-thread-1", "--jn-sc-thread-2", "--jn-sc-thread-3",
   "--jn-sc-thread-4", "--jn-sc-thread-5", "--jn-sc-thread-6", "--jn-sc-thread-accent",
-  "--jn-sc-thread-shadow", "--jn-sc-thread-fade", "--jn-sc-thread-fade-time"
+  "--jn-sc-thread-shadow", "--jn-sc-thread-fade", "--jn-sc-thread-fade-fill",
+  "--jn-sc-thread-fade-time"
 ];
 
 test("every built-in theme covers every card type and core role", () => {
@@ -96,6 +98,7 @@ test("stylized uses the reference materials and emits the complete token contrac
   assert.equal(vars["--jn-sc-thread-accent"], "#d8c49d");
   assert.equal(vars["--jn-sc-thread-shadow"], "#21150c");
   assert.equal(vars["--jn-sc-thread-fade"], "0.15");
+  assert.equal(vars["--jn-sc-thread-fade-fill"], "rgb(38,38,38)");
   assert.equal(vars["--jn-sc-thread-fade-time"], "160ms");
 
   // The stylized built-in adopts the dye palette instead of preserving the old toolbar colours.
@@ -105,6 +108,19 @@ test("stylized uses the reference materials and emits the complete token contrac
   assert.equal(vars["--jn-link-2"], "#c7a45e");
   assert.equal(vars["--jn-link-3"], "#8fa574");
   assert.equal(vars["--jn-link-pin-radius"], "4px");
+});
+
+test("thread fade emits a mask fill token that stylized.css consumes", () => {
+  const theme = normalizeTheme({ materials: { threads: { fade: 0.5 } } }, { id: "fade" });
+  assert.equal(varFor(theme, "--jn-sc-thread-fade"), "0.5");
+  assert.equal(varFor(theme, "--jn-sc-thread-fade-fill"), "rgb(128,128,128)");
+
+  const clamped = normalizeTheme({ materials: { threads: { fade: 9 } } }, { id: "fade-clamp" });
+  assert.equal(clamped.materials.threads.fade, 1);
+  assert.equal(varFor(clamped, "--jn-sc-thread-fade-fill"), "rgb(255,255,255)");
+
+  const css = readFileSync(new URL("../styles/stylized.css", import.meta.url), "utf8");
+  assert.match(css, /\.jn-thread-mask-shape\.jn-thread-mask-active\s*\{[^}]*fill:\s*var\(--jn-sc-thread-fade-fill/);
 });
 
 test("bundled cork and grain use module-prefixed routes, never a bare /assets URL", () => {

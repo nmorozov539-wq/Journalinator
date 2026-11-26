@@ -126,3 +126,19 @@ Delivered:
 - Tests: **251 pass / 0 fail**; syntax pass; fonts/contrast/tear tests added. Headless Chromium probe verified cork/grain load, rules visible, resize handle hit-test, selector inert.
 
 Reserved for later phases: pin size/style tokens and thread dye/fade tokens are emitted but consumed in Phases 4–5. Per-torn-card drop-shadow performance remains a Phase 8 measurement item.
+
+### Phase 4 — configurable threads and local fade
+
+Implementation agent: `ses_de785b2a5ffeTCT5IQWnTxoxOm`; fixes `ses_de7683b33ffeZBp1xJzAal6YLw`.
+Validation: `ses_de77395d6ffeU6xS5JG1XsTr7R`.
+
+Delivered:
+- L3/L6 layered threads (shadow/dark/core/highlights or two strands) with reference factors, offsets and opacities; no arrowheads or direction UI.
+- Presets Fine 1.3/2%, Standard 2.6/9% (default), Double 2.8/12% L6, Heavy 4/19% L6; independent thickness 0.8–5, slack 0–25%, material, primary/secondary color slots, pattern, ends, label.
+- Continuous/interrupted/alternating patterns; standard/loose ends; free board pins/labels; existing hit path and spring motion. Slug `threadPath` sag = min(100, |dx| * slack); vertical threads straight.
+- Local fade: single per-canvas silhouette mask of rotated/torn cards; hover, lock or inline edit toggles 15%-luminance mask shapes with 160ms transition (reduced-motion off); only stroke stacks fade; pins/labels/hit paths unaffected. Permanent under-card mask removed.
+- Toolbar controls for presets/material/thickness/slack/color/secondary/pattern/ends/label; change-only writes; Escape/outside close and focus return.
+- In-place geometry update path reuses existing SVG nodes on drag; measured Chromium 100 notes/200 links ~6ms geometry update vs ~19–30ms full rebuild, jsdom 238→28ms. No per-link SVG filters; one shared mask.
+- Tests: **267 pass / 0 fail**; syntax pass; browser probes confirm layer widths/offsets, fade on rotated/torn note, toolbar.
+
+Deferred/manual: real Foundry drag/hover and multiplayer fade; per-torn-card drop-shadow cost remains a Phase 8 stress item.

@@ -1218,7 +1218,7 @@ test("legacy attachments follow the board edge when a card resizes", async () =>
   };
   try {
     canvas.refreshGeometry();
-    const path = () => canvas.svg.querySelector(".jn-thread").getAttribute("d");
+    const path = () => canvas.svg.querySelector(".jn-thread-layer").getAttribute("d");
     assert.match(path(), /^M253 150 /);
     assert.match(path(), / 580 247$/);
     height = 400;
@@ -1285,10 +1285,10 @@ test("Alt-click connects edges through saved board pins and the toolbar can repl
     await redraw();
     const thread = host.querySelector(`g[data-id="${link.id}"]`);
     assert.equal(thread.querySelectorAll(".jn-thread-pin").length, 4);
-    assert.match(thread.querySelector(".jn-thread").getAttribute("d"), /100 310 M100 310/);
-    assert.match(thread.parentElement.getAttribute("mask"), /^url\(#jn-thread-mask-/);
-    const lineEnd = thread.querySelector(".jn-thread").getAttribute("d").match(/([-\d.]+) ([-\d.]+)$/).slice(1).join(",");
-    assert.equal(thread.querySelector(".jn-link-arrow").getAttribute("points").split(" ")[0], lineEnd.replace(" ", ","));
+    assert.match(thread.querySelector(".jn-thread-layer").getAttribute("d"), /100 310 M100 310/);
+    assert.match(thread.querySelector(".jn-link-strokes").getAttribute("mask"), /^url\(#jn-thread-mask-/);
+    assert.equal(thread.querySelector(".jn-link-arrow"), null, "Canvas 2 never renders arrowheads");
+    assert.ok(thread.querySelectorAll(".jn-thread-layer").length >= 5, "thread is a layered stroke stack");
     assert.equal(host.querySelector(".jn-link-preview"), null);
     const marker = thread.querySelector('[data-pin-index="0"]');
     const canvas = host.querySelector(".jn-canvas");
@@ -1324,7 +1324,7 @@ test("left drag plucks one thread and keeps its anchors and the other thread fix
   ];
   try {
     canvas.update(notes, { cards: { a: { x: 0, y: 0 }, b: { x: 390, y: 0 }, c: { x: 390, y: 200 } } });
-    const line = id => canvas.svg.querySelector(`g[data-id="${id}"] .jn-thread`).getAttribute("d");
+    const line = id => canvas.svg.querySelector(`g[data-id="${id}"] .jn-thread-layer`).getAttribute("d");
     const original = line("ab"), other = line("ac");
     const hit = canvas.root.querySelector('.jn-link-hit[data-id="ab"]');
     const send = (target, type, y) => target.dispatchEvent(new MouseEvent(type, {
@@ -1348,7 +1348,7 @@ test("left drag plucks one thread and keeps its anchors and the other thread fix
   }
 });
 
-test("link groups carry color slots and state classes without inline paint", async () => {
+test("link groups carry layered stroke stacks, cosmetics and state classes without inline paint", async () => {
   const canvas = new JournalCanvas({ onSelectNote() {} });
   document.body.appendChild(canvas.root);
   applyTheme(canvas.root, getTheme("classic"));
@@ -1358,6 +1358,11 @@ test("link groups carry color slots and state classes without inline paint", asy
       system: {
         style: "sticky", blocks: [], links: [
           { id: "legacy", targetId: "b", color: "#A393F2", label: "Legacy", direction: "one", sourceSide: "right", targetSide: "left" },
+          {
+            id: "modern", targetId: "b", color: "link2", secondaryColor: "link3", label: "Modern",
+            material: "double", thickness: 4.2, slack: 0.2, pattern: "alternating", ends: "loose",
+            sourceSide: "bottom", targetSide: "top"
+          },
           { id: "hint", targetId: "c", color: "link2", hint: true, label: "Hint", lineStyle: "dashed", sourceSide: "right", targetSide: "left" },
           { id: "hidden", targetId: "d", color: "link3", hidden: true, label: "Hidden", lineStyle: "dashed", sourceSide: "right", targetSide: "left" }
         ]
@@ -1374,24 +1379,45 @@ test("link groups carry color slots and state classes without inline paint", asy
     const group = id => canvas.svg.querySelector(`g[data-id="${id}"]`);
     const legacy = group("legacy");
     assert.ok(legacy.classList.contains("jn-link-color-link1"), "legacy hex renders as a slot class");
-    const thread = legacy.querySelector(".jn-thread");
-    assert.equal(thread.hasAttribute("stroke"), false);
-    assert.equal(thread.hasAttribute("stroke-width"), false);
-    assert.equal(thread.hasAttribute("stroke-dasharray"), false);
-    assert.equal(thread.hasAttribute("fill"), false);
+    assert.ok(legacy.classList.contains("jn-link-material-linen"));
+    assert.ok(legacy.classList.contains("jn-link-pattern-continuous"));
+    assert.ok(legacy.classList.contains("jn-link-ends-standard"));
+    assert.equal(legacy.getAttribute("style").includes("--jn-thread-k:"), true);
+    const strokes = legacy.querySelector(".jn-link-strokes");
+    assert.match(strokes.getAttribute("mask"), /^url\(#jn-thread-mask-/);
+    const layers = legacy.querySelectorAll(".jn-thread-layer");
+    assert.equal(layers.length, 5, "L3 has five layers");
+    assert.deepEqual([...layers].map(layer => [...layer.classList].find(name => name.startsWith("jn-thread-") && name !== "jn-thread-layer")),
+      ["jn-thread-shadow", "jn-thread-dark", "jn-thread-core", "jn-thread-highlight", "jn-thread-fine"]);
+    for (const layer of layers) {
+      assert.equal(layer.hasAttribute("stroke"), false);
+      assert.equal(layer.hasAttribute("stroke-width"), false);
+      assert.equal(layer.hasAttribute("stroke-dasharray"), false);
+      assert.equal(layer.hasAttribute("fill"), false);
+      assert.match(layer.getAttribute("style"), /--jn-layer-width:/);
+    }
     assert.equal(legacy.hasAttribute("opacity"), false);
-    const arrow = legacy.querySelector(".jn-link-arrow");
-    assert.ok(arrow, "directed link has an arrowhead");
-    assert.equal(arrow.hasAttribute("fill"), false);
-    assert.match(arrow.getAttribute("style"), /transform-origin:/);
+    assert.equal(legacy.querySelector(".jn-link-arrow"), null, "no arrowheads in Canvas 2");
+    assert.equal(legacy.querySelector(".jn-link-dir"), null, "no direction control");
+
+    const modern = group("modern");
+    assert.ok(modern.classList.contains("jn-link-material-double"));
+    assert.ok(modern.classList.contains("jn-link-pattern-alternating"));
+    assert.ok(modern.classList.contains("jn-link-ends-loose"));
+    assert.ok(modern.classList.contains("jn-link-accent-link3"));
+    assert.equal(modern.querySelectorAll(".jn-link-stack").length, 2, "solid + accent stack");
+    assert.equal(modern.querySelectorAll(".jn-thread-layer").length, 12, "six layers per stack");
+    assert.deepEqual([...modern.querySelectorAll(".jn-thread-tail")].map(tail => tail.classList.contains("jn-thread-tail-fine")),
+      [false, true, false, true], "stacked loose tails sit at both ends");
+    assert.match(modern.getAttribute("style"), /--jn-thread-width:4.2/);
 
     const hint = group("hint");
     assert.ok(hint.classList.contains("jn-link-hint"));
-    assert.ok(hint.classList.contains("jn-link-dashed"));
+    assert.ok(hint.classList.contains("jn-link-pattern-interrupted"), "legacy dashed maps to interrupted");
     const hidden = group("hidden");
     assert.ok(hidden.classList.contains("jn-link-hidden"));
-    assert.ok(!hidden.classList.contains("jn-link-dashed"), "hidden wins over dashed");
-    assert.equal(hidden.querySelector(".jn-thread").hasAttribute("stroke-dasharray"), false);
+    assert.ok(!hidden.classList.contains("jn-link-pattern-interrupted"), "hidden wins over the legacy dash");
+    assert.equal(hidden.querySelector(".jn-thread-layer").hasAttribute("stroke-dasharray"), false);
 
     const hit = canvas.root.querySelector('.jn-link-hit[data-id="legacy"]');
     hit.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 20, clientY: 20 }));
@@ -1402,13 +1428,16 @@ test("link groups carry color slots and state classes without inline paint", asy
     assert.equal(swatch.getAttribute("style"), null, "swatch paint comes from a CSS variable");
     assert.equal(swatch.getAttribute("title"), "Link color 1");
     assert.equal(swatch.getAttribute("aria-label"), "Link color 1");
+    assert.equal(canvas.linkToolbar.querySelectorAll(".jn-link-preset").length, 4);
+    assert.equal(canvas.linkToolbar.querySelector(".jn-link-dir"), null);
+    assert.equal(canvas.linkToolbar.querySelector(".jn-link-dash"), null);
 
     canvas.setDimMatch(() => false);
     const dimmed = group("legacy");
     assert.ok(dimmed.classList.contains("jn-link-dimmed"));
     assert.ok(dimmed.classList.contains("jn-link-selected"), "selection survives a redraw");
 
-    const pathBefore = group("legacy").querySelector(".jn-thread").getAttribute("d");
+    const pathBefore = group("legacy").querySelector(".jn-thread-layer").getAttribute("d");
     canvas.root.dispatchEvent(new dom.window.WheelEvent("wheel", {
       bubbles: true, cancelable: true, deltaY: 500
     }));
@@ -1416,10 +1445,385 @@ test("link groups carry color slots and state classes without inline paint", asy
     const comp = Number.parseFloat(canvas.root.style.getPropertyValue("--jn-zoom-comp"));
     const expected = Math.round(Math.min(2, Math.max(0.5, 1 / canvas.view.k)) * 1000) / 1000;
     assert.equal(comp, expected);
-    assert.equal(group("legacy").querySelector(".jn-thread").getAttribute("d"), pathBefore, "zoom does not redraw links");
+    assert.equal(group("legacy").querySelector(".jn-thread-layer").getAttribute("d"), pathBefore, "zoom does not redraw links");
   } finally {
     canvas.disconnectGeometry();
     canvas.root.remove();
+  }
+});
+
+test("thread toolbar presets and controls commit exact, independent changes", () => {
+  const calls = [];
+  const canvas = new JournalCanvas({
+    onSelectNote() {},
+    onUpdateLink(...args) { calls.push(args); }
+  });
+  document.body.appendChild(canvas.root);
+  const notes = [
+    {
+      _id: "a", name: "A",
+      system: {
+        style: "sticky", blocks: [], links: [
+          { id: "l", targetId: "b", label: "Route", secondaryColor: "link1", sourceSide: "right", targetSide: "left" }
+        ]
+      }
+    },
+    { _id: "b", name: "B", system: { style: "sticky", blocks: [], links: [] } }
+  ];
+  try {
+    canvas.update(notes, { cards: { a: { x: 0, y: 0 }, b: { x: 400, y: 0 } }, labels: {} });
+    const hit = canvas.root.querySelector('.jn-link-hit[data-id="l"]');
+    hit.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+    canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+    const toolbar = canvas.linkToolbar;
+    const field = selector => toolbar.querySelector(selector);
+    assert.equal(toolbar.querySelector(".jn-link-dir"), null, "direction control removed");
+    assert.equal(toolbar.querySelector(".jn-link-dash"), null, "old line-style toggle removed");
+
+    field('[data-preset="heavy"]').click();
+    assert.deepEqual(calls.at(-1), ["a", "l", {
+      material: "double", thickness: 4, slack: 0.19, pattern: "continuous", ends: "standard"
+    }]);
+    assert.equal(field(".jn-link-material").value, "double");
+    assert.equal(field(".jn-link-thickness").value, "4");
+    assert.equal(field(".jn-link-thickness-out").textContent, "4.0 px");
+    assert.equal(field(".jn-link-slack").value, "19");
+    assert.equal(field(".jn-link-slack-out").textContent, "19%");
+    assert.equal(field(".jn-link-pattern").value, "continuous");
+    assert.equal(field(".jn-link-ends").value, "standard");
+
+    field('[data-preset="fine"]').click();
+    assert.deepEqual(calls.at(-1), ["a", "l", {
+      material: "linen", thickness: 1.3, slack: 0.02, pattern: "continuous", ends: "standard"
+    }]);
+    assert.equal(field(".jn-link-thickness-out").textContent, "1.3 px");
+    assert.equal(field(".jn-link-slack-out").textContent, "2%");
+
+    const count = calls.length;
+    const thickness = field(".jn-link-thickness");
+    thickness.value = "3.3";
+    thickness.dispatchEvent(new Event("input", { bubbles: true }));
+    assert.equal(calls.length, count, "range input never writes per pixel/step");
+    assert.equal(field(".jn-link-thickness-out").textContent, "3.3 px");
+    thickness.dispatchEvent(new Event("change", { bubbles: true }));
+    assert.deepEqual(calls.at(-1), ["a", "l", { thickness: 3.3 }]);
+
+    const slack = field(".jn-link-slack");
+    slack.value = "25";
+    slack.dispatchEvent(new Event("change", { bubbles: true }));
+    assert.deepEqual(calls.at(-1), ["a", "l", { slack: 0.25 }], "slack stores a fraction");
+    assert.equal(field(".jn-link-slack-out").textContent, "2%", "readout waits for the next input");
+    slack.dispatchEvent(new Event("input", { bubbles: true }));
+    assert.equal(field(".jn-link-slack-out").textContent, "25%");
+
+    const material = field(".jn-link-material");
+    material.value = "double";
+    material.dispatchEvent(new Event("change", { bubbles: true }));
+    assert.deepEqual(calls.at(-1), ["a", "l", { material: "double" }]);
+
+    const pattern = field(".jn-link-pattern");
+    pattern.value = "alternating";
+    pattern.dispatchEvent(new Event("change", { bubbles: true }));
+    assert.deepEqual(calls.at(-1), ["a", "l", { pattern: "alternating" }]);
+
+    const ends = field(".jn-link-ends");
+    ends.value = "loose";
+    ends.dispatchEvent(new Event("change", { bubbles: true }));
+    assert.deepEqual(calls.at(-1), ["a", "l", { ends: "loose" }]);
+
+    const label = field(".jn-link-label-input");
+    label.value = "Renamed";
+    label.dispatchEvent(new Event("change", { bubbles: true }));
+    assert.deepEqual(calls.at(-1), ["a", "l", { label: "Renamed" }]);
+
+    // Accent/secondary swatches are their own control group: they show the stored dye and
+    // write only `secondaryColor`, never the primary `color`.
+    const secondaryInitial = field(".jn-link-secondary-link1");
+    assert.ok(secondaryInitial, "accent swatch group exists");
+    assert.equal(toolbar.querySelectorAll(".jn-link-secondary").length, 4,
+      "accent group offers theme default plus link1-3");
+    assert.ok(secondaryInitial.classList.contains("on"), "current accent selection is shown");
+    assert.equal(secondaryInitial.getAttribute("aria-pressed"), "true");
+    assert.equal(secondaryInitial.getAttribute("title"), "Accent color 1");
+    const primaryBefore = field(".jn-link-swatch-link1").classList.contains("on");
+    field(".jn-link-secondary-link3").click();
+    assert.deepEqual(calls.at(-1), ["a", "l", { secondaryColor: "link3" }]);
+    field(".jn-link-secondary-default").click();
+    assert.deepEqual(calls.at(-1), ["a", "l", { secondaryColor: "" }],
+      "theme-default accent writes an empty slot");
+    assert.equal(field(".jn-link-swatch-link1").classList.contains("on"), primaryBefore,
+      "secondary click leaves the primary color untouched");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("link toolbar focuses on open and closes on Escape or an outside pointerdown", () => {
+  const canvas = new JournalCanvas({ onSelectNote() {}, onDeleteLink() {} });
+  document.body.appendChild(canvas.root);
+  const notes = [
+    {
+      _id: "a", name: "A",
+      system: {
+        style: "sticky", blocks: [], links: [
+          { id: "l", targetId: "b", sourceSide: "right", targetSide: "left" }
+        ]
+      }
+    },
+    { _id: "b", name: "B", system: { style: "sticky", blocks: [], links: [] } }
+  ];
+  const selectLink = () => {
+    const hit = canvas.root.querySelector('.jn-link-hit[data-id="l"]');
+    hit.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+    canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
+  };
+  try {
+    canvas.update(notes, { cards: { a: { x: 0, y: 0 }, b: { x: 400, y: 0 } }, labels: {} });
+    selectLink();
+    const toolbar = canvas.linkToolbar;
+    assert.equal(toolbar.style.display, "flex");
+    const first = toolbar.querySelector(".jn-link-preset");
+    assert.ok(first, "toolbar has controls");
+    assert.equal(document.activeElement, first, "opening the toolbar focuses its first control");
+
+    first.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    assert.equal(toolbar.style.display, "none", "Escape closes the toolbar");
+    assert.equal(canvas.selectedLinkId, null);
+    assert.ok(canvas.root.contains(document.activeElement), "focus returns inside the canvas/card");
+    assert.equal(toolbar.contains(document.activeElement), false);
+
+    canvas.lastLinkClick = null;
+    selectLink();
+    assert.equal(toolbar.style.display, "flex", "toolbar reopens for the reselected link");
+    document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    assert.equal(toolbar.style.display, "none", "outside pointerdown closes the toolbar");
+    assert.equal(canvas.selectedLinkId, null);
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("hover and editing fade only matching silhouettes without rebuilding threads", () => {
+  const canvas = new JournalCanvas({ onSelectNote() {} });
+  document.body.appendChild(canvas.root);
+  const notes = [
+    {
+      _id: "a", name: "A",
+      system: {
+        style: "sticky", blocks: [], links: [
+          { id: "ab", targetId: "b", label: "Route", sourceSide: "right", targetSide: "left" }
+        ]
+      }
+    },
+    { _id: "b", name: "B", system: { style: "sticky", blocks: [], links: [] } },
+    { _id: "torn", name: "Torn", system: { style: "sticky", blocks: [], presentation: { torn: true } } }
+  ];
+  const cards = {
+    a: { x: 0, y: 0, rotation: 0 },
+    b: { x: 400, y: 0, rotation: 14 },
+    torn: { x: 200, y: 260, rotation: -9 }
+  };
+  try {
+    canvas.update(notes, { cards, labels: {} });
+    const card = id => canvas.root.querySelector(`.jn-card[data-id="${id}"]`);
+    const shape = id => canvas.svg.querySelector(`.jn-thread-mask-shape[data-note-id="${id}"]`);
+    const group = canvas.svg.querySelector('g[data-id="ab"]');
+    const strokes = group.querySelector(".jn-link-strokes");
+    const hit = canvas.root.querySelector('.jn-link-hit[data-id="ab"]');
+    assert.match(strokes.getAttribute("mask"), /^url\(#jn-thread-mask-/);
+    assert.equal(group.hasAttribute("mask"), false, "pins and labels sit outside the fade mask");
+    assert.equal(strokes.querySelector(".jn-thread-pin"), null);
+    assert.ok(group.querySelector(".jn-thread-pin"), "endpoint pins remain");
+    assert.ok(group.querySelector(".jn-link-label"), "label plaque remains");
+    assert.equal(hit.hasAttribute("mask"), false, "hit path stays interactive");
+    assert.ok(shape("a") && shape("b") && shape("torn"));
+    assert.ok(shape("torn").getAttribute("points").split(" ").length > 4, "torn mask uses its polygon");
+
+    const dBefore = group.querySelector(".jn-thread-layer").getAttribute("d");
+    const svgNodes = [...canvas.svg.querySelectorAll("*")];
+    card("a").dispatchEvent(new MouseEvent("pointerover", { bubbles: true }));
+    assert.ok(shape("a").classList.contains("jn-thread-mask-active"));
+    assert.ok(!shape("b").classList.contains("jn-thread-mask-active"));
+    assert.equal(group.querySelector(".jn-thread-layer").getAttribute("d"), dBefore, "hover does not rebuild paths");
+    assert.deepEqual([...canvas.svg.querySelectorAll("*")], svgNodes, "hover reuses every SVG child node");
+
+    card("b").dispatchEvent(new MouseEvent("pointerover", { bubbles: true }));
+    assert.ok(!shape("a").classList.contains("jn-thread-mask-active"), "pointer hover moves to the new note");
+    assert.ok(shape("b").classList.contains("jn-thread-mask-active"));
+
+    const input = document.createElement("input");
+    card("a").querySelector(".jn-card-main").appendChild(input);
+    input.dispatchEvent(new Event("focusin", { bubbles: true }));
+    assert.ok(shape("a").classList.contains("jn-thread-mask-active"), "inline text edit fades its note");
+    assert.ok(shape("b").classList.contains("jn-thread-mask-active"), "hover + edit fade each silhouette");
+
+    input.dispatchEvent(new MouseEvent("focusout", { bubbles: true, relatedTarget: document.body }));
+    assert.ok(!shape("a").classList.contains("jn-thread-mask-active"));
+    assert.ok(shape("b").classList.contains("jn-thread-mask-active"));
+    card("b").dispatchEvent(new MouseEvent("pointerout", { bubbles: true, relatedTarget: document.body }));
+    assert.ok(!shape("b").classList.contains("jn-thread-mask-active"));
+
+    card("a").classList.add("jn-being-edited");
+    canvas.refreshGeometry();
+    assert.ok(shape("a").classList.contains("jn-thread-mask-active"), "editing lock fades its note");
+    card("a").classList.remove("jn-being-edited");
+    canvas.refreshGeometry();
+    assert.ok(!shape("a").classList.contains("jn-thread-mask-active"));
+
+    assert.equal(group.querySelector(".jn-link-arrow"), null);
+    assert.equal(hit.getAttribute("d"), group.querySelector(".jn-thread-layer").getAttribute("d"));
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("torn mask vertices match cardPointAnchor and follow rotation/resize", async () => {
+  const { cardPointAnchor } = await import(`${JN}/scripts/card-ports.mjs`);
+  const { tearPoints } = await import(`${JN}/scripts/tear.mjs`);
+  const canvas = new JournalCanvas({ onSelectNote() {} });
+  document.body.appendChild(canvas.root);
+  const notes = ["flat", "tilted"].map(id => ({
+    _id: id, name: id,
+    system: { style: "sticky", blocks: [], presentation: { torn: true } }
+  }));
+  const cards = {
+    flat: { x: 40, y: 30, width: 250, height: 120, rotation: 0 },
+    tilted: { x: 360, y: 120, width: 250, height: 120, rotation: 14 }
+  };
+  const expectedPoints = (id, box) => tearPoints(id).map(({ x, y }) =>
+    cardPointAnchor(box, { x: x / 100, y: y / 100 }));
+  const actualPoints = id => canvas.svg
+    .querySelector(`.jn-thread-mask-shape[data-note-id="${id}"]`)
+    .getAttribute("points").split(" ").map(pair => pair.split(",").map(Number));
+  const assertNear = (actual, expected, label) => {
+    assert.equal(actual.length, expected.length, `${label} vertex count`);
+    actual.forEach(([x, y], index) => {
+      assert.ok(Math.abs(x - expected[index].x) < 1e-9, `${label}[${index}].x`);
+      assert.ok(Math.abs(y - expected[index].y) < 1e-9, `${label}[${index}].y`);
+    });
+  };
+  try {
+    canvas.update(notes, { cards, labels: {} });
+    assertNear(actualPoints("flat"), expectedPoints("flat", { ...cards.flat, w: 250, h: 120 }), "flat");
+    assertNear(actualPoints("tilted"), expectedPoints("tilted", { ...cards.tilted, w: 250, h: 120 }), "tilted");
+
+    const shape = canvas.svg.querySelector('.jn-thread-mask-shape[data-note-id="flat"]');
+    const before = shape.getAttribute("points");
+    const resized = { ...cards, flat: { ...cards.flat, width: 320, height: 150, rotation: 27 } };
+    canvas.update(notes, { cards: resized, labels: {} });
+    const afterShape = canvas.svg.querySelector('.jn-thread-mask-shape[data-note-id="flat"]');
+    assert.equal(afterShape, shape, "geometry-only resize reuses the mask polygon");
+    assert.notEqual(afterShape.getAttribute("points"), before, "rotation/resize updates mask points");
+    assertNear(actualPoints("flat"), expectedPoints("flat", { ...resized.flat, w: 320, h: 150 }), "resized");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("geometry-only updates reuse SVG groups while path data changes", () => {
+  const canvas = new JournalCanvas({ onSelectNote() {} });
+  document.body.appendChild(canvas.root);
+  const notes = [
+    {
+      _id: "a", name: "A",
+      system: {
+        style: "sticky", blocks: [], links: [
+          { id: "l", targetId: "b", label: "Route", sourceSide: "right", targetSide: "left" }
+        ]
+      }
+    },
+    { _id: "b", name: "B", system: { style: "sticky", blocks: [], presentation: { torn: true } } }
+  ];
+  const cards = { a: { x: 0, y: 0, width: 200, height: 100 }, b: { x: 400, y: 0, width: 200, height: 100 } };
+  try {
+    canvas.update(notes, { cards, labels: {} });
+    const group = canvas.svg.querySelector('g[data-id="l"]');
+    const layer = group.querySelector(".jn-thread-layer");
+    const hit = canvas.root.querySelector('.jn-link-hit[data-id="l"]');
+    const maskShape = canvas.svg.querySelector('.jn-thread-mask-shape[data-note-id="b"]');
+    const dBefore = layer.getAttribute("d");
+    const pointsBefore = maskShape.getAttribute("points");
+
+    canvas.update(notes, {
+      cards: { ...cards, b: { ...cards.b, x: 470, y: 140, rotation: 18 } },
+      labels: {}
+    });
+
+    assert.equal(canvas.svg.querySelector('g[data-id="l"]'), group, "link group is reused");
+    assert.equal(group.querySelector(".jn-thread-layer"), layer, "layer path is reused");
+    assert.equal(canvas.root.querySelector('.jn-link-hit[data-id="l"]'), hit, "hit path is reused");
+    assert.equal(canvas.svg.querySelector('.jn-thread-mask-shape[data-note-id="b"]'), maskShape,
+      "mask polygon is reused");
+    assert.notEqual(layer.getAttribute("d"), dBefore, "moved card updates the bezier path");
+    assert.equal(hit.getAttribute("d"), layer.getAttribute("d"), "hit path follows the visible path");
+    assert.notEqual(maskShape.getAttribute("points"), pointsBefore, "moved card updates mask points");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("stress probe: 100 notes / 200 links reuses geometry without a full rebuild", () => {
+  const canvas = new JournalCanvas({ onSelectNote() {} });
+  document.body.appendChild(canvas.root);
+  const notes = [];
+  const cards = {};
+  for (let index = 0; index < 100; index++) {
+    const id = `n${index}`;
+    notes.push({ _id: id, name: id, system: { style: "sticky", blocks: [], links: [] } });
+    cards[id] = { x: (index % 10) * 260, y: Math.floor(index / 10) * 180, width: 200, height: 100 };
+  }
+  for (let index = 0; index < 200; index++) {
+    const source = notes[index % 100];
+    source.system.links.push({
+      id: `l${index}`, targetId: `n${(index * 7 + 3) % 100}`,
+      secondaryColor: index % 3 === 0 ? "link2" : "", material: index % 4 === 0 ? "double" : "linen",
+      pattern: index % 5 === 0 ? "alternating" : "continuous", sourceSide: "right", targetSide: "left"
+    });
+  }
+  try {
+    canvas.update(notes, { cards, labels: {} });
+
+    // Old-behaviour baseline: force a full innerHTML rebuild for the same board.
+    canvas.linkSignature = null;
+    const fullStart = performance.now();
+    canvas.refreshGeometry();
+    const fullMs = performance.now() - fullStart;
+
+    // Drag simulation: only the card boxes move, so refreshGeometry must take the fast path.
+    for (const el of canvas.cardEls.values()) {
+      el.style.left = `${Number.parseFloat(el.style.left || "0") + 23}px`;
+      el.style.top = `${Number.parseFloat(el.style.top || "0") + 7}px`;
+    }
+    const geometryStart = performance.now();
+    canvas.refreshGeometry();
+    const geometryMs = performance.now() - geometryStart;
+    assert.equal(canvas.svg.querySelectorAll("g[data-id]").length, 200);
+    assert.ok(geometryMs < fullMs, `geometry ${geometryMs.toFixed(1)}ms < full ${fullMs.toFixed(1)}ms`);
+    console.log(`[canvas perf] 100 notes / 200 links — full rebuild ${fullMs.toFixed(1)}ms, geometry update ${geometryMs.toFixed(1)}ms`);
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("thread styles define reduced motion, luminance fade and layered material paint", () => {
+  const css = readFileSync(new URL("../../styles/stylized.css", import.meta.url), "utf8");
+  const journalCss = readFileSync(new URL("../../styles/journal.css", import.meta.url), "utf8");
+  assert.match(css, /\.jn-thread-mask-shape\.jn-thread-mask-active\s*\{[^}]*fill:\s*var\(--jn-sc-thread-fade-fill/);
+  assert.match(css, /\.jn-thread-mask-shape\s*\{[^}]*transition:\s*fill var\(--jn-sc-thread-fade-time[^}]*opacity var\(--jn-sc-thread-fade-time/);
+  assert.match(css, /\.jn-thread-layer\s*\{[^}]*calc\(var\(--jn-thread-k,[^)]*\)\s*\*\s*var\(--jn-layer-width/);
+  assert.match(css, /\.jn-link-pattern-interrupted \.jn-thread-layer\s*\{[^}]*stroke-dasharray:/);
+  assert.match(css, /\.jn-link-pattern-alternating \.jn-link-stack-accent \.jn-thread-layer\s*\{[^}]*stroke-dasharray:/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)\s*\{[^}]*\.jn-thread-mask-shape\s*\{[^}]*transition:\s*none/);
+  // Canvas 2 has no arrow or legacy dashed/silhouette runtime rules left.
+  for (const stale of [".jn-link-arrow", ".jn-link-dashed", ".jn-thread-silhouette"]) {
+    assert.equal(css.includes(stale), false, `${stale} not in stylized.css`);
+    assert.equal(journalCss.includes(stale), false, `${stale} not in journal.css`);
   }
 });
 
@@ -1776,8 +2180,8 @@ test("private workspace uses the same link slots and state classes", async () =>
     const group = canvasSlot.querySelector('g[data-id="private-link"]');
     assert.ok(group, "private link drawn");
     assert.ok(group.classList.contains("jn-link-color-link1"), "legacy hex normalized on read");
-    assert.equal(group.querySelector(".jn-thread").hasAttribute("stroke"), false);
-    assert.equal(group.querySelector(".jn-link-arrow").hasAttribute("fill"), false);
+    assert.equal(group.querySelector(".jn-thread-layer").hasAttribute("stroke"), false);
+    assert.equal(group.querySelector(".jn-link-arrow"), null);
   } finally {
     workspace.canvas.disconnectGeometry();
     canvasSlot.remove();

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { tearPolygon, tearSeed } from "../scripts/tear.mjs";
+import { tearPoints, tearPolygon, tearSeed } from "../scripts/tear.mjs";
 
 const POINT = /^(\d+(?:\.\d+)?)% (\d+(?:\.\d+)?)%$/;
 
@@ -68,5 +68,26 @@ test("tearSeed is stable and bounded for the same id", () => {
     assert.equal(first, tearSeed(id));
     assert.ok(Number.isInteger(first));
     assert.ok(first >= 0 && first < 100000);
+  }
+});
+
+test("tearPoints exposes the same silhouette the CSS polygon clips", () => {
+  for (const id of ["shared-shape-1", "shared-shape-2", "общая-форма"]) {
+    const points = tearPoints(id);
+    const parsed = parsePolygon(tearPolygon(id));
+    assert.equal(points.length, parsed.length, "one point per polygon vertex");
+    assert.deepEqual(
+      points.map(point => ({ x: Number(point.x.toFixed(2)), y: Number(point.y.toFixed(2)) })),
+      parsed,
+      "the mask helper and clip-path cannot drift"
+    );
+    for (const { x, y } of points) {
+      assert.ok(Number.isFinite(x) && x >= 0 && x <= 100);
+      assert.ok(Number.isFinite(y) && y >= 0 && y <= 100);
+    }
+    assert.deepEqual(points[0], { x: 0, y: 0 });
+    assert.deepEqual(points[1], { x: 100, y: 0 });
+    assert.equal(points.filter(point => point.y === 0).length, 2, "straight pin edge");
+    assert.deepEqual(tearPoints(id), points, "stable and reusable across renders");
   }
 });

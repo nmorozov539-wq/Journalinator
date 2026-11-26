@@ -25,34 +25,52 @@ function mulberry32(seed) {
 }
 
 /**
- * CSS polygon for one torn edge profile. Depth is a percentage of the card dimension (roughly
- * 5–15 px on a 250–360 px card); one random "bite" per side is deeper for a hand-torn feel.
+ * One torn silhouette as normalized percentage points. This is the canonical shape used by both
+ * the CSS `clip-path` and the thread-fade mask, so the paper edge and the fade edge can never
+ * drift apart. Points stay in 0–100 and the top edge is exactly two corners.
  */
-export function tearPolygon(seed, { depth = 2.4, points = 9 } = {}) {
+export function tearPoints(seed, { depth = 2.4, points = 9 } = {}) {
   const random = mulberry32(hashString(seed));
   const jitter = () => (0.35 + random() * 0.65);
   const step = (from, to, count) => Array.from({ length: count }, (_, index) =>
     from + (to - from) * ((index + 1) / (count + 1)));
-  const result = ["0% 0%", "100% 0%"];
+  const round = value => Number(value.toFixed(2));
+  const result = [{ x: 0, y: 0 }, { x: 100, y: 0 }];
   const bite = (sideLength, index) => sideLength * (random() < 0.18 ? 0.55 : 0.18);
   const right = step(0, 100, points);
   right.forEach((y, index) => {
     if (index === right.length - 1) return;
-    result.push(`${(100 - depth * jitter() - bite(depth, index)).toFixed(2)}% ${y.toFixed(2)}%`);
+    result.push({
+      x: round(100 - depth * jitter() - bite(depth, index)),
+      y: round(y)
+    });
   });
-  result.push(`100% 100%`);
+  result.push({ x: 100, y: 100 });
   const bottom = step(100, 0, points + 4);
   bottom.forEach((x, index) => {
     if (index === 0 || index === bottom.length - 1) return;
-    result.push(`${x.toFixed(2)}% ${(100 - depth * jitter() - bite(depth, index)).toFixed(2)}%`);
+    result.push({
+      x: round(x),
+      y: round(100 - depth * jitter() - bite(depth, index))
+    });
   });
-  result.push(`0% 100%`);
+  result.push({ x: 0, y: 100 });
   const left = step(100, 0, points);
   left.forEach((y, index) => {
     if (index === 0 || index === left.length - 1) return;
-    result.push(`${(depth * jitter() + bite(depth, index)).toFixed(2)}% ${y.toFixed(2)}%`);
+    result.push({
+      x: round(depth * jitter() + bite(depth, index)),
+      y: round(y)
+    });
   });
-  return `polygon(${result.join(", ")})`;
+  return result;
+}
+
+/** CSS polygon for one torn edge profile, preserving the original two-decimal formatting. */
+export function tearPolygon(seed, options) {
+  const corner = (x, y) => (x === 0 || x === 100) && (y === 0 || y === 100);
+  return `polygon(${tearPoints(seed, options).map(({ x, y }) =>
+    corner(x, y) ? `${x}% ${y}%` : `${x.toFixed(2)}% ${y.toFixed(2)}%`).join(", ")})`;
 }
 
 export function tearSeed(noteId) {

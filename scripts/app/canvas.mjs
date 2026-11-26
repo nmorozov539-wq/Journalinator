@@ -1,21 +1,21 @@
 import {
   CARD_SIDES, MAX_THREAD_PINS, THREAD_PIN_RADIUS, cardEdgeAt, cardPointAnchor, moveThreadPin, threadAttachment, validThreadPin
 } from "../card-ports.mjs";
-import { arrowHead, pinnedThreadPath, ThreadMotion } from "../link-thread.mjs";
+import { looseTails, pinnedThreadPath, threadLayerSpecs, ThreadMotion, THREAD_PRESETS } from "../link-thread.mjs";
 import { LINK_COLOR_SLOTS, normalizeLinkColor } from "../link-colors.mjs";
 import PatchNotesPanel from "./patch-notes.mjs";
 import { noteImageSource } from "../image-url.mjs";
 import { hasAnyLock } from "../locks.mjs";
 import { renderMarkdown } from "../markdown.mjs";
 import { t } from "../i18n.mjs";
-import { classifyNote, resolvePresentation } from "../presentation.mjs";
-import { tearPolygon, tearSeed } from "../tear.mjs";
+import { classifyNote, resolveLinkCosmetics, resolvePresentation } from "../presentation.mjs";
+import { tearPoints, tearPolygon, tearSeed } from "../tear.mjs";
 import { DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, STAMP_CORNERS, STAMP_IDS, stampUrl } from "../stamps.mjs";
 
 const DRAG_THRESHOLD = 5;
 let threadMaskSequence = 0;
 const LINK_COLOR_OPTIONS = ["", ...LINK_COLOR_SLOTS];
-const LINK_DIRECTIONS = new Set(["none", "one", "two"]);
+const CARD_CORNERS = Object.freeze([{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }]);
 const PATCH_NOTES_SELECTOR = ".jn-patch-notes, .jn-patch-notes-button";
 
 // Extended style class names stay aligned with the legacy theme token keys (`wanted` is Target).
@@ -53,9 +53,15 @@ export default class JournalCanvas {
     this.notes = [];
     this.layout = { cards: {}, labels: {}, viewport: null };
     this.cardEls = new Map();
+    this.cardSizes = new Map();
     this.labelEls = new Map();
     this.linksById = new Map();
     this.threads = new Map();
+    this.linkSignature = null;
+    this.linkGroupEls = new Map();
+    this.linkHitEls = new Map();
+    this.maskShapeEls = new Map();
+    this.toolbarDismiss = null;
     this.movingThreads = new Set();
     this.threadFrame = null;
     this.threadTime = null;
@@ -69,6 +75,10 @@ export default class JournalCanvas {
     this.cardResizeObserver = null;
     this.inlineText = null;
     this.linkPlacement = null;
+    // Thread fade is a class toggle on the existing mask silhouettes: hover/editing never
+    // rebuilds paths or the SVG.
+    this.hoverNoteId = null;
+    this.focusedNoteId = null;
     this.dimMatch = () => true; // (note) => does it match the active search/filters?
     this.statusFor = null; // (note) => derived actor status badge or null
     this.gmMode = false; // GM view with secrets merged in: shows hide/reveal/hint controls
@@ -139,6 +149,7 @@ export default class JournalCanvas {
         this.cardResizeObserver?.unobserve(el);
         el.remove();
         this.cardEls.delete(id);
+        this.cardSizes.delete(id);
       }
     }
 
@@ -146,6 +157,8 @@ export default class JournalCanvas {
       if (!seenLabels.has(id)) { el.remove(); this.labelEls.delete(id); }
     }
     if (this.linkPlacement?.source && !this.cardEls.has(this.linkPlacement.source.id)) this.cancelLinkTool();
+    if (this.hoverNoteId && !this.cardEls.has(this.hoverNoteId)) this.hoverNoteId = null;
+    if (this.focusedNoteId && !this.cardEls.has(this.focusedNoteId)) this.focusedNoteId = null;
 
     if (!deferGeometry) this.refreshGeometry();
   }
@@ -158,7 +171,15 @@ export default class JournalCanvas {
     this.#applyTransform();
     this.#flushLinkDraw();
     if (!this.cardResizeObserver && typeof ResizeObserver === "function") {
-      this.cardResizeObserver = new ResizeObserver(() => this.#queueLinkDraw());
+      this.cardResizeObserver = new ResizeObserver(entries => {
+        // Drop only the cards that actually changed size; a plain drag keeps its cached box.
+        if (!entries?.length) this.cardSizes.clear();
+        else for (const entry of entries) {
+          const id = entry.target?.dataset?.id;
+          if (id) this.cardSizes.delete(id);
+        }
+        this.#queueLinkDraw();
+      });
       for (const card of this.cardEls.values()) this.cardResizeObserver.observe(card, { box: "border-box" });
     }
   }
@@ -168,6 +189,7 @@ export default class JournalCanvas {
     this.cardResizeObserver = null;
     if (this.linkDrawTimer !== null) clearTimeout(this.linkDrawTimer);
     this.linkDrawTimer = null;
+    this.#unbindToolbarDismiss();
     if (this.threadFrame !== null) this.root.ownerDocument.defaultView.cancelAnimationFrame(this.threadFrame);
     if (this.zoomFrame !== null) this.root.ownerDocument.defaultView.cancelAnimationFrame(this.zoomFrame);
     this.threadFrame = this.threadTime = null;
@@ -255,6 +277,8 @@ export default class JournalCanvas {
     el.style.left = `${cardData.x}px`;
     el.style.top = `${cardData.y}px`;
     el.style.setProperty("--jn-rotation", `${cardData.rotation ?? 0}deg`);
+    // Any render can change the paper's intrinsic size, so the next geometry pass re-measures.
+    this.cardSizes.delete(note._id);
     // Manual sizes live in the layout card; calculated compact/extended sizes live only in CSS.
     const manualWidth = Number.isFinite(cardData.width) && cardData.width > 0;
     const manualHeight = Number.isFinite(cardData.height) && cardData.height > 0;
@@ -384,6 +408,7 @@ export default class JournalCanvas {
     if (kind === "heading") input.placeholder = t("JN.Style.Wanted");
     input.setAttribute("aria-label", t(kind === "heading" ? "JN.Editor.TargetHeading" : "JN.Editor.Label"));
     this.inlineText = { field, input, id, kind };
+    this.#syncMaskState();
     field.hidden = false;
     field.replaceChildren(input);
     input.onblur = () => this.finishInlineText();
@@ -409,6 +434,7 @@ export default class JournalCanvas {
     if (!this.inlineText) return;
     const { field, input, id, kind } = this.inlineText;
     this.inlineText = null;
+    this.#syncMaskState();
     input.onblur = null;
     const note = this.notes.find(item => item._id === id);
     if (!note) return;
@@ -468,17 +494,27 @@ export default class JournalCanvas {
     const el = this.cardEls.get(id);
     const liveX = Number.parseFloat(el?.style.left);
     const liveY = Number.parseFloat(el?.style.top);
+    // Width/height change only on render, resize or a ResizeObserver callback. Reusing the last
+    // measurement avoids forcing a full board layout on every drag frame (the path endpoints
+    // still read live x/y, which is all a card move changes).
+    let size = this.cardSizes.get(id);
+    if (!size) {
+      size = {
+        w: el?.offsetWidth || Number.parseFloat(el?.style.width) || 190,
+        h: el?.offsetHeight || Number.parseFloat(el?.style.minHeight) || 70
+      };
+      this.cardSizes.set(id, size);
+    }
     return {
       x: Number.isFinite(liveX) ? liveX : data.x,
       y: Number.isFinite(liveY) ? liveY : data.y,
-      w: el?.offsetWidth || Number.parseFloat(el?.style.width) || 190,
-      h: el?.offsetHeight || Number.parseFloat(el?.style.minHeight) || 70,
+      w: size.w,
+      h: size.h,
       rotation: data.rotation ?? 0
     };
   }
 
   #drawLinks() {
-    this.linksById = new Map();
     const boxes = new Map([...this.cardEls.keys()].map(id => [id, this.#cardBox(id)]));
     const links = [];
 
@@ -491,48 +527,73 @@ export default class JournalCanvas {
         links.push({ note, link, sourceSide, targetSide });
       }
     }
+    if (this.selectedLinkId && !links.some(({ link }) => link.id === this.selectedLinkId)) this.selectedLinkId = null;
 
+    const animate = this.root.isConnected && !this.root.ownerDocument.defaultView.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    const dimmedIds = new Set(this.notes.filter(n => !this.dimMatch(n)).map(n => n._id));
+    const signature = this.#linkSignature(links, boxes, dimmedIds);
+
+    // A drag only moves cards: link topology, cosmetics and state are unchanged, so rebuild the
+    // geometry of the existing SVG nodes instead of re-parsing the whole innerHTML string.
+    if (signature === this.linkSignature && this.#linkStructureReady(links)
+        && this.#updateLinkGeometry(links, boxes, animate, dimmedIds)) {
+      this.#syncLinkToolbar();
+      return;
+    }
+
+    this.linksById = new Map();
     let body = "";
     let hits = "";
     const threads = new Map();
-    const animate = this.root.isConnected && !this.root.ownerDocument.defaultView.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    const dimmedIds = new Set(this.notes.filter(n => !this.dimMatch(n)).map(n => n._id));
-    for (const { note, link, sourceSide, targetSide } of links) {
-      const p = threadAttachment(boxes.get(note._id), link.sourcePoint, sourceSide);
-      const r = threadAttachment(boxes.get(link.targetId), link.targetPoint, targetSide);
-      const motion = this.threads.get(link.id)?.motion ?? new ThreadMotion(p, r);
-      motion.retarget(p, r, animate);
-      const savedPins = Array.isArray(link.pins) ? link.pins.slice(0, MAX_THREAD_PINS).filter(validThreadPin) : [];
-      const pins = this.pinDrag?.id === link.id ? moveThreadPin(savedPins, this.pinDrag) ?? savedPins : savedPins;
+    for (const entry of links) {
+      const { note, link } = entry;
+      const { p, r, cosmetics, pins, motion } = this.#resolveThread(entry, boxes, animate);
       threads.set(link.id, { start: p, end: r, pins, motion });
-      const { path: d, center: { x: mx, y: my }, startLead, endLead, start, end } = pinnedThreadPath(p, r, pins, motion);
+      const { path: d, center: { x: mx, y: my }, start, end } = pinnedThreadPath(p, r, pins, motion, cosmetics.slack);
       const color = normalizeLinkColor(link.color);
       const colorClass = color ? `jn-link-color-${color}` : "jn-link-color-default";
-      const direction = LINK_DIRECTIONS.has(link.direction) ? link.direction : "none";
-      const selected = link.id === this.selectedLinkId;
-      const endpoint = (anchor, directed, lead) => {
-        const points = directed ? arrowHead(anchor, lead) : null;
-        return `<circle class="jn-thread-pin" cx="${anchor.x - anchor.nx * THREAD_PIN_RADIUS}"
-          cy="${anchor.y - anchor.ny * THREAD_PIN_RADIUS}"/>
-          ${points ? `<polygon class="jn-link-arrow" points="${points}"
-            style="transform-origin:${anchor.x}px ${anchor.y}px"/>` : ""}`;
-      };
+      const accentClass = `jn-link-accent-${cosmetics.secondaryColor || "default"}`;
+      const specs = threadLayerSpecs(cosmetics.material, cosmetics.thickness);
+      const roleClass = role => `jn-thread-${role.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)}`;
+      const layerPaths = () => specs.layers.map(layer => `<path class="jn-thread-layer ${roleClass(layer.role)}" d="${d}"
+        style="--jn-layer-width:${layer.widthFactor};--jn-layer-opacity:${layer.opacity};--jn-layer-dx:${layer.dx};--jn-layer-dy:${layer.dy}"/>`).join("");
+      const accentStack = cosmetics.pattern === "alternating" && !link.hidden
+        ? `<g class="jn-link-stack jn-link-stack-accent">${layerPaths()}</g>`
+        : "";
+      const tails = cosmetics.ends === "loose"
+        ? looseTails(start, end).map(tail =>
+          `<path class="jn-thread-tail${tail.role === "tailFine" ? " jn-thread-tail-fine" : ""}" d="${tail.d}"/>`).join("")
+        : "";
+      // No arrowheads and no direction UI: a thread is an undirected visual relationship.
+      const endpoint = anchor => `<circle class="jn-thread-pin" cx="${anchor.x - anchor.nx * THREAD_PIN_RADIUS}"
+          cy="${anchor.y - anchor.ny * THREAD_PIN_RADIUS}"/>`;
       const dimmed = dimmedIds.has(note._id) || dimmedIds.has(link.targetId);
-      const dashed = !link.hidden && link.lineStyle === "dashed";
+      // A hidden link keeps its hidden treatment regardless of the chosen pattern.
+      const pattern = link.hidden ? "continuous" : cosmetics.pattern;
+      const selected = link.id === this.selectedLinkId;
       const linkId = foundry.utils.escapeHTML(String(link.id ?? ""));
 
       const linkClasses = [
         colorClass,
+        accentClass,
+        `jn-link-material-${specs.material}`,
+        `jn-link-pattern-${pattern}`,
+        `jn-link-ends-${cosmetics.ends}`,
         selected ? "jn-link-selected" : "",
         dimmed ? "jn-link-dimmed" : "",
         link.hidden ? "jn-link-hidden" : "",
-        dashed ? "jn-link-dashed" : "",
         link.hint ? "jn-link-hint" : ""
       ].filter(Boolean).join(" ");
-      body += `<g data-id="${linkId}" class="${linkClasses}">
-        <path class="jn-thread" d="${d}"/>
-        ${endpoint(start, direction === "two", startLead)}
-        ${endpoint(end, direction !== "none", endLead)}
+      const k = Math.round(specs.k * 10000) / 10000;
+      body += `<g data-id="${linkId}" class="${linkClasses}"
+          style="--jn-thread-k:${k};--jn-thread-width:${specs.thickness}">
+        <g class="jn-link-strokes" mask="url(#${this.threadMaskId})">
+          <g class="jn-link-stack jn-link-stack-primary">${layerPaths()}</g>
+          ${accentStack}
+          ${tails}
+        </g>
+        ${endpoint(start)}
+        ${endpoint(end)}
         ${pins.map((pin, index) => `<circle class="jn-thread-pin jn-board-pin" data-pin-index="${index}" cx="${pin.x}" cy="${pin.y}"/>`).join("")}
         ${link.label || link.hint ? `<text class="jn-link-label" x="${mx}" y="${my + 4}">${link.hint ? "&#10022; " : ""}${foundry.utils.escapeHTML(link.label ?? "")}</text>` : ""}
       </g>`;
@@ -541,54 +602,232 @@ export default class JournalCanvas {
       this.linksById.set(link.id, { sourceId: note._id, targetId: link.targetId, mx, my, ...link });
     }
 
-    if (this.selectedLinkId && !this.linksById.has(this.selectedLinkId)) this.selectedLinkId = null;
-    this.svg.innerHTML = this.#threadMask(boxes, threads) + `<g mask="url(#${this.threadMaskId})">${body}</g>`;
+    this.svg.innerHTML = this.#threadMask(boxes, threads) + body;
     this.linkHits.innerHTML = hits;
-    let index = 0;
-    for (const thread of threads.values()) {
-      const group = this.svg.children[1].children[index];
-      thread.line = group.querySelector(".jn-thread");
+    this.linkGroupEls = new Map([...this.svg.querySelectorAll("g[data-id]")].map(group => [group.dataset.id, group]));
+    this.linkHitEls = new Map([...this.linkHits.querySelectorAll(".jn-link-hit")].map(hit => [hit.dataset.id, hit]));
+    this.maskShapeEls = new Map([...this.svg.querySelectorAll(".jn-thread-mask-shape")].map(shape => [shape.dataset.noteId, shape]));
+    for (const [id, thread] of threads) {
+      const key = String(id);
+      const group = this.linkGroupEls.get(key);
+      if (!group) continue;
+      thread.group = group;
+      thread.lines = [...group.querySelectorAll(".jn-thread-layer")];
+      thread.tails = [...group.querySelectorAll(".jn-thread-tail")];
+      thread.endpointPins = [...group.querySelectorAll(".jn-thread-pin:not(.jn-board-pin)")];
       thread.label = group.querySelector(".jn-link-label");
-      thread.markers = group.querySelectorAll("[data-pin-index]");
-      thread.hit = this.linkHits.children[index++];
+      thread.markers = [...group.querySelectorAll("[data-pin-index]")];
+      thread.hit = this.linkHitEls.get(key) ?? null;
     }
     this.threads = threads;
     this.movingThreads = new Set([...threads].filter(([, thread]) => thread.motion.moving).map(([id]) => id));
+    this.linkSignature = signature;
     if (this.previewPath) this.svg.appendChild(this.previewPath);
     if (this.previewPin) this.svg.appendChild(this.previewPin);
     if (this.edgePin) this.svg.appendChild(this.edgePin);
     if (this.draftPins) this.svg.appendChild(this.draftPins);
+    this.#syncMaskState();
     if (animate && this.movingThreads.size) this.#requestThreadFrame();
   }
 
+  /** Resolves one link's endpoints, pins, cosmetics and reusable spring state. */
+  #resolveThread({ note, link, sourceSide, targetSide }, boxes, animate) {
+    const p = threadAttachment(boxes.get(note._id), link.sourcePoint, sourceSide);
+    const r = threadAttachment(boxes.get(link.targetId), link.targetPoint, targetSide);
+    const cosmetics = resolveLinkCosmetics(link);
+    const motion = this.threads.get(link.id)?.motion ?? new ThreadMotion(p, r, cosmetics.slack);
+    motion.retarget(p, r, animate, cosmetics.slack);
+    const savedPins = Array.isArray(link.pins) ? link.pins.slice(0, MAX_THREAD_PINS).filter(validThreadPin) : [];
+    const pins = this.pinDrag?.id === link.id ? moveThreadPin(savedPins, this.pinDrag) ?? savedPins : savedPins;
+    return { p, r, cosmetics, savedPins, pins, motion };
+  }
+
+  /**
+   * Everything that changes the SVG node structure or its classes. Geometry (position, size,
+   * rotation) and live pin/pull coordinates are deliberately excluded so drags reuse the DOM.
+   */
+  #linkSignature(links, boxes, dimmedIds) {
+    const cards = [];
+    for (const [id, box] of boxes) {
+      cards.push(`${String(id)}:${this.cardEls.get(id)?.classList.contains("jn-torn") ? 1 : 0}`);
+    }
+    const parts = links.map(({ note, link, sourceSide, targetSide }) => {
+      const cosmetics = resolveLinkCosmetics(link);
+      const savedPins = Array.isArray(link.pins) ? link.pins.slice(0, MAX_THREAD_PINS).filter(validThreadPin) : [];
+      const dimmed = dimmedIds.has(note._id) || dimmedIds.has(link.targetId);
+      return [
+        String(link.id), note._id, link.targetId, normalizeLinkColor(link.color),
+        cosmetics.secondaryColor, cosmetics.material, cosmetics.thickness, cosmetics.pattern,
+        cosmetics.ends, link.hidden ? 1 : 0, link.hint ? 1 : 0, link.label ?? "",
+        savedPins.length, link.id === this.selectedLinkId ? 1 : 0, dimmed ? 1 : 0,
+        sourceSide, targetSide
+      ].join("\u0001");
+    });
+    return `${cards.join("\u0002")}\u0003${parts.join("\u0002")}`;
+  }
+
+  /** True when the previous full rebuild left every node this fast path needs. */
+  #linkStructureReady(links) {
+    if (!this.svg.querySelector("mask")) return false;
+    if (this.maskShapeEls.size !== this.cardEls.size) return false;
+    for (const id of this.cardEls.keys()) {
+      if (!this.maskShapeEls.has(String(id))) return false;
+    }
+    for (const { link } of links) {
+      const key = String(link.id);
+      if (!this.linkGroupEls.has(key) || !this.linkHitEls.has(key)) return false;
+    }
+    return true;
+  }
+
+  /** Geometry-only refresh: recompute paths, pins, labels, hits and mask points in place. */
+  #updateLinkGeometry(links, boxes, animate, dimmedIds) {
+    const threads = new Map();
+    for (const entry of links) {
+      const { note, link } = entry;
+      const { p, r, cosmetics, pins, motion } = this.#resolveThread(entry, boxes, animate);
+      const { path: d, center: { x: mx, y: my }, start, end } = pinnedThreadPath(p, r, pins, motion, cosmetics.slack);
+      const key = String(link.id);
+      const group = this.linkGroupEls.get(key);
+      const hit = this.linkHitEls.get(key);
+      if (!group || !hit) return false;
+      const previous = this.threads.get(link.id);
+      const thread = {
+        start: p, end: r, pins, motion, group, hit,
+        lines: previous?.lines ?? [...group.querySelectorAll(".jn-thread-layer")],
+        tails: previous?.tails ?? [...group.querySelectorAll(".jn-thread-tail")],
+        endpointPins: previous?.endpointPins ?? [...group.querySelectorAll(".jn-thread-pin:not(.jn-board-pin)")],
+        label: previous?.label ?? group.querySelector(".jn-link-label"),
+        markers: previous?.markers ?? [...group.querySelectorAll("[data-pin-index]")]
+      };
+      for (const line of thread.lines) line.setAttribute("d", d);
+      if (thread.tails.length) {
+        const tailPaths = looseTails(start, end);
+        thread.tails.forEach((tail, index) => {
+          if (tailPaths[index]) tail.setAttribute("d", tailPaths[index].d);
+        });
+      }
+      thread.endpointPins.forEach((pin, index) => {
+        const anchor = index === 0 ? start : end;
+        pin.setAttribute("cx", anchor.x - anchor.nx * THREAD_PIN_RADIUS);
+        pin.setAttribute("cy", anchor.y - anchor.ny * THREAD_PIN_RADIUS);
+      });
+      thread.markers.forEach((marker, index) => {
+        const pin = pins[index];
+        if (!pin) return;
+        marker.setAttribute("cx", pin.x);
+        marker.setAttribute("cy", pin.y);
+      });
+      if (thread.label) {
+        thread.label.setAttribute("x", mx);
+        thread.label.setAttribute("y", my + 4);
+      }
+      hit.setAttribute("d", d);
+      threads.set(link.id, thread);
+      this.linksById.set(link.id, { sourceId: note._id, targetId: link.targetId, mx, my, ...link });
+    }
+    this.threads = threads;
+    this.movingThreads = new Set([...threads].filter(([, thread]) => thread.motion.moving).map(([id]) => id));
+    if (!this.#updateThreadMask(boxes, threads)) return false;
+    this.#syncMaskState();
+    if (animate && this.movingThreads.size) this.#requestThreadFrame();
+    return true;
+  }
+
+  /** Updates mask bounds and polygon points without replacing the mask element. */
+  #updateThreadMask(boxes, threads) {
+    const mask = this.svg.querySelector("mask");
+    const rect = mask?.querySelector(".jn-thread-mask-bg");
+    if (!mask || !rect) return false;
+    let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+    const extend = (x, y) => {
+      left = Math.min(left, x);
+      right = Math.max(right, x);
+      top = Math.min(top, y);
+      bottom = Math.max(bottom, y);
+    };
+    for (const [id, box] of boxes) {
+      const corners = this.#cardSilhouette(id, box);
+      const shape = this.maskShapeEls.get(String(id));
+      if (!shape) return false;
+      for (const { x, y } of corners) extend(x, y);
+      shape.setAttribute("points", corners.map(({ x, y }) => `${x},${y}`).join(" "));
+    }
+    for (const { start, end, pins } of threads.values()) {
+      extend(start.x, start.y);
+      extend(end.x, end.y);
+      for (const { x, y } of pins) extend(x, y);
+    }
+    if (!Number.isFinite(left)) left = top = right = bottom = 0;
+    const pad = 320;
+    const width = Math.max(1, right - left + pad * 2);
+    const height = Math.max(1, bottom - top + pad * 2);
+    const bounds = [
+      ["x", left - pad], ["y", top - pad], ["width", width], ["height", height]
+    ];
+    for (const [name, value] of bounds) {
+      mask.setAttribute(name, value);
+      rect.setAttribute(name, value);
+    }
+    return true;
+  }
+
+  /** World-space silhouette for one card: rotated rectangle, or the exact seeded torn polygon. */
+  #cardSilhouette(id, box) {
+    const points = this.cardEls.get(id)?.classList.contains("jn-torn")
+      ? tearPoints(id)
+      : CARD_CORNERS.map(point => ({ x: point.x * 100, y: point.y * 100 }));
+    return points.map(point => cardPointAnchor(box, { x: point.x / 100, y: point.y / 100 }));
+  }
+
+  /**
+   * One stable fade mask per canvas instance. Every card silhouette is white (no fade) by
+   * default; hovering, locking or inline-editing a note flips only that polygon to the theme's
+   * fade luminance. The mask is applied to `.jn-link-strokes` only, so pins, labels and hit
+   * paths never fade.
+   */
   #threadMask(boxes, threads) {
     let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
     let silhouettes = "";
-    for (const box of boxes.values()) {
-      const corners = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }]
-        .map(point => cardPointAnchor(box, point));
-      for (const { x, y } of corners) {
-        left = Math.min(left, x);
-        right = Math.max(right, x);
-        top = Math.min(top, y);
-        bottom = Math.max(bottom, y);
-      }
-      silhouettes += `<polygon class="jn-thread-silhouette" points="${corners.map(({ x, y }) => `${x},${y}`).join(" ")}"/>`;
+    const extend = (x, y) => {
+      left = Math.min(left, x);
+      right = Math.max(right, x);
+      top = Math.min(top, y);
+      bottom = Math.max(bottom, y);
+    };
+    for (const [id, box] of boxes) {
+      const corners = this.#cardSilhouette(id, box);
+      for (const { x, y } of corners) extend(x, y);
+      silhouettes += `<polygon class="jn-thread-mask-shape" data-note-id="${foundry.utils.escapeHTML(String(id))}"
+        points="${corners.map(({ x, y }) => `${x},${y}`).join(" ")}"/>`;
     }
-    if (!silhouettes) left = top = right = bottom = 0;
-    for (const { pins } of threads.values()) {
-      for (const { x, y } of pins) {
-        left = Math.min(left, x);
-        right = Math.max(right, x);
-        top = Math.min(top, y);
-        bottom = Math.max(bottom, y);
-      }
+    for (const { start, end, pins } of threads.values()) {
+      extend(start.x, start.y);
+      extend(end.x, end.y);
+      for (const { x, y } of pins) extend(x, y);
     }
+    if (!Number.isFinite(left)) left = top = right = bottom = 0;
     // Include the maximum travel of a pulled thread and its control points.
-    const bounds = `x="${left - 320}" y="${top - 320}" width="${right - left + 640}" height="${bottom - top + 640}"`;
+    const pad = 320;
+    const width = Math.max(1, right - left + pad * 2);
+    const height = Math.max(1, bottom - top + pad * 2);
+    const bounds = `x="${left - pad}" y="${top - pad}" width="${width}" height="${height}"`;
     return `<defs><mask id="${this.threadMaskId}" maskUnits="userSpaceOnUse" ${bounds}>
       <rect class="jn-thread-mask-bg" ${bounds}/>${silhouettes}
     </mask></defs>`;
+  }
+
+  /** Class-only fade sync: hover/editing never rebuilds the SVG or thread paths. */
+  #syncMaskState() {
+    const active = new Set();
+    if (this.hoverNoteId) active.add(this.hoverNoteId);
+    if (this.focusedNoteId) active.add(this.focusedNoteId);
+    for (const [id, el] of this.cardEls) {
+      if (el.classList.contains("jn-being-edited") || this.inlineText?.id === id) active.add(id);
+    }
+    for (const shape of this.svg.querySelectorAll(".jn-thread-mask-shape")) {
+      shape.classList.toggle("jn-thread-mask-active", active.has(shape.dataset.noteId));
+    }
   }
 
   #requestThreadFrame() {
@@ -612,14 +851,27 @@ export default class JournalCanvas {
   }
 
   #paintThread(id, thread) {
-    const { path, center } = pinnedThreadPath(thread.start, thread.end, thread.pins, thread.motion);
-    thread.line.setAttribute("d", path);
-    thread.hit.setAttribute("d", path);
+    const { path, center, start, end } = pinnedThreadPath(thread.start, thread.end, thread.pins, thread.motion);
+    thread.lines?.forEach(line => line.setAttribute("d", path));
+    if (thread.tails?.length) {
+      const tailPaths = looseTails(start, end);
+      thread.tails.forEach((tail, index) => {
+        if (tailPaths[index]) tail.setAttribute("d", tailPaths[index].d);
+      });
+    }
+    thread.endpointPins?.forEach((pin, index) => {
+      const anchor = index === 0 ? start : end;
+      pin.setAttribute("cx", anchor.x - anchor.nx * THREAD_PIN_RADIUS);
+      pin.setAttribute("cy", anchor.y - anchor.ny * THREAD_PIN_RADIUS);
+    });
+    thread.hit?.setAttribute("d", path);
     thread.label?.setAttribute("x", center.x);
     thread.label?.setAttribute("y", center.y + 4);
     thread.pins.forEach((pin, index) => {
-      thread.markers[index].setAttribute("cx", pin.x);
-      thread.markers[index].setAttribute("cy", pin.y);
+      const marker = thread.markers[index];
+      if (!marker) return;
+      marker.setAttribute("cx", pin.x);
+      marker.setAttribute("cy", pin.y);
     });
     const link = this.linksById.get(id);
     link.mx = center.x;
@@ -648,46 +900,169 @@ export default class JournalCanvas {
     this.linkToolbar.style.top = `${link.my * this.view.k + this.view.y}px`;
   }
 
+  #bindToolbarDismiss() {
+    if (this.toolbarDismiss) return;
+    const doc = this.root.ownerDocument;
+    this.toolbarDismiss = ev => {
+      if (this.linkToolbar.contains(ev.target)) return;
+      this.#closeLinkToolbar();
+    };
+    doc.addEventListener("pointerdown", this.toolbarDismiss, true);
+  }
+
+  #unbindToolbarDismiss() {
+    if (!this.toolbarDismiss) return;
+    this.root.ownerDocument.removeEventListener("pointerdown", this.toolbarDismiss, true);
+    this.toolbarDismiss = null;
+  }
+
+  #hideLinkToolbar() {
+    this.linkToolbar.style.display = "none";
+    delete this.linkToolbar.dataset.linkId;
+    this.#unbindToolbarDismiss();
+  }
+
+  /** Closes the panel; Escape/focus return goes back to the link's source card or the canvas. */
+  #closeLinkToolbar({ restoreFocus = false } = {}) {
+    const link = this.selectedLinkId ? this.linksById.get(this.selectedLinkId) : null;
+    this.selectedLinkId = null;
+    this.#syncLinkSelection();
+    this.#hideLinkToolbar();
+    if (!restoreFocus) return;
+    const card = link?.sourceId ? this.cardEls.get(link.sourceId) : null;
+    const target = card?.querySelector("[data-card-text]:not([hidden])") ?? this.root;
+    target.focus?.({ preventScroll: true });
+  }
+
   #syncLinkToolbar() {
     const link = this.selectedLinkId ? this.linksById.get(this.selectedLinkId) : null;
-    if (!link || this.readOnly) { this.linkToolbar.style.display = "none"; return; }
+    if (!link || this.readOnly) { this.#hideLinkToolbar(); return; }
 
+    const wasOpen = this.linkToolbar.style.display === "flex"
+      && this.linkToolbar.dataset.linkId === String(link.id);
     this.#positionLinkToolbar(link);
     this.linkToolbar.style.display = "flex";
+    this.linkToolbar.dataset.linkId = String(link.id);
+    this.#bindToolbarDismiss();
     const currentColor = normalizeLinkColor(link.color);
-    const direction = LINK_DIRECTIONS.has(link.direction) ? link.direction : "none";
+    const cosmetics = resolveLinkCosmetics(link);
+    const secondary = cosmetics.secondaryColor;
     const swatch = slot => {
       const label = t(slot ? `JN.Link.Color.${slot}` : "JN.Link.Color.default");
       return `<button type="button" class="jn-link-color jn-link-swatch-${slot || "default"}${slot === currentColor ? " on" : ""}"
         data-color="${slot}" title="${label}" aria-label="${label}" aria-pressed="${slot === currentColor}"></button>`;
     };
+    const secondarySwatch = slot => {
+      const label = t(slot ? `JN.Link.Secondary.${slot}` : "JN.Link.Secondary.default");
+      return `<button type="button" class="jn-link-color jn-link-secondary jn-link-secondary-${slot || "default"}${slot === secondary ? " on" : ""}"
+        data-secondary="${slot}" title="${label}" aria-label="${label}" aria-pressed="${slot === secondary}"></button>`;
+    };
+    const label = id => t(`JN.Link.Preset.${id.charAt(0).toUpperCase()}${id.slice(1)}`);
+    const presets = Object.entries(THREAD_PRESETS).map(([id, preset]) =>
+      `<button type="button" class="jn-link-preset" data-preset="${id}"
+        title="${label(id)} · ${preset.thickness.toFixed(1)} px · ${Math.round(preset.slack * 100)}%">${label(id)}</button>`).join("");
+    const options = (values, selected, prefix) => values.map(value =>
+      `<option value="${value}"${value === selected ? " selected" : ""}>${t(`JN.Link.${prefix}.${value}`)}</option>`).join("");
     this.linkToolbar.innerHTML = `
-      <input type="text" class="jn-link-label-input" placeholder="${t("JN.Link.Label")}" value="${foundry.utils.escapeHTML(link.label ?? "")}">
-      <button type="button" class="jn-link-dir" title="${t("JN.Link.Direction")}">${{ none: "—", one: "→", two: "↔" }[direction]}</button>
-      <span class="jn-link-colors">${LINK_COLOR_OPTIONS.map(swatch).join("")}</span>
-      <button type="button" class="jn-link-dash" title="${t("JN.Link.LineStyle")}">${link.lineStyle === "dashed" ? "┄┄" : "──"}</button>
-      ${this.#gmLinkButtons(link)}
-      <button type="button" class="jn-link-delete" title="${t("JN.Link.Delete")}">✕</button>
+      <div class="jn-link-row jn-link-presets" role="group" aria-label="${t("JN.Link.Presets")}">${presets}</div>
+      <div class="jn-link-row">
+        <label class="jn-link-field">
+          <span>${t("JN.Link.Material")}</span>
+          <select class="jn-link-material" title="${t("JN.Link.Material")}">
+            ${options(["linen", "double"], cosmetics.material, "MaterialOption")}
+          </select>
+        </label>
+        <label class="jn-link-field">
+          <span>${t("JN.Link.Thickness")} <output class="jn-link-thickness-out">${cosmetics.thickness.toFixed(1)} px</output></span>
+          <input type="range" class="jn-link-thickness" min="0.8" max="5" step="0.1"
+            value="${cosmetics.thickness}" title="${t("JN.Link.Thickness")}" aria-label="${t("JN.Link.Thickness")}">
+        </label>
+        <label class="jn-link-field">
+          <span>${t("JN.Link.Slack")} <output class="jn-link-slack-out">${Math.round(cosmetics.slack * 100)}%</output></span>
+          <input type="range" class="jn-link-slack" min="0" max="25" step="1"
+            value="${Math.round(cosmetics.slack * 100)}" title="${t("JN.Link.Slack")}" aria-label="${t("JN.Link.Slack")}">
+        </label>
+      </div>
+      <div class="jn-link-row">
+        <label class="jn-link-field">
+          <span>${t("JN.Link.Pattern")}</span>
+          <select class="jn-link-pattern" title="${t("JN.Link.Pattern")}">
+            ${options(["continuous", "interrupted", "alternating"], cosmetics.pattern, "PatternOption")}
+          </select>
+        </label>
+        <label class="jn-link-field">
+          <span>${t("JN.Link.Ends")}</span>
+          <select class="jn-link-ends" title="${t("JN.Link.Ends")}">
+            ${options(["standard", "loose"], cosmetics.ends, "EndOption")}
+          </select>
+        </label>
+      </div>
+      <div class="jn-link-row">
+        <span class="jn-link-colors" role="group" aria-label="${t("JN.Link.Color.default")}">${LINK_COLOR_OPTIONS.map(swatch).join("")}</span>
+        <span class="jn-link-colors jn-link-secondary-colors" role="group" aria-label="${t("JN.Link.SecondaryColor")}">${LINK_COLOR_OPTIONS.map(secondarySwatch).join("")}</span>
+        <input type="text" class="jn-link-label-input" placeholder="${t("JN.Link.Label")}" value="${foundry.utils.escapeHTML(link.label ?? "")}">
+      </div>
+      <div class="jn-link-row jn-link-actions">
+        ${this.#gmLinkButtons(link)}
+        <button type="button" class="jn-link-delete" title="${t("JN.Link.Delete")}">✕</button>
+      </div>
     `;
 
-    const update = fields => this.callbacks.onUpdateLink(link.sourceId, link.id, fields);
+    const update = fields => this.callbacks.onUpdateLink?.(link.sourceId, link.id, fields);
     // Commit on change (blur), not per keystroke: one socket message and one world write
     // per label edit, matching the block-save rule in spec §6.2.
     this.linkToolbar.querySelector(".jn-link-label-input").onchange = ev => update({ label: ev.target.value });
-    this.linkToolbar.querySelector(".jn-link-dir").onclick = () =>
-      update({ direction: { none: "one", one: "two", two: "none" }[direction] });
-    this.linkToolbar.querySelectorAll(".jn-link-color").forEach(btn => {
+    this.linkToolbar.querySelectorAll(".jn-link-color:not(.jn-link-secondary)").forEach(btn => {
       btn.onclick = () => update({ color: btn.dataset.color });
     });
-    this.linkToolbar.querySelector(".jn-link-dash").onclick = () =>
-      update({ lineStyle: link.lineStyle === "dashed" ? "solid" : "dashed" });
+    // Accent dye is an independent field: these swatches never touch the primary `color`.
+    this.linkToolbar.querySelectorAll(".jn-link-secondary").forEach(btn => {
+      btn.onclick = () => update({ secondaryColor: btn.dataset.secondary });
+    });
+
+    const material = this.linkToolbar.querySelector(".jn-link-material");
+    const thickness = this.linkToolbar.querySelector(".jn-link-thickness");
+    const slack = this.linkToolbar.querySelector(".jn-link-slack");
+    const pattern = this.linkToolbar.querySelector(".jn-link-pattern");
+    const ends = this.linkToolbar.querySelector(".jn-link-ends");
+    const thicknessOut = this.linkToolbar.querySelector(".jn-link-thickness-out");
+    const slackOut = this.linkToolbar.querySelector(".jn-link-slack-out");
+    // Range input only updates its readout; the write happens once on change (pointer release).
+    thickness.oninput = () => { thicknessOut.textContent = `${Number(thickness.value).toFixed(1)} px`; };
+    slack.oninput = () => { slackOut.textContent = `${Math.round(Number(slack.value))}%`; };
+    thickness.onchange = () => update({ thickness: Number(thickness.value) });
+    slack.onchange = () => update({ slack: Number(slack.value) / 100 });
+    material.onchange = () => update({ material: material.value });
+    pattern.onchange = () => update({ pattern: pattern.value });
+    ends.onchange = () => update({ ends: ends.value });
+
+    // Presets set only their three defaults plus a neutral pattern/end treatment. Every other
+    // parameter stays independently controlled.
+    this.linkToolbar.querySelectorAll(".jn-link-preset").forEach(btn => {
+      btn.onclick = () => {
+        const preset = THREAD_PRESETS[btn.dataset.preset];
+        if (!preset) return;
+        material.value = preset.material;
+        thickness.value = String(preset.thickness);
+        thicknessOut.textContent = `${preset.thickness.toFixed(1)} px`;
+        slack.value = String(Math.round(preset.slack * 100));
+        slackOut.textContent = `${Math.round(preset.slack * 100)}%`;
+        pattern.value = "continuous";
+        ends.value = "standard";
+        update({
+          material: preset.material,
+          thickness: preset.thickness,
+          slack: preset.slack,
+          pattern: "continuous",
+          ends: "standard"
+        });
+      };
+    });
     const gmButton = (selector, fn) => {
       const btn = this.linkToolbar.querySelector(selector);
       if (btn) btn.onclick = () => {
         fn();
-        this.selectedLinkId = null;
-        this.#syncLinkSelection();
-        this.linkToolbar.style.display = "none";
+        this.#closeLinkToolbar();
       };
     };
     gmButton(".jn-link-hide", () => this.callbacks.onHideLink?.(link.sourceId, link.id));
@@ -696,10 +1071,15 @@ export default class JournalCanvas {
     if (hintBtn) hintBtn.onclick = () => this.callbacks.onToggleLinkHint?.(link.sourceId, link.id, !link.hint);
     this.linkToolbar.querySelector(".jn-link-delete").onclick = () => {
       this.callbacks.onDeleteLink(link.sourceId, link.id);
-      this.selectedLinkId = null;
-      this.#syncLinkSelection();
-      this.linkToolbar.style.display = "none";
+      this.#closeLinkToolbar();
     };
+
+    // Opening the panel moves focus to its first control; later geometry/pin syncs rebuild the
+    // markup but must not steal focus back from whatever control the user is using.
+    if (!wasOpen) {
+      const first = this.linkToolbar.querySelector("button, select, input");
+      first?.focus?.({ preventScroll: true });
+    }
   }
 
   /** Selection is a class toggle, so clicking a thread never forces a full SVG rebuild. */
@@ -748,7 +1128,7 @@ export default class JournalCanvas {
   }
 
   /**
-   * Pins, arrows and labels live inside the CSS-scaled world while thread strokes are
+   * Pins and labels live inside the CSS-scaled world while thread strokes are
    * non-scaling. Dividing by the zoom keeps their on-screen size steady for k in [0.5, 2]
    * and eases off outside that range so extreme zooms still feel like zooming.
    */
@@ -1101,6 +1481,40 @@ export default class JournalCanvas {
     let lastCardClick = null;
     let lastBoardClick = null;
 
+    // Hover/editing fade is pure class toggling on the existing mask shapes. No path or DOM
+    // rebuild happens here, so a busy board stays responsive.
+    this.root.addEventListener("pointerover", ev => {
+      const card = ev.target.closest?.(".jn-card");
+      if (!card || !this.world.contains(card)) return;
+      const id = card.dataset.id;
+      if (id === this.hoverNoteId) return;
+      this.hoverNoteId = id;
+      this.#syncMaskState();
+    });
+    this.root.addEventListener("pointerout", ev => {
+      const card = ev.target.closest?.(".jn-card");
+      if (!card) return;
+      if (ev.relatedTarget && card.contains(ev.relatedTarget)) return;
+      if (this.hoverNoteId !== card.dataset.id) return;
+      this.hoverNoteId = null;
+      this.#syncMaskState();
+    });
+    this.root.addEventListener("focusin", ev => {
+      if (!ev.target.matches?.("input, textarea")) return;
+      const card = ev.target.closest?.(".jn-card");
+      if (!card) return;
+      this.focusedNoteId = card.dataset.id;
+      this.#syncMaskState();
+    });
+    this.root.addEventListener("focusout", ev => {
+      if (!ev.target.matches?.("input, textarea")) return;
+      const card = ev.target.closest?.(".jn-card");
+      if (!card) return;
+      if (ev.relatedTarget && card.contains(ev.relatedTarget)) return;
+      if (this.focusedNoteId === card.dataset.id) this.focusedNoteId = null;
+      this.#syncMaskState();
+    });
+
     this.root.addEventListener("click", ev => {
       const camera = ev.target.closest(".jn-card-image-button");
       if (camera && !camera.hidden) {
@@ -1129,6 +1543,12 @@ export default class JournalCanvas {
 
     this.root.addEventListener("keydown", ev => {
       if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
+      if (ev.key === "Escape" && this.selectedLinkId) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.#closeLinkToolbar({ restoreFocus: true });
+        return;
+      }
       if (ev.key === "Escape" && this.linkPlacement) {
         ev.preventDefault();
         ev.stopPropagation();
@@ -1266,6 +1686,7 @@ export default class JournalCanvas {
         el.style.width = `${w}px`;
         el.style.minHeight = `${h}px`;
         el.classList.add("jn-sized");
+        this.cardSizes.delete(drag.id);
         this.#queueLinkDraw();
       } else if (drag.type === "card") {
         if (drag.readOnly) return;
@@ -1298,6 +1719,8 @@ export default class JournalCanvas {
           || move.y < y + 110 || move.y > y + Number(mask.getAttribute("height")) - 110) {
           const boxes = new Map([...this.cardEls.keys()].map(id => [id, this.#cardBox(id)]));
           this.svg.querySelector("defs").outerHTML = this.#threadMask(boxes, this.threads);
+          this.maskShapeEls = new Map([...this.svg.querySelectorAll(".jn-thread-mask-shape")].map(shape => [shape.dataset.noteId, shape]));
+          this.#syncMaskState();
         }
         this.#paintThread(drag.id, thread);
       } else if (drag.type === "link" && !drag.readOnly && drag.moved > DRAG_THRESHOLD) {
@@ -1466,6 +1889,7 @@ export default class JournalCanvas {
         cardEl.style.width = "";
         cardEl.style.minHeight = "";
         cardEl.classList.remove("jn-sized");
+        this.cardSizes.delete(id);
         this.callbacks.onResetCardSize(id);
         return;
       }
