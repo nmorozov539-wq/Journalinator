@@ -186,3 +186,39 @@ Delivered:
 - Tests: **361 pass / 0 fail**; syntax pass; browser probe for narrow/wide popover bounds and no layout shift.
 
 Known scope note: multi-link bulk selection is not implemented (canvas has a single selected link); documented in code. Cosmetic edits inherit the existing collaborative write model.
+
+### Phase 8 — integration, real Foundry smoke, packaging
+
+Coordinator-run with independent validation reports from all prior phases. No new feature agent; packaging/docs only.
+
+- Baseline/regression: `npm run check` pass; `npm test` **361 pass / 0 fail / 0 skipped** (14 suites, ~25 s).
+- Isolated Foundry smoke (real runtime, not jsdom):
+  - data root `/home/Riv/foundry-test-data`, fresh world `journalinator-fresh`, port 30199, Foundry 14.367, PF2e 7.4.3.
+  - module 0.8.4 active; containers created (`shared/history/secrets/private/layout/stats/history`); `schemaVersion` 1; `pinsEnabled` true; scene-control button present.
+  - opened Journalinator app; created compact Memo and extended Document notes; verified presentation/attachment/schema in page data and layout `main` anchors; `.jn-card`, `.jn-pin`, paper classes rendered; no Journalinator console errors.
+  - Fresh PF2e world emitted unrelated PF2e setting errors on first launch (not module errors). Production world was never launched or modified.
+- Package: `tools/package-stylized.sh` builds `dist/Journalinator-stylized-canvas-0.8.4.zip` (105 files, ~1.5 MB). `dist/` is gitignored and not published.
+  - SHA-256 `398f94b863b093d1fca334f29327b2a3d1e547600836a6deee313bf2efa346aa`.
+- Deliverable docs: `STYLIZED-CANVAS.md` (install/launch, test commands, limitations, manual checklist, verification).
+- Manual gates remaining: GM + two players (permissions/private/vault/locks sync), real campaign migration on a disposable copy, 50–100 note stress in a real browser session, live drag/hover/route/pin/undo interaction, EN/RU offline Foundry font rendering.
+- No push, merge, release, or deployment was performed. Branch remains local `stylized-canvas`.
+
+### Acceptance status snapshot (A01–A28)
+
+| IDs | Status | Evidence |
+|---|---|---|
+| A01 | PASS | branch/status/baseline recorded; 361 tests; no main edits |
+| A02–A09 | PASS automated + jsdom/browser | classifier/UI/integration/search tests; real Foundry created compact+document notes |
+| A10 | PASS automated; real-world migration pending | migration/idempotence/legacy fixtures in integration; disposable copy not GM-joined |
+| A11 | NOT RUN | requires GM + two players |
+| A12 | PASS | theme API/validation/inert selector tests |
+| A13 | PASS browser | cork/no grid/rules/fonts/pin probes |
+| A14–A16 | PASS automated + probes | presets/layers/fade tests; Chromium fade/layer measurements |
+| A17–A21 | PASS automated + probes | pin lifecycle/redistribution/undo/hit-area tests; real Foundry pins rendered |
+| A22–A23 | PASS automated | route A/B, typed/pin-off/rollback/undo tests |
+| A24 | PASS automated | labels/stamps/search/trash/link tests retained |
+| A25–A26 | PASS automated + probe | toolbar/popover/bulk tests; narrow/wide Chromium clamp |
+| A27 | PARTIAL | 100 notes/200 links measured (~6 ms geometry update vs ~19–30 ms rebuild; jsdom 238→28 ms); real Foundry stress pending |
+| A28 | PASS local; no publish | manifest/package/launch docs; Foundry 14.367 smoke; no push/merge/release |
+
+Final known limitations: session-local active-GM undo (pin/route), private main-pin disable not redistributed, multi-link bulk not implemented, split fallback crash window on fake Foundry only, per-torn-card shadow cost to stress-test, and all real multiplayer/manual gates above.
