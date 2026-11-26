@@ -53,6 +53,7 @@ export default class JournalCanvas {
     this.inlineText = null;
     this.linkPlacement = null;
     this.dimMatch = () => true; // (note) => does it match the active search/filters?
+    this.statusFor = null; // (note) => derived actor status badge or null
     this.gmMode = false; // GM view with secrets merged in: shows hide/reveal/hint controls
     this.readOnly = false; // no active GM: allow selecting/reading but no writes
 
@@ -189,6 +190,7 @@ export default class JournalCanvas {
         <div class="jn-card-image" hidden><img alt="" draggable="false" referrerpolicy="no-referrer"></div>
         <h3 class="jn-card-title" data-card-text="title" tabindex="0"></h3>
         <div class="jn-card-excerpt"></div>
+        <span class="jn-card-status" hidden></span>
         <div class="jn-card-stamps"></div>
         <span class="jn-card-lock-pill">&#9998;</span>
         <b class="jn-card-resize"></b>
@@ -246,6 +248,24 @@ export default class JournalCanvas {
     if (stamp) el.dataset.sealCorner = stamp.dataset.sealCorner;
     else delete el.dataset.sealCorner;
     stampSlot.replaceChildren(...(stamp ? [stamp] : []));
+
+    // Derived actor state, not a stamp: it never occupies the seal slot, is not draggable, and
+    // is recalculated on every render from whatever this client is allowed to see.
+    const status = this.statusFor?.(note) ?? null;
+    const statusSlot = el.querySelector(".jn-card-status");
+    el.classList.toggle("jn-has-status", !!status);
+    statusSlot.hidden = !status;
+    if (!status) statusSlot.replaceChildren();
+    else {
+      const label = t(status.sceneId ? "JN.Actor.DeadInScene" : "JN.Actor.Dead");
+      const image = document.createElement("img");
+      image.className = "jn-card-status-icon";
+      image.src = stampUrl("skull");
+      image.alt = label;
+      image.title = label;
+      image.draggable = false;
+      statusSlot.replaceChildren(image);
+    }
   }
 
   #renderCardBlocks(excerpt, blocks) {
@@ -895,9 +915,15 @@ export default class JournalCanvas {
         ${isStamp ? stampColors() : `<button type="button" data-action="edit-label">${t("JN.Prompt.EditLabel")}</button>`}
         <button type="button" data-action="remove-label">${t(isStamp ? "JN.Stamp.Remove" : "JN.Common.Delete")}</button>`;
     } else if (noteId) {
+      const note = this.notes.find(item => item._id === noteId);
+      const actorLinked = !!note?.system?.actorRef?.actorId;
+      const actorItems = this.callbacks.onLinkActor && game.user?.isGM && !note?.secret ? `
+        <button type="button" data-action="link-actor">${t(actorLinked ? "JN.Actor.Change" : "JN.Actor.Link")}</button>
+        ${actorLinked ? `<button type="button" data-action="unlink-actor">${t("JN.Actor.Unlink")}</button>` : ""}` : "";
       this.contextMenu.innerHTML = `
         <button type="button" data-action="card-stamp">${t("JN.Stamp.Add")}</button>
-        <button type="button" data-action="card-background">${t("JN.Editor.ChangeBackground")}</button>`;
+        <button type="button" data-action="card-background">${t("JN.Editor.ChangeBackground")}</button>
+        ${actorItems}`;
     } else this.contextMenu.innerHTML = `
       <button type="button" data-action="note">${t("JN.Context.NewNote")}</button>
       <button type="button" data-action="memo">${t("JN.Style.Memo")}</button>
@@ -928,6 +954,16 @@ export default class JournalCanvas {
         if (action === "delete-private") {
           this.#closeContextMenu();
           this.callbacks.onDeleteNote?.(noteId);
+          return;
+        }
+        if (action === "link-actor") {
+          this.#closeContextMenu();
+          this.callbacks.onLinkActor?.(noteId);
+          return;
+        }
+        if (action === "unlink-actor") {
+          this.#closeContextMenu();
+          this.callbacks.onUnlinkActor?.(noteId);
           return;
         }
         if (button.dataset.stampColor) {

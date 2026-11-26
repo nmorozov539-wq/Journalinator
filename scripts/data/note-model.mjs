@@ -17,6 +17,13 @@ export default class NoteModel extends foundry.abstract.TypeDataModel {
       targetHeading: new fields.StringField({ required: false, blank: true, initial: "" }),
       image: new fields.StringField({ required: false, nullable: true, blank: true, initial: null }),
       backgroundImage: new fields.StringField({ required: false, nullable: true, blank: true, initial: null }),
+      // Optional read-only link to a Foundry actor. The card badge is derived at render time;
+      // nothing about the actor's live state is copied into the shared journal.
+      actorRef: new fields.SchemaField({
+        actorId: new fields.DocumentIdField({ required: true }),
+        sceneId: new fields.DocumentIdField({ required: false, nullable: true, initial: null }),
+        tokenId: new fields.DocumentIdField({ required: false, nullable: true, initial: null })
+      }, { required: false, nullable: true, initial: null }),
       blocks: new fields.ArrayField(new fields.SchemaField({
         blockId: new fields.StringField({ required: true }),
         text: new fields.StringField({ required: true, blank: true, initial: "" }),

@@ -49,7 +49,7 @@ function withToObject(system) {
 }
 
 const NOTE_DEFAULTS = () => ({
-  style: "sticky", image: null, blocks: [], links: [], authorId: "", createdAt: 0, updatedAt: 0,
+  style: "sticky", image: null, actorRef: null, blocks: [], links: [], authorId: "", createdAt: 0, updatedAt: 0,
   editCount: 0, contributions: {}, formerNames: [], hint: false, deleted: null
 });
 const DEFAULTS = {

@@ -13,6 +13,7 @@ import {
 } from "./locks.mjs";
 import { t } from "./i18n.mjs";
 import { attachedStampIds, DEFAULT_STAMP_CORNER, isStampCorner, stampUrl } from "./stamps.mjs";
+import { normalizeActorRef } from "./actor-status.mjs";
 
 const MODULE_ID = "fvtt-journalinator";
 const CHANNEL = `module.${MODULE_ID}`;
@@ -552,6 +553,33 @@ async function handleMessage(message, senderUserId) {
       if (message.image !== null && !image) return;
       const field = message.background === true ? "system.backgroundImage" : "system.image";
       await page.update({ [field]: image });
+      return;
+    }
+
+    case "linkActor": {
+      // Actor status is GM-facing information; players never get to choose which actor a shared
+      // note observes. The badge itself is still derived per client, so this only stores the ref.
+      if (!senderIsGM(senderUserId)) return;
+      const page = shared.pages.get(message.noteId);
+      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
+      if (message.actorRef === null) {
+        await page.update({ "system.actorRef": null });
+        return;
+      }
+      const ref = normalizeActorRef(message.actorRef);
+      if (!ref || !DOCUMENT_ID_RE.test(ref.actorId)) return;
+      if (ref.sceneId && !DOCUMENT_ID_RE.test(ref.sceneId)) return;
+      if (ref.tokenId && !DOCUMENT_ID_RE.test(ref.tokenId)) return;
+      if (!game.actors?.get?.(ref.actorId)) return;
+      if (ref.sceneId) {
+        const scene = game.scenes?.get?.(ref.sceneId);
+        if (!scene) return;
+        if (ref.tokenId) {
+          const token = scene.tokens?.get?.(ref.tokenId);
+          if (!token || token.actorId !== ref.actorId) return;
+        }
+      }
+      await page.update({ "system.actorRef": ref });
       return;
     }
 

@@ -16,6 +16,7 @@ import { openVaultDialog } from "../secrets/vault-ui.mjs";
 import * as secrets from "../secrets/secret-actions.mjs";
 import { t } from "../i18n.mjs";
 import { stripSecretPrefix } from "../secrets/model.mjs";
+import { resolveActorStatus } from "../actor-status.mjs";
 
 /** Runs a GM vault action and surfaces failures (e.g. the vault was locked meanwhile). */
 function gm(job) {
@@ -165,7 +166,11 @@ export default class JournalApp extends ApplicationV2 {
       : requestWrite({ type: "deleteLink", noteId, linkId }),
     onHideLink: (noteId, linkId) => gm(() => secrets.hideSharedLink(noteId, linkId)),
     onRevealLink: (noteId, linkId) => gm(() => secrets.revealLink(noteId, linkId)),
-    onToggleLinkHint: (noteId, linkId, hint) => requestWrite({ type: "gmSetLinkHint", noteId, linkId, hint })
+    onToggleLinkHint: (noteId, linkId, hint) => requestWrite({ type: "gmSetLinkHint", noteId, linkId, hint }),
+    // Actor links are a GM-side read: players still see the derived badge, but cannot choose
+    // which actor a shared note watches.
+    onLinkActor: noteId => this.#linkActor(noteId),
+    onUnlinkActor: noteId => requestWrite({ type: "linkActor", noteId, actorRef: null })
   });
 
   #private = new PrivateWorkspace({ onChange: () => this.render() });
@@ -179,6 +184,95 @@ export default class JournalApp extends ApplicationV2 {
   #removeLabel(labelId) {
     if (notesStore.isHiddenLabel(labelId)) return gm(() => secrets.removeHiddenLabel(labelId));
     return requestWrite({ type: "removeLabel", labelId });
+  }
+
+  /** True when any visible note watches this base actor (synthetic token actors included). */
+  #actorIsLinked(value) {
+    const actorId = typeof value === "string"
+      ? value
+      : (value?.token?.actorId ?? value?.actorId ?? value?.id);
+    if (!actorId) return false;
+    return notesStore.getAllNotes().some(note => note.system?.actorRef?.actorId === actorId);
+  }
+
+  #sceneIsLinked(sceneId) {
+    if (!sceneId) return false;
+    return notesStore.getAllNotes().some(note => note.system?.actorRef?.sceneId === sceneId);
+  }
+
+  #hasActorLinks() {
+    return notesStore.getAllNotes().some(note => note.system?.actorRef?.actorId);
+  }
+
+  async #linkActor(noteId) {
+    if (!game.user?.isGM) return;
+    const note = notesStore.getNote(noteId);
+    if (!note || note.secret) return;
+    const actors = [...(game.actors ?? [])].sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
+    if (!actors.length) {
+      ui.notifications?.warn(t("JN.Actor.NoActors"));
+      return;
+    }
+    const scenes = [...(game.scenes ?? [])].sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
+    const current = note.system?.actorRef ?? null;
+    const esc = foundry.utils.escapeHTML;
+    const tokenCount = (scene, actorId) => {
+      if (!scene?.tokens) return 0;
+      let count = 0;
+      for (const token of scene.tokens) if (token.actorId === actorId) count++;
+      return count;
+    };
+    const sceneOptions = actorId => [
+      `<option value="">${t("JN.Actor.AnyScene")}</option>`,
+      ...scenes
+        .filter(scene => tokenCount(scene, actorId) > 0)
+        .map(scene => `<option value="${esc(scene.id)}">${esc(t("JN.Actor.SceneOption", { scene: scene.name }))}</option>`)
+    ].join("");
+
+    const result = await foundry.applications.api.DialogV2.wait({
+      window: { title: t("JN.Actor.DialogTitle") },
+      position: { width: 480 },
+      content: `
+        <div class="form-group">
+          <label for="jn-actor-link">${t("JN.Actor.Actor")}</label>
+          <div class="form-fields"><select id="jn-actor-link" name="actor">
+            ${actors.map(actor => `<option value="${esc(actor.id)}" ${current?.actorId === actor.id ? "selected" : ""}>${esc(actor.name)}</option>`).join("")}
+          </select></div>
+        </div>
+        <div class="form-group">
+          <label for="jn-actor-scene">${t("JN.Actor.Scope")}</label>
+          <div class="form-fields"><select id="jn-actor-scene" name="scene"></select></div>
+        </div>
+        <p class="journalinator-meta">${t("JN.Actor.Hint")}</p>`,
+      render: (_event, dialog) => {
+        const actorSelect = dialog.element.querySelector('select[name="actor"]');
+        const sceneSelect = dialog.element.querySelector('select[name="scene"]');
+        const syncScenes = () => {
+          sceneSelect.innerHTML = sceneOptions(actorSelect.value);
+          if (current?.actorId === actorSelect.value && current.sceneId
+              && [...sceneSelect.options].some(option => option.value === current.sceneId)) {
+            sceneSelect.value = current.sceneId;
+          }
+        };
+        actorSelect.addEventListener("change", syncScenes);
+        syncScenes();
+      },
+      buttons: [
+        {
+          action: "ok",
+          label: t("JN.Common.OK"),
+          default: true,
+          callback: (_event, button) => ({
+            actorId: button.form.elements.actor.value,
+            sceneId: button.form.elements.scene.value || null
+          })
+        },
+        { action: "cancel", label: t("JN.Common.Cancel"), callback: () => null }
+      ],
+      rejectClose: false
+    });
+    if (!result?.actorId) return;
+    await requestWrite({ type: "linkActor", noteId, actorRef: result });
   }
 
   async #createNoteAt({ x, y, secret = false, kind = "note", style, initialTitle, immediate = false }) {
@@ -261,6 +355,36 @@ export default class JournalApp extends ApplicationV2 {
     this.#hookIds.push(["updateScene", Hooks.on("updateScene", (scene, changes) => {
       if ("background" in changes || "img" in changes || "backgroundColor" in changes
         || "levels" in changes || "initialLevel" in changes) rerenderForScene();
+    })]);
+
+    // Actor badges are derived, so they only need a re-render when a linked actor, its token, or
+    // a status effect changes. Token movement is deliberately ignored: updateToken fires on
+    // every step, and a badge does not depend on coordinates.
+    const rerenderForActor = actor => {
+      if (this.#actorIsLinked(actor)) this.render();
+    };
+    this.#hookIds.push(["updateActor", Hooks.on("updateActor", rerenderForActor)]);
+    this.#hookIds.push(["createToken", Hooks.on("createToken", token => rerenderForActor(token))]);
+    this.#hookIds.push(["deleteToken", Hooks.on("deleteToken", token => rerenderForActor(token))]);
+    this.#hookIds.push(["updateToken", Hooks.on("updateToken", (token, changes) => {
+      const touchesDelta = Object.keys(changes ?? {}).some(key => key === "delta" || key.startsWith("delta."));
+      if (touchesDelta) rerenderForActor(token);
+    })]);
+    this.#hookIds.push(["deleteActor", Hooks.on("deleteActor", actor => rerenderForActor(actor))]);
+    this.#hookIds.push(["deleteScene", Hooks.on("deleteScene", scene => {
+      if (this.#sceneIsLinked(scene?.id)) this.render();
+    })]);
+    const rerenderForEffect = effect => {
+      const parent = effect?.parent;
+      if (!parent) return;
+      const actor = parent.documentName === "Actor" || parent.isToken ? parent : (parent.actor ?? parent.parent);
+      if (actor) rerenderForActor(actor);
+    };
+    for (const hook of ["createActiveEffect", "updateActiveEffect", "deleteActiveEffect"]) {
+      this.#hookIds.push([hook, Hooks.on(hook, rerenderForEffect)]);
+    }
+    this.#hookIds.push(["canvasReady", Hooks.on("canvasReady", () => {
+      if (this.#hasActorLinks()) this.render();
     })]);
 
     this.#onGlobalKeydown = ev => {
@@ -549,6 +673,7 @@ export default class JournalApp extends ApplicationV2 {
     this.#canvas.mount(root.querySelector(".journalinator-canvas-slot"));
     this.#canvas.selectedNoteId = this.#selectedNoteId;
     this.#canvas.gmMode = context.merged;
+    this.#canvas.statusFor = note => resolveActorStatus(note.system?.actorRef);
     this.#canvas.update(context.allNotes, context.layout, {
       deferGeometry: true,
       dimMatch: note => this.#matchesQuery(note, context.query) && this.#matchesFilters(note)

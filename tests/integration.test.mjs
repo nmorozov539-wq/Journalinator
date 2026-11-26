@@ -393,6 +393,28 @@ test("offline writes warn instead of disappearing silently", async () => {
   gmUser.active = wasActive;
 });
 
+test("only the GM may link a note to an actor, and the ref survives as shared note data", async () => {
+  await requestWrite({ type: "createNote", title: "Linked NPC" });
+  const note = sharedByName("Linked NPC");
+  const actor = { id: "ActorLink0000001", name: "Villain", statuses: new Set(["dead"]), testUserPermission: () => true };
+  const scene = { id: "SceneLink0000001", name: "Crypt", tokens: new Map() };
+  globalThis.game.actors = new Map([[actor.id, actor]]);
+  globalThis.game.scenes = Object.assign(new Map([[scene.id, scene]]), { active: scene });
+  const ref = { actorId: actor.id, sceneId: scene.id };
+
+  await fromPlayer({ type: "linkActor", noteId: note.id, actorRef: ref });
+  assert.equal(note.system.actorRef, null, "players cannot choose which actor a shared note watches");
+
+  await requestWrite({ type: "linkActor", noteId: note.id, actorRef: ref });
+  assert.deepEqual(note.system.actorRef, { ...ref, tokenId: null });
+
+  await requestWrite({ type: "linkActor", noteId: note.id, actorRef: { actorId: "MissingActor0001", sceneId: scene.id } });
+  assert.deepEqual(note.system.actorRef, { ...ref, tokenId: null }, "unknown actors are rejected");
+
+  await requestWrite({ type: "linkActor", noteId: note.id, actorRef: null });
+  assert.equal(note.system.actorRef, null);
+});
+
 test("final leak check (key is in the world now: open mode, so only ciphertext is checked)", () => {
   // In open mode the key is readable by design, so check the vault blob holds no plaintext.
   const blob = JSON.stringify(containers.secrets.flags["fvtt-journalinator"].vault);

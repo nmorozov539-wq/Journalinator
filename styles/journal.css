@@ -843,6 +843,33 @@
   cursor: pointer;
 }
 .jn-card-stamps .jn-stamp-private { border-style: dashed; }
+
+/* Derived actor state. Deliberately not a `.jn-stamp`: it is not selectable, draggable, or
+   persisted, and it must not replace the note's decorative seal. */
+.jn-card-status {
+  position: absolute;
+  top: 5px;
+  left: 5px;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid color-mix(in srgb, #b85347 62%, var(--jn-line));
+  background: color-mix(in srgb, var(--jn-panel) 82%, #1b0f0c 18%);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--jn-shadow) 55%, transparent);
+  pointer-events: none;
+}
+.jn-card-status[hidden] { display: none; }
+.jn-card-status-icon {
+  width: 15px;
+  height: 15px;
+  display: block;
+  filter: sepia(1) saturate(1.6) hue-rotate(-16deg) brightness(.82);
+}
+.jn-card.jn-has-status .jn-card-title { padding-left: 28px; }
+
 .jn-label.jn-label-selected, .jn-card-stamps .jn-label-selected {
   outline: 2px solid var(--jn-acc);
   outline-offset: 3px;

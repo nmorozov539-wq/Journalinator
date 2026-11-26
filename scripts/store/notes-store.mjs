@@ -160,6 +160,7 @@ class NotesStore {
         targetHeading: note.targetHeading ?? "",
         image: note.image ?? null,
         backgroundImage: note.backgroundImage ?? null,
+        actorRef: null,
         blocks: (note.blocks ?? []).map(b => ({ ...b, hidden: true })),
         links: (note.links ?? []).map(l => ({ ...l, hidden: true })),
         authorId: note.authorId ?? "",

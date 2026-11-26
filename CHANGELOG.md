@@ -27,6 +27,11 @@ These notes start with the small board and toolbar polish patches and cover the 
 - Link pins, arrows, and labels keep a steadier size while zooming.
 - A **Patch notes** button in the bottom-left corner of the canvas opens this changelog. Versions
   are grouped into foldable series and shown one at a time.
+- **Prototype — actor status badges:** a GM can right-click a note and choose **Link actor…**.
+  While the linked actor has the core **Dead** status, the card shows a small skull. Linking a
+  scene follows that scene's tokens, so an unlinked actor can be dead in one scene and alive in
+  another. The badge is derived per client from documents that client can already see; actor
+  state is never copied into the shared journal.
 
 ## 0.8.4 — Keep the note type when copying
 

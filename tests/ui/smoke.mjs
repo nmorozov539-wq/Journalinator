@@ -1051,6 +1051,38 @@ test("canvas cards render Markdown and forward task checkboxes", () => {
   }
 });
 
+test("actor status renders as a card badge without replacing the seal", () => {
+  const canvas = new JournalCanvas({});
+  document.body.appendChild(canvas.root);
+  const note = {
+    _id: "statuscard000001",
+    name: "Dead NPC",
+    system: { style: "sticky", blocks: [], links: [], actorRef: { actorId: "Actor00000000001", sceneId: null } }
+  };
+  const layout = {
+    cards: { [note._id]: { x: 0, y: 0, rotation: 0 } },
+    labels: { seal000000000001: { stamp: "paw", noteId: note._id, corner: "bottom-right" } }
+  };
+  try {
+    canvas.statusFor = () => ({ state: "dead", actorId: "Actor00000000001", sceneId: null, tokenId: null });
+    canvas.update([note], layout);
+    const card = canvas.root.querySelector(`.jn-card[data-id="${note._id}"]`);
+    assert.ok(card.classList.contains("jn-has-status"));
+    assert.equal(card.querySelector(".jn-card-status img").getAttribute("src"),
+      "modules/fvtt-journalinator/assets/stamps/skull.png");
+    assert.ok(card.querySelector(".jn-card-stamps .jn-stamp"), "the decorative seal is still rendered");
+
+    canvas.statusFor = () => null;
+    canvas.update([note], layout);
+    assert.ok(!card.classList.contains("jn-has-status"));
+    assert.equal(card.querySelector(".jn-card-status").hidden, true);
+    assert.equal(card.querySelector(".jn-card-status").children.length, 0);
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
 test("private canvas is separate and copies notes through the clipboard", async () => {
   const privatePage = await privateStore.createFor(gmUser);
   assert.ok(privatePage);

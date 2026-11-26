@@ -353,3 +353,34 @@ ordering is still well-defined.
 2. Term/epoch handling for failover ordering if failover becomes important.
 3. Vault compare-and-retry for simultaneous GM edits.
 4. Unit tests for `stats.mjs` / `wikilinks.mjs`; fix the medium-impact bugs in section 5.
+
+## 8. StateHookUp prototype — derived actor status
+
+This branch adds a read-only link from a shared note to an actor. It is deliberately **not** an
+automatic stamp: nothing about actor state is written into the journal, layout, history, or stats.
+
+- `scripts/actor-status.mjs` is pure resolution. It treats `CONST.specialStatusEffects.DEFEATED`
+  (and the core `"dead"` id) as the defeat signal. It supports three scopes: world actor, actor in
+  a scene (any visible token), and one exact token. Tokens the viewer cannot observe contribute
+  nothing, so player clients cannot learn a status they could not read from the canvas.
+- `NoteModel.system.actorRef` stores `{ actorId, sceneId, tokenId }`; all three are nullable except
+  `actorId`. `linkActor` is a GM-only shared write and validates the actor/scene/token against the
+  active GM's world.
+- The card badge lives in its own `.jn-card-status` slot. It does not use the stamp/label system,
+  so it cannot replace a decorative seal, be dragged, or appear in the stamp picker.
+- `JournalApp` re-renders on `updateActor`, `create/update/deleteToken` (delta changes only, not
+  movement), effect hooks, `deleteActor`, `deleteScene`, and `canvasReady`.
+
+Known limits for the next pass:
+
+- Defeat is status-based. Systems that only lower HP and never apply the core dead status need a
+  configurable extra status id or a per-system HP adapter.
+- The link picker lists world actors, not compendium actors, and has no search field yet.
+- Secret notes cannot be linked (their content is not a shared page); a GM badge on a secret note
+  needs a vault-side `actorRef`.
+- Scene-scoped cards follow the stored scene, not the viewer's active scene. Unscoped unlinked
+  actors read the world actor, which is usually not the token's HP; scope those notes to a scene.
+
+Test coverage: `tests/actor-status.test.mjs` (pure resolution and permissions),
+`tests/integration.test.mjs` (GM-only write + validation), and a jsdom badge/seal-separation test
+in `tests/ui/smoke.mjs`. Still worth a real-session check with two scenes and one unlinked actor.
