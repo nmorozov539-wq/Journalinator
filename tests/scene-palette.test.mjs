@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   activeSceneSource, analyzePixels, clearSceneThemeCache, contrastRatio, labToHex,
-  oklabToRgb, paletteToTheme, rgbToOklab, sceneCacheKey, sceneTheme
+  oklabToRgb, paletteToTheme, rgbToOklab, SCENE_PROFILE, sceneCacheKey, sceneTheme
 } from "../scripts/scene-palette.mjs";
 import { CARD_STYLES } from "../scripts/styles/registry.mjs";
 
@@ -93,6 +93,49 @@ test("semantic GM, hint and danger colours stay distinct", () => {
   assert.notEqual(palette.colors.danger, palette.colors.hint);
 });
 
+const wrapHue = hue => ((hue % 360) + 360) % 360;
+const hueOf = lab => wrapHue(Math.atan2(lab.b, lab.a) * 180 / Math.PI);
+const hueDistance = (a, b) => {
+  const d = Math.abs(wrapHue(a) - wrapHue(b));
+  return Math.min(d, 360 - d);
+};
+const labDistance = (a, b) => Math.hypot(a.L - b.L, a.a - b.a, a.b - b.b);
+
+test("derived link colors are readable, distinct, and avoid the GM and hint hues", () => {
+  const scenes = [
+    [[[24, 28, 42], 0.75], [[210, 110, 35], 0.25]],   // dark torch map
+    [[[232, 228, 218], 0.8], [[45, 85, 175], 0.2]],   // bright snow
+    [[[128, 128, 128], 1]],                            // monochrome
+    [[[30, 140, 130], 0.5], [[180, 60, 70], 0.5]],     // teal + red
+    [[[60, 80, 70], 0.6], [[240, 220, 70], 0.2], [[70, 70, 160], 0.2]]
+  ];
+
+  for (const entries of scenes) {
+    const palette = analyzePixels(buildPixels(entries), 64, 64);
+    assert.ok(palette);
+    const links = ["link1", "link2", "link3"];
+
+    for (const key of links) {
+      assert.ok(
+        contrastRatio(palette.labs[key], palette.labs.bg) >= SCENE_PROFILE.threadContrast,
+        `${key} contrast`
+      );
+      assert.ok(hueDistance(hueOf(palette.labs[key]), 195) >= 20, `${key} too close to GM teal`);
+      assert.ok(hueDistance(hueOf(palette.labs[key]), 78) >= 20, `${key} too close to hint gold`);
+      assert.ok(labDistance(palette.labs[key], palette.labs.thread) >= 0.06, `${key} too close to the thread`);
+    }
+
+    for (let a = 0; a < links.length; a++) {
+      for (let b = a + 1; b < links.length; b++) {
+        assert.ok(
+          labDistance(palette.labs[links[a]], palette.labs[links[b]]) >= 0.06,
+          `${links[a]} and ${links[b]} are not distinct`
+        );
+      }
+    }
+  }
+});
+
 test("a palette maps to a complete normalized theme", () => {
   const palette = analyzePixels(buildPixels([
     [[20, 24, 36], 0.7],
@@ -104,6 +147,9 @@ test("a palette maps to a complete normalized theme", () => {
   assert.match(theme.colors.bg, /^#[0-9a-f]{6}$/);
   assert.match(theme.board.patternColor, /^#[0-9a-f]{6}$/);
   assert.equal(theme.board.pattern, "dots");
+  assert.deepEqual(theme.links.colors, {
+    link1: palette.colors.link1, link2: palette.colors.link2, link3: palette.colors.link3
+  });
   for (const style of Object.keys(CARD_STYLES)) {
     assert.ok(theme.styles[style], `missing ${style}`);
     assert.ok(theme.styles[style].type, `${style} has no typography`);

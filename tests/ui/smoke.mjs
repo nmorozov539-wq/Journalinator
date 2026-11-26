@@ -45,6 +45,8 @@ const { privateStore } = await import(`${JN}/scripts/store/private-store.mjs`);
 const { default: NoteEditor } = await import(`${JN}/scripts/app/editor.mjs`);
 const { default: JournalCanvas } = await import(`${JN}/scripts/app/canvas.mjs`);
 const { default: JournalApp, isTextEntryTarget } = await import(`${JN}/scripts/app/journal-app.mjs`);
+const { default: PrivateWorkspace } = await import(`${JN}/scripts/app/private-workspace.mjs`);
+const { applyTheme, getTheme } = await import(`${JN}/scripts/styles/themes.mjs`);
 const { getLock } = await import(`${JN}/scripts/locks.mjs`);
 registerSocket();
 
@@ -834,6 +836,81 @@ test("left drag plucks one thread and keeps its anchors and the other thread fix
   }
 });
 
+test("link groups carry color slots and state classes without inline paint", async () => {
+  const canvas = new JournalCanvas({ onSelectNote() {} });
+  document.body.appendChild(canvas.root);
+  applyTheme(canvas.root, getTheme("classic"));
+  const notes = [
+    {
+      _id: "a", name: "A",
+      system: {
+        style: "sticky", blocks: [], links: [
+          { id: "legacy", targetId: "b", color: "#A393F2", label: "Legacy", direction: "one", sourceSide: "right", targetSide: "left" },
+          { id: "hint", targetId: "c", color: "link2", hint: true, label: "Hint", lineStyle: "dashed", sourceSide: "right", targetSide: "left" },
+          { id: "hidden", targetId: "d", color: "link3", hidden: true, label: "Hidden", lineStyle: "dashed", sourceSide: "right", targetSide: "left" }
+        ]
+      }
+    },
+    ...["b", "c", "d"].map(id => ({ _id: id, name: id, system: { style: "sticky", blocks: [], links: [] } }))
+  ];
+  const cards = {
+    a: { x: 0, y: 0, rotation: 0 }, b: { x: 400, y: 0, rotation: 0 },
+    c: { x: 0, y: 300, rotation: 0 }, d: { x: 400, y: 300, rotation: 0 }
+  };
+  try {
+    canvas.update(notes, { cards, labels: {} });
+    const group = id => canvas.svg.querySelector(`g[data-id="${id}"]`);
+    const legacy = group("legacy");
+    assert.ok(legacy.classList.contains("jn-link-color-link1"), "legacy hex renders as a slot class");
+    const thread = legacy.querySelector(".jn-thread");
+    assert.equal(thread.hasAttribute("stroke"), false);
+    assert.equal(thread.hasAttribute("stroke-width"), false);
+    assert.equal(thread.hasAttribute("stroke-dasharray"), false);
+    assert.equal(thread.hasAttribute("fill"), false);
+    assert.equal(legacy.hasAttribute("opacity"), false);
+    const arrow = legacy.querySelector(".jn-link-arrow");
+    assert.ok(arrow, "directed link has an arrowhead");
+    assert.equal(arrow.hasAttribute("fill"), false);
+    assert.match(arrow.getAttribute("style"), /transform-origin:/);
+
+    const hint = group("hint");
+    assert.ok(hint.classList.contains("jn-link-hint"));
+    assert.ok(hint.classList.contains("jn-link-dashed"));
+    const hidden = group("hidden");
+    assert.ok(hidden.classList.contains("jn-link-hidden"));
+    assert.ok(!hidden.classList.contains("jn-link-dashed"), "hidden wins over dashed");
+    assert.equal(hidden.querySelector(".jn-thread").hasAttribute("stroke-dasharray"), false);
+
+    const hit = canvas.root.querySelector('.jn-link-hit[data-id="legacy"]');
+    hit.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 20, clientY: 20 }));
+    canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 20, clientY: 20 }));
+    assert.ok(group("legacy").classList.contains("jn-link-selected"), "selection toggles an existing group");
+    const swatch = canvas.linkToolbar.querySelector(".jn-link-swatch-link1");
+    assert.ok(swatch?.classList.contains("on"));
+    assert.equal(swatch.getAttribute("style"), null, "swatch paint comes from a CSS variable");
+    assert.equal(swatch.getAttribute("title"), "Link color 1");
+    assert.equal(swatch.getAttribute("aria-label"), "Link color 1");
+
+    canvas.setDimMatch(() => false);
+    const dimmed = group("legacy");
+    assert.ok(dimmed.classList.contains("jn-link-dimmed"));
+    assert.ok(dimmed.classList.contains("jn-link-selected"), "selection survives a redraw");
+
+    const pathBefore = group("legacy").querySelector(".jn-thread").getAttribute("d");
+    canvas.root.dispatchEvent(new dom.window.WheelEvent("wheel", {
+      bubbles: true, cancelable: true, deltaY: 500
+    }));
+    await new Promise(resolve => setTimeout(resolve, 40));
+    const comp = Number.parseFloat(canvas.root.style.getPropertyValue("--jn-zoom-comp"));
+    const expected = Math.round(Math.min(2, Math.max(0.5, 1 / canvas.view.k)) * 1000) / 1000;
+    assert.equal(comp, expected);
+    assert.equal(group("legacy").querySelector(".jn-thread").getAttribute("d"), pathBefore, "zoom does not redraw links");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
 test("offline mode disables write controls and says the board is read-only", async () => {
   gmUser.active = false;
   const app = new JournalApp();
@@ -1050,6 +1127,43 @@ test("private canvas is separate and copies notes through the clipboard", async 
   } finally {
     app._onClose();
     host.remove();
+  }
+});
+
+test("private workspace uses the same link slots and state classes", async () => {
+  let page = privateStore.findActive(gmUser.id);
+  if (!page) page = await privateStore.createFor(gmUser);
+  const data = privateStore.read(page);
+  const cards = data.layout.cards ?? {};
+  const a = privateStore.makeNote({ title: "Private A", x: 0, y: 0, cards });
+  const b = privateStore.makeNote({ title: "Private B", x: 380, y: 0, cards: { ...cards, [a.note.id]: a.card } });
+  a.note.links = [{
+    id: "private-link", targetId: b.note.id, color: "#a393f2", direction: "one", lineStyle: "solid",
+    sourceSide: "right", targetSide: "left"
+  }];
+  data.notes[a.note.id] = a.note;
+  data.notes[b.note.id] = b.note;
+  data.layout.cards[a.note.id] = a.card;
+  data.layout.cards[b.note.id] = b.card;
+  await privateStore.save(page, data, privateStore.flags(page).rev);
+
+  const workspace = new PrivateWorkspace({});
+  workspace.setPage(privateStore.findById(page.id));
+  const canvasSlot = document.createElement("div");
+  const editorSlot = document.createElement("div");
+  document.body.append(canvasSlot, editorSlot);
+  try {
+    workspace.renderInto(canvasSlot, editorSlot);
+    workspace.canvas.refreshGeometry();
+    const group = canvasSlot.querySelector('g[data-id="private-link"]');
+    assert.ok(group, "private link drawn");
+    assert.ok(group.classList.contains("jn-link-color-link1"), "legacy hex normalized on read");
+    assert.equal(group.querySelector(".jn-thread").hasAttribute("stroke"), false);
+    assert.equal(group.querySelector(".jn-link-arrow").hasAttribute("fill"), false);
+  } finally {
+    workspace.canvas.disconnectGeometry();
+    canvasSlot.remove();
+    editorSlot.remove();
   }
 });
 

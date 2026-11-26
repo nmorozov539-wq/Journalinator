@@ -477,7 +477,7 @@ export default class JournalCanvas {
         top = Math.min(top, y);
         bottom = Math.max(bottom, y);
       }
-      silhouettes += `<polygon points="${corners.map(({ x, y }) => `${x},${y}`).join(" ")}" fill="#777"/>`;
+      silhouettes += `<polygon class="jn-thread-silhouette" points="${corners.map(({ x, y }) => `${x},${y}`).join(" ")}"/>`;
     }
     if (!silhouettes) left = top = right = bottom = 0;
     for (const { pins } of threads.values()) {
@@ -491,7 +491,7 @@ export default class JournalCanvas {
     // Include the maximum travel of a pulled thread and its control points.
     const bounds = `x="${left - 320}" y="${top - 320}" width="${right - left + 640}" height="${bottom - top + 640}"`;
     return `<defs><mask id="${this.threadMaskId}" maskUnits="userSpaceOnUse" ${bounds}>
-      <rect ${bounds} fill="white"/>${silhouettes}
+      <rect class="jn-thread-mask-bg" ${bounds}/>${silhouettes}
     </mask></defs>`;
   }
 

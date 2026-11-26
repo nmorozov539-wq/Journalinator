@@ -715,6 +715,9 @@
   pointer-events: none;
 }
 .jn-links { z-index: 3; }
+/* Mask luminance, not paint: white keeps the thread, the card silhouette cuts it out. */
+.jn-thread-mask-bg { fill: #fff; }
+.jn-thread-silhouette { fill: #777; }
 
 .jn-selection-box {
   display: none;
@@ -1611,15 +1614,13 @@ input.jn-task-checkbox:disabled { cursor: default; }
   stroke-width: var(--jn-link-width);
   filter: var(--jn-link-shadow);
 }
+/* Endpoint, board, draft and preview pins share this size. */
 .jn-thread-pin {
   display: inline;
   r: calc(var(--jn-link-pin-radius) * var(--jn-zoom-comp, 1));
   fill: var(--jn-link-pin-fill);
   stroke: var(--jn-link-pin-stroke);
   stroke-width: 1px;
-}
-.jn-links .jn-board-pin[data-pin-index] {
-  r: calc(var(--jn-link-pin-radius) * var(--jn-zoom-comp, 1));
 }
 .jn-link-color-default .jn-thread { stroke: var(--jn-thread); }
 .jn-link-color-link1 .jn-thread { stroke: var(--jn-link-1); }
@@ -1738,10 +1739,10 @@ input.jn-task-checkbox:disabled { cursor: default; }
   min-width: 18px;
   border-radius: 50%;
 }
-.jn-link-swatch-default { background: var(--jn-thread); }
-.jn-link-swatch-link1 { background: var(--jn-link-1); }
-.jn-link-swatch-link2 { background: var(--jn-link-2); }
-.jn-link-swatch-link3 { background: var(--jn-link-3); }
+.jn-link-toolbar .jn-link-swatch-default { background: var(--jn-thread); }
+.jn-link-toolbar .jn-link-swatch-link1 { background: var(--jn-link-1); }
+.jn-link-toolbar .jn-link-swatch-link2 { background: var(--jn-link-2); }
+.jn-link-toolbar .jn-link-swatch-link3 { background: var(--jn-link-3); }
 .jn-link-color.on {
   border: 2px solid var(--jn-text);
 }

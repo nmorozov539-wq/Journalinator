@@ -7,9 +7,9 @@
 [![Tests](https://github.com/nmorozov539-wq/Journalinator/actions/workflows/test.yml/badge.svg)](https://github.com/nmorozov539-wq/Journalinator/actions/workflows/test.yml)
 
 Journalinator turns a campaign's notes into one shared canvas. Every note is a card; cards are
-connected with curvy links, edited paragraph by paragraph with live locks, and searched from a
-quick switcher. The GM also gets an encrypted tier for secrets that players never receive in
-readable form.
+connected by drawn threads that snap to card-edge sockets and can be pinned mid-board, edited
+paragraph by paragraph with live locks, and searched from a quick switcher. The GM also gets an
+encrypted tier for secrets that players never receive in readable form.
 
 > **Status: pre-alpha.** The data paths and UI are covered by tests, but the GM tier has
 > not yet been exercised in a live Foundry session. Back up your world before trying it.
@@ -28,8 +28,9 @@ See [CHANGELOG.md](CHANGELOG.md) for recent changes.
   in the editor and on cards. Typing `()` or a second `*` closes the pair automatically.
 - **Per-paragraph locks.** The active GM arbitrates edits, so two people cannot write the same
   paragraph at once. Different paragraphs can be edited simultaneously.
-- **Links.** Drag from a card's link handle, or type `[[Note]]` / `[[Note|label]]`. Links carry a
-  label, direction, color, and solid/dashed style; backlinks appear in the editor.
+- **Links.** Drag from a card's link handle or a connection socket, or type `[[Note]]` /
+  `[[Note|label]]`. Links are drawn as threads that can be pinned to the board and carry a label,
+  direction, theme color, and solid/dashed style; backlinks appear in the editor.
 - **Three card styles.** Sticky note, document, and torn paper, with optional images, resizing,
   and a stored tilt.
 - **Finding things.** Quick switcher (Ctrl/Cmd+K), search dimming, and author/style filters.
@@ -82,10 +83,9 @@ Open the journal from the sticky-note button in the scene controls.
 - **Edit:** double-click a card to start writing immediately, or click a paragraph in the editor.
   A blank line + Enter splits it; Backspace at the start merges it
   into the paragraph above.
-- **Link:** drag from any of the four always-visible connection handles to another card, or type
-  `[[Another Note]]`. Connections follow the nearest card sides while a card is dragged. Double-click
-  a connection to remove it.
-  Unknown titles become new notes on the canvas.
+- **Link:** drag from a connection socket to another card's edge, or type `[[Another Note]]`.
+  Click the board while drawing to add a pin; the thread keeps its anchors and pins when cards
+  move. Double-click a connection to remove it. Unknown titles become new notes on the canvas.
 - **Find:** Ctrl/Cmd+K opens the quick switcher; typing a title that does not exist offers to
   create it.
 - **Trash:** anyone can delete and restore notes; only the GM can empty the trash.
@@ -113,8 +113,10 @@ Selecting **From scene** reads the current scene background and builds a theme f
    the same palette).
 3. Roles are picked for scenes rather than wallpapers: the dominant neutral becomes `bg`/`panel`
    at a clamped lightness and low chroma; the most vivid sufficiently-common cluster becomes the
-   accent; a second vivid hue becomes the link thread; text, muted and line are contrast-corrected
-   against the panel (7:1, 4.5:1 and a subtle 1.35:1 respectively).
+   accent; a second vivid hue becomes the link thread. Three link colors are derived separately
+   and checked for contrast against the board and for separation from the thread, GM teal, and
+   hint gold. Text, muted and line are contrast-corrected against the panel (7:1, 4.5:1 and a
+   subtle 1.35:1 respectively).
 4. Dark or light mode follows the dominant area, with the overall mean as a tie-breaker, so a
    snow map gets a light board and a crypt gets a dark one.
 5. GM teal, hint gold and danger red keep their meaning instead of being recolored by the image.
@@ -169,6 +171,32 @@ Details:
   inject CSS or fetch a remote URL. This does **not** affect note images: the portrait and card
   background accept either an external `http(s)` image link or a path inside Foundry's data
   folder.
+
+### Theming links
+
+A theme may include an optional `links` block; omitted fields fall back to the classic look.
+
+- Numbers: `width`, `selectedWidth`, `dimOpacity`, `arrowScale` (clamped to 0.6–1.8),
+  `pinRadius` (2–6), `labelSize`, and `haloWidth`.
+- Dash arrays: `dash` (default `"7 6"`) and `hiddenDash` (default `"2 6"`).
+- Shadow: `shadow` is `soft` (the classic drop shadow) or `none`.
+- Colors: `pinFill`, `pinStroke`, `labelColor`, `halo`, `selectColor`, and
+  `colors: { link1, link2, link3 }`. Each is a literal color or a role reference such as `"acc"`.
+  A theme without `links.colors` uses the `acc`, `hint`, and `danger` roles.
+- `halo` and `pinStroke` default to the resolved board color, so label outlines and pin rings
+  blend into plain boards instead of leaving `--jn-bg` patches.
+
+The canvas emits `--jn-link-width`, `--jn-link-width-selected`, `--jn-link-dash`,
+`--jn-link-dash-hidden`, `--jn-link-dim-opacity`, `--jn-link-shadow`, `--jn-link-arrow-scale`,
+`--jn-link-pin-radius`, `--jn-link-pin-fill`, `--jn-link-pin-stroke`, `--jn-link-label-size`,
+`--jn-link-label-color`, `--jn-link-halo`, `--jn-link-halo-width`, `--jn-link-select`,
+`--jn-link-1`, `--jn-link-2`, and `--jn-link-3`. Link CSS uses these variables; pin sizes, label
+sizes, halo widths, and arrowheads also multiply by `--jn-zoom-comp`, which the canvas updates
+while zooming so their on-screen size stays steady.
+
+Link colors are stored as slot keys (`link1`–`link3`) or `""` for the theme's default thread.
+The three legacy toolbar hexes (`#a393f2`, `#d6a45c`, `#d77b91`) are still read and mapped to
+slots, so existing worlds need no migration.
 
 ## GM secrets
 
