@@ -18,6 +18,7 @@ import {
   authoritativeHolds, authoritativeSnapshot, receiveLockBroadcast, authoritativeLockHolder
 } from "./locks.mjs";
 import { t } from "./i18n.mjs";
+import { MAX_TRANSFER_NOTES, buildPrivateTransfer } from "./private-transfer.mjs";
 import { attachedStampIds, DEFAULT_STAMP_CORNER, isStampCorner, stampUrl } from "./stamps.mjs";
 import { normalizeActorRef } from "./actor-status.mjs";
 import {
@@ -1079,7 +1080,128 @@ function cleanDeclassifiedNote(shared, message) {
   };
 }
 
+/** A pending-transfer id that is not already stored on the private container. */
+function freshTransferId() {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const id = foundry.utils.randomID();
+    if (!privateStore.transfer(id)) return id;
+  }
+  let id = foundry.utils.randomID();
+  while (privateStore.transfer(id)) id += "x";
+  return id.slice(0, 64);
+}
+
+/**
+ * Private-to-private copies are GM-mediated like every other write, but never touch the shared
+ * journal or the secrets vault. The active GM's write queue serializes send/accept/decline; the
+ * sender/recipient below come from the verified socket relay, never from the message.
+ */
+async function handlePrivateTransferMessage(message, senderUserId) {
+  if (!getContainerIds()) return;
+
+  if (message.type === "sendPrivateTransfer") {
+    if (typeof message.toUserId !== "string" || !message.toUserId) {
+      notifyUser(senderUserId, t("JN.Transfer.UserMissing"));
+      return;
+    }
+    if (message.toUserId === senderUserId) {
+      notifyUser(senderUserId, t("JN.Transfer.Self"));
+      return;
+    }
+    if (!game.users.get(message.toUserId)) {
+      notifyUser(senderUserId, t("JN.Transfer.UserMissing"));
+      return;
+    }
+    if (!game.users.get(senderUserId)) return;
+    const page = privateStore.findActive(senderUserId);
+    if (!page) {
+      notifyUser(senderUserId, t("JN.Transfer.NoPrivateSpace"));
+      return;
+    }
+    if (!Array.isArray(message.noteIds) || !message.noteIds.length) {
+      notifyUser(senderUserId, t("JN.Transfer.None"));
+      return;
+    }
+    if (message.noteIds.length > MAX_TRANSFER_NOTES) {
+      notifyUser(senderUserId, t("JN.Transfer.TooMany", { max: MAX_TRANSFER_NOTES }));
+      return;
+    }
+
+    let transfer;
+    try {
+      transfer = buildPrivateTransfer(privateStore.read(page), message.noteIds, {
+        fromUserId: senderUserId,
+        toUserId: message.toUserId
+      });
+    } catch (err) {
+      notifyUser(senderUserId, err.message);
+      return;
+    }
+
+    const transferId = freshTransferId();
+    try {
+      await privateStore.addTransfer({ id: transferId, ...transfer });
+    } catch (err) {
+      notifyUser(senderUserId, err.message);
+      return;
+    }
+    acknowledgeWriteApplied(senderUserId, {
+      kind: "privateTransfer",
+      action: "sent",
+      transferId,
+      count: transfer.summary.count,
+      droppedLinks: transfer.summary.droppedLinks ?? 0,
+      droppedWaypoints: transfer.summary.droppedWaypoints ?? 0,
+      toUserId: message.toUserId
+    });
+    return;
+  }
+
+  if (message.type === "acceptPrivateTransfer" || message.type === "declinePrivateTransfer") {
+    const transferId = message.transferId;
+    if (typeof transferId !== "string" || !transferId) {
+      notifyUser(senderUserId, t("JN.Transfer.Stale"));
+      return;
+    }
+    const record = privateStore.transfer(transferId);
+    if (!record) {
+      notifyUser(senderUserId, t("JN.Transfer.Stale"));
+      return;
+    }
+    if (record.toUserId !== senderUserId) {
+      notifyUser(senderUserId, t("JN.Transfer.NotYours"));
+      return;
+    }
+    try {
+      if (message.type === "acceptPrivateTransfer") {
+        const result = await privateStore.acceptTransfer(transferId, senderUserId);
+        acknowledgeWriteApplied(senderUserId, {
+          kind: "privateTransfer",
+          action: "accepted",
+          count: result.count,
+          droppedLinks: result.droppedLinks ?? 0,
+          droppedWaypoints: result.droppedWaypoints ?? 0
+        });
+      } else {
+        const result = await privateStore.declineTransfer(transferId, senderUserId);
+        acknowledgeWriteApplied(senderUserId, {
+          kind: "privateTransfer", action: "declined", count: result.count
+        });
+      }
+    } catch (err) {
+      notifyUser(senderUserId, err.message);
+    }
+  }
+}
+
 async function handleMessage(message, senderUserId) {
+  if (message.type === "sendPrivateTransfer"
+      || message.type === "acceptPrivateTransfer"
+      || message.type === "declinePrivateTransfer") {
+    await handlePrivateTransferMessage(message, senderUserId);
+    return;
+  }
+
   const ids = getContainerIds();
   if (!ids) return;
   const shared = game.journal.get(ids.shared);

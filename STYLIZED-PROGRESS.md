@@ -3,7 +3,7 @@
 Branch: `stylized-canvas` (local only; no push/merge/publish).
 Baseline: `54eee06` (`StateHookUp`, local checkout) → branch created at Phase 0.
 Spec package: `handoff/` (README, IMPLEMENTATION, DECISIONS, ACCEPTANCE, VISUAL-REFERENCE, THREAD-CONFIGURATOR).
-Module: 0.8.4 · Foundry v14.367 · local Foundry available (isolated test root plan below).
+Module: 0.9.0 · Foundry v14.367 · local Foundry available (isolated test root plan below).
 
 ## Phase 0 — repository audit and baseline
 
@@ -221,7 +221,23 @@ Coordinator-run with independent validation reports from all prior phases. No ne
 | A27 | PARTIAL | 100 notes/200 links measured (~6 ms geometry update vs ~19–30 ms rebuild; jsdom 238→28 ms); real Foundry stress pending |
 | A28 | PASS local; no publish | manifest/package/launch docs; Foundry 14.367 smoke; no push/merge/release |
 
-Final known limitations: session-local active-GM undo (pin/route), private main-pin disable not redistributed, multi-link bulk not implemented, split fallback crash window on fake Foundry only, per-torn-card shadow cost to stress-test, and all real multiplayer/manual gates above.
+## 0.9.0 validation follow-up (2026-11-26)
+
+- Auto-sized private cards now reserve conservative placement defaults (memo 360×240,
+  document 248×240, target 252×290, compact up to 220×120) for both new candidates and existing
+  null-sized cards, so a new memo cannot land inside another memo's real footprint. Transfer
+  placement also uses these defaults when the destination notes are available.
+- Integration transfer tests create and remove their own recipient page; the send/decline and
+  failed-save tests pass alone and as a file.
+- Accept saves now re-read the page and verify every imported note id. A stale overwrite triggers
+  one fresh-revision re-import; if notes are still missing the offer is retained and a localized
+  retry error is returned. This is **best-effort**, not a server-side CAS: Foundry has no
+  last-writer guard, so a write after the final verification can still overwrite a copy.
+- Inboxes cap at 20 pending offers per recipient and 5 per sender/recipient pair; offers older
+  than 30 days are hidden on read and their flag keys are deleted on the next add.
+- Verification: `npm run check` pass; `npm test` **395 pass / 0 fail / 0 skipped**.
+
+Final known limitations: session-local active-GM undo (pin/route), private main-pin disable not redistributed, multi-link bulk not implemented, split fallback crash window on fake Foundry only, best-effort (not full CAS) concurrent private-save protection with a residual last-writer race, per-torn-card shadow cost to stress-test, and all real multiplayer/manual gates above.
 
 ### Local commit history (no push/merge/release)
 

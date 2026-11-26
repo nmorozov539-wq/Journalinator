@@ -21,8 +21,9 @@ const esc = text => foundry.utils.escapeHTML(String(text ?? ""));
 
 /** The private tab's canvas, editor, selection, trash, and clipboard actions. */
 export default class PrivateWorkspace {
-  constructor({ onChange } = {}) {
+  constructor({ onChange, onSelectionChange } = {}) {
     this.onChange = onChange ?? (() => {});
+    this.onSelectionChange = onSelectionChange ?? (() => {});
     this.page = null;
     this.workspace = null;
     this.selectedNoteId = null;
@@ -34,6 +35,7 @@ export default class PrivateWorkspace {
         this.selectedNoteId = id;
         this.editor.open(id);
         this.editor.render();
+        this.onSelectionChange(this.getSelectedNoteIds());
       },
       onReadCardText: (id, kind) => {
         const note = this.getNote(id);
@@ -196,7 +198,9 @@ export default class PrivateWorkspace {
     const cards = this.workspace?.layout?.cards ?? {};
     const resolvedStyle = noteCreationStyle({ kind, style, presentation });
     const fields = noteCreationPresentation({ kind, style, presentation });
-    const { note, card } = privateStore.makeNote({ title, kind, style: resolvedStyle, x, y, cards });
+    const { note, card } = privateStore.makeNote({
+      title, kind, style: resolvedStyle, x, y, cards, notes: this.workspace?.notes ?? {}
+    });
     const noteLabel = typeof label === "string" ? label : "";
     const resolved = resolvePresentation({
       name: note.title,
@@ -797,6 +801,7 @@ export default class PrivateWorkspace {
     await DialogV2.wait({
       window: { title: t("JN.Private.StatsTitle") },
       content: `
+        <p class="jn-private-stats-excluded">${t("JN.Private.StatsExcluded")}</p>
         <p>${t("JN.Private.StatsNotes", { count: notes.length })}</p>
         <p>${t("JN.Private.StatsChars", { count: chars })}</p>
         <p>${t("JN.Private.StatsTrash", { count: trashed })}</p>
@@ -852,7 +857,8 @@ export default class PrivateWorkspace {
     const ok = await this.#save(data => {
       for (const entry of entries) {
         const { note, card } = privateStore.makeNote({
-          title: entry?.title, kind: entry?.kind, style: entry?.style, x, y, cards: data.layout.cards
+          title: entry?.title, kind: entry?.kind, style: entry?.style, x, y,
+          cards: data.layout.cards, notes: data.notes
         });
         const texts = Array.isArray(entry?.blocks) && entry.blocks.length ? entry.blocks : [""];
         note.blocks = texts.map(text => ({ blockId: foundry.utils.randomID(), text: String(text ?? "") }));

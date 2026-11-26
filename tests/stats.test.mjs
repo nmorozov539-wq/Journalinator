@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { deriveSessions } from "../scripts/stats.mjs";
+import {
+  deriveSessions, selectLiveSharedNotes, computeJournalStats
+} from "../scripts/stats.mjs";
 
 const bucket = chars => ({ gm: { chars, notes: 0, links: 0 } });
 
@@ -32,6 +34,31 @@ test("sessions without markers still group by date gaps", () => {
     { label: "2026-01-01 – 2026-01-02", totals: { gm: 30 } },
     { label: "2026-01-05", totals: { gm: 40 } }
   ]);
+});
+
+test("live shared stats count 3 live pages and disclose 40 trashed pages separately", () => {
+  const page = (id, deleted) => ({
+    _id: id,
+    name: deleted ? `Trashed ${id}` : `Live ${id}`,
+    system: {
+      deleted,
+      authorId: "gm",
+      contributions: { gm: deleted ? 999 : 5 },
+      links: [],
+      editCount: 0
+    }
+  });
+  const pages = [
+    ...Array.from({ length: 3 }, (_, index) => page(`live-${index}`, null)),
+    ...Array.from({ length: 40 }, (_, index) => page(`trash-${index}`, Date.now()))
+  ];
+  const live = selectLiveSharedNotes(pages);
+  const trashed = pages.filter(item => item.system.deleted);
+  assert.equal(live.length, 3, "only the live shared pages are counted");
+  assert.equal(trashed.length, 40, "the trash count is disclosed separately");
+  const stats = computeJournalStats(live);
+  assert.equal(stats.notesCreated.gm, 3);
+  assert.equal(stats.chars.gm, 15, "trashed history never inflates live character totals");
 });
 
 test("activity before the first marker stays outside the marked sessions", () => {

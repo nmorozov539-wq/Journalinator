@@ -23,6 +23,7 @@ globalThis.foundry.utils.cleanHTML = html => html;
 
 // Dialog fakes: queue answers per call.
 const answers = [];
+const dialogWaits = [];
 globalThis.foundry.applications = {
   api: {
     ApplicationV2: class {
@@ -32,7 +33,7 @@ globalThis.foundry.applications = {
     DialogV2: {
       confirm: async () => answers.shift() ?? true,
       prompt: async () => answers.shift() ?? null,
-      wait: async () => answers.shift() ?? null
+      wait: async options => { dialogWaits.push(options); return answers.shift() ?? null; }
     }
   },
   apps: { FilePicker: class { render() {} } }
@@ -44,6 +45,7 @@ const secrets = await import(`${JN}/scripts/secrets/secret-actions.mjs`);
 const { registerSocket, requestWrite } = await import(`${JN}/scripts/socket.mjs`);
 const { privateStore } = await import(`${JN}/scripts/store/private-store.mjs`);
 const { resolvePresentation } = await import(`${JN}/scripts/presentation.mjs`);
+const { selectLiveSharedNotes } = await import(`${JN}/scripts/stats.mjs`);
 const { anchorWorld } = await import(`${JN}/scripts/anchors.mjs`);
 const { THREAD_PIN_RADIUS } = await import(`${JN}/scripts/card-ports.mjs`);
 const { MAX_ROUTE_ANCHORS } = await import(`${JN}/scripts/route-notes.mjs`);
@@ -1997,6 +1999,95 @@ function fakeRect(left, top, width, height) {
   return { left, top, width, height, right: left + width, bottom: top + height, x: left, y: top };
 }
 
+test("fitNotes frames all/live selected card bounds, rotation, and an empty canvas", () => {
+  const canvas = new JournalCanvas({ onSelectNote() {} });
+  document.body.appendChild(canvas.root);
+  const notes = [
+    { _id: "a", name: "A", system: { style: "sticky", blocks: [], links: [] } },
+    { _id: "b", name: "B", system: { style: "sticky", blocks: [], links: [] } }
+  ];
+  let rootWidth = 1000;
+  let rootHeight = 800;
+  try {
+    canvas.update(notes, {
+      cards: {
+        a: { x: 0, y: 0, width: 200, height: 100 },
+        b: { x: 1000, y: 500, width: 200, height: 100 }
+      },
+      labels: {}
+    });
+    canvas.root.getBoundingClientRect = () => fakeRect(0, 0, rootWidth, rootHeight);
+    const near = (actual, expected, label) =>
+      assert.ok(Math.abs(actual - expected) < 1e-6, `${label}: ${actual} ≈ ${expected}`);
+
+    assert.equal(canvas.fitNotes(), true, "fit-all succeeds with live cards");
+    near(canvas.view.k, 1000 / 1320, "fit-all zoom");
+    near(canvas.view.x, 500 - 600 * canvas.view.k, "fit-all pan x");
+    near(canvas.view.y, 400 - 300 * canvas.view.k, "fit-all pan y");
+    assert.ok(canvas.view.k <= 1, "fit never magnifies above 1");
+
+    assert.equal(canvas.fitNotes(["a"]), true, "fit-selection succeeds");
+    near(canvas.view.k, 1, "single-card fit is capped at 1");
+    near(canvas.view.x, 400, "single-card fit centers horizontally");
+    near(canvas.view.y, 350, "single-card fit centers vertically");
+
+    canvas.update(notes, {
+      cards: {
+        a: { x: 0, y: 0, width: 200, height: 100 },
+        b: { x: 100000, y: 500, width: 200, height: 100 }
+      },
+      labels: { far: { text: "Far label", x: 100000, y: 100000, noteId: "" } }
+    });
+    assert.equal(canvas.fitNotes(), true);
+    near(canvas.view.k, 0.3, "fit shares the 0.3 lower zoom bound instead of shrinking forever");
+
+    const linkedNotes = notes.map((note, index) => index === 0 ? {
+      ...note,
+      system: {
+        ...note.system,
+        links: [{ id: "long-link", targetId: "b", direction: "one", label: "far" }]
+      }
+    } : note);
+    canvas.update(linkedNotes, {
+      cards: {
+        a: { x: 0, y: 0, width: 200, height: 100 },
+        b: { x: 1000, y: 500, width: 200, height: 100 }
+      },
+      labels: { far: { text: "Far label", x: 100000, y: 100000, noteId: "" } }
+    });
+    assert.equal(canvas.fitNotes(), true);
+    near(canvas.view.k, 1000 / 1320,
+      "links and labels do not widen the fit bounds beyond the cards");
+
+    rootWidth = 500;
+    rootHeight = 200;
+    canvas.update(notes, {
+      cards: {
+        a: { x: 0, y: 0, width: 200, height: 100, rotation: 90 },
+        b: { x: 1000, y: 500, width: 200, height: 100 }
+      },
+      labels: {}
+    });
+    assert.equal(canvas.fitNotes(["a"]), true);
+    near(canvas.view.k, 200 / 320, "rotated card uses its swapped AABB height");
+    assert.ok(canvas.view.k < 0.7, "rotation is reflected in the fit zoom");
+
+    const empty = new JournalCanvas({ onSelectNote() {} });
+    document.body.appendChild(empty.root);
+    try {
+      empty.root.getBoundingClientRect = () => fakeRect(0, 0, 1000, 800);
+      const before = { ...empty.view };
+      assert.equal(empty.fitNotes(), false, "empty canvas is a no-op");
+      assert.deepEqual(empty.view, before);
+    } finally {
+      empty.root.remove();
+    }
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
 test("floating popover clamps its real border-box inside narrow/wide canvases and follows resize", () => {
   const canvas = new JournalCanvas({ onSelectNote() {} });
   document.body.appendChild(canvas.root);
@@ -2568,6 +2659,67 @@ test("offline mode disables write controls and says the board is read-only", asy
     app._onClose();
     host.remove();
     gmUser.active = true;
+  }
+});
+
+test("topbar fit buttons frame all notes or the current selection in shared and private views", async () => {
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  try {
+    await redraw();
+    let canvasRoot = host.querySelector(".jn-canvas");
+    canvasRoot.getBoundingClientRect = () => fakeRect(0, 0, 1000, 800);
+    const sharedFit = host.querySelector(".journalinator-fit");
+    assert.ok(sharedFit, "shared view has a fit button");
+    assert.equal(sharedFit.getAttribute("aria-label"), "Fit all notes");
+    sharedFit.click();
+    assert.match(host.querySelector(".jn-world").style.transform, /scale\(/);
+
+    const firstCard = [...canvasRoot.querySelectorAll(".jn-card")][0];
+    assert.ok(firstCard, "the shared fixture has a card");
+    clickCanvasCard({ root: canvasRoot }, firstCard.dataset.id);
+    assert.equal(sharedFit.getAttribute("aria-label"), "Fit selection",
+      "selection switches the fit label without a full app render");
+    sharedFit.click();
+
+    // The private view keeps the same action and label behavior.
+    host.querySelector(".jn-view-switch").click();
+    host.querySelector(".jn-view-option[data-view='private']").click();
+    await settle();
+    await redraw();
+    if (!privateStore.findActive(gmUser.id)) await privateStore.createFor(gmUser);
+    await redraw();
+    canvasRoot = host.querySelector(".jn-canvas");
+    canvasRoot.getBoundingClientRect = () => fakeRect(0, 0, 1000, 800);
+    if (!canvasRoot.querySelector(".jn-card")) {
+      host.querySelector(".journalinator-private-new").click();
+      await settle();
+      await redraw();
+      canvasRoot = host.querySelector(".jn-canvas");
+      canvasRoot.getBoundingClientRect = () => fakeRect(0, 0, 1000, 800);
+    }
+    const privateFit = host.querySelector(".journalinator-private-fit");
+    assert.ok(privateFit, "private view has a fit button when a workspace exists");
+    // A freshly created note is selected; clear the canvas before checking the all-notes label.
+    canvasRoot.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 900, clientY: 700 }));
+    canvasRoot.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 900, clientY: 700 }));
+    assert.equal(privateFit.getAttribute("aria-label"), "Fit all notes");
+    const privateCard = [...canvasRoot.querySelectorAll(".jn-card")][0];
+    assert.ok(privateCard, "the private fixture has a card");
+    clickCanvasCard({ root: canvasRoot }, privateCard.dataset.id);
+    assert.equal(privateFit.getAttribute("aria-label"), "Fit selection");
+    privateFit.click();
+    assert.match(host.querySelector(".jn-canvas .jn-world").style.transform, /scale\(/);
+  } finally {
+    app._onClose();
+    host.remove();
   }
 });
 
@@ -4328,6 +4480,543 @@ test("JournalApp uses one newest-first undo stack for split, pin, route and deta
     } finally {
       Object.defineProperty(game.users, "activeGM", descriptor);
     }
+  } finally {
+    app._onClose();
+    host.remove();
+  }
+});
+
+test("main stats count live shared notes only, disclose trash, and leave the private summary separate", async () => {
+  await requestWrite({ type: "createNote", title: "Stats Trashed Fixture", x: 2400, y: 800 });
+  await settle();
+  const trashed = sharedByName("Stats Trashed Fixture");
+  assert.ok(trashed, "trash fixture exists");
+  await requestWrite({ type: "deleteNote", noteId: trashed.id });
+  await settle();
+  assert.ok(notesStore.getTrashedNotes().some(note => note.id === trashed.id),
+    "the fixture is in the shared trash");
+
+  const page = privateStore.findActive(gmUser.id) ?? await privateStore.createFor(gmUser);
+  const workspace = privateStore.read(page);
+  const made = privateStore.makeNote({
+    title: "Stats Private Only", style: "memo", x: 0, y: 0, cards: workspace.layout.cards
+  });
+  made.note.blocks = [{ blockId: foundry.utils.randomID(), text: "private-only body" }];
+  workspace.notes[made.note.id] = made.note;
+  workspace.layout.cards[made.note.id] = made.card;
+  await privateStore.save(page, workspace, privateStore.flags(page).rev ?? 0);
+
+  const statsSecretId = await secrets.createSecretNote({
+    title: "Stats Vault Secret", x: 5200, y: 800
+  });
+  const liveCount = selectLiveSharedNotes(notesStore.getSharedNotes()).length;
+  const trashCount = notesStore.getTrashedNotes().length;
+  const secretTitles = Object.values(vaultStore.data.notes)
+    .map(note => note?.name)
+    .filter(name => typeof name === "string" && name);
+  assert.ok(notesStore.merged, "the GM vault is unlocked and merged for this check");
+  assert.ok(secretTitles.length > 0, "a secret note exists to exclude");
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  try {
+    await redraw();
+    host.querySelector(".journalinator-stats").click();
+    await settle();
+    const main = dialogWaits.at(-1);
+    assert.ok(main, "the main stats dialog opened");
+    assert.ok(main.content.includes(`Live shared notes: ${liveCount}`),
+      "main stats count live shared notes");
+    assert.ok(main.content.includes(`Trash not counted: ${trashCount}`),
+      "the trash line explains what is excluded");
+    assert.ok(!main.content.includes("Stats Private Only"),
+      "private note titles never enter main stats");
+    for (const title of secretTitles) {
+      assert.ok(!main.content.includes(title),
+        `vault/secret note title "${title}" never enters main stats even while merged`);
+    }
+
+    host.querySelector(".jn-view-switch").click();
+    host.querySelector(".jn-view-option[data-view='private']").click();
+    await settle();
+    await redraw();
+    host.querySelector(".journalinator-private-stats").click();
+    await settle();
+    const priv = dialogWaits.at(-1);
+    assert.equal(priv.window.title, "Private space summary");
+    assert.ok(priv.content.includes("Private notes are not included in the main canvas stats."));
+    assert.ok(priv.content.includes(`Notes: ${Object.keys(privateStore.read(page).notes).length}`),
+      "the private summary counts only this workspace");
+  } finally {
+    await secrets.deleteSecretNote(statsSecretId);
+    app._onClose();
+    host.remove();
+  }
+});
+
+/** Fresh private notes for transfer UI fixtures, saved while `user` owns the workspace. */
+async function addPrivateFixtureNotes(user, titles) {
+  const previous = game.user;
+  game.user = user;
+  try {
+    const page = privateStore.findActive(user.id) ?? await privateStore.createFor(user);
+    const workspace = privateStore.read(page);
+    const ids = [];
+    for (const [index, title] of titles.entries()) {
+      const made = privateStore.makeNote({
+        title, style: "memo", x: 5000 + index * 260, y: 5000, cards: workspace.layout.cards
+      });
+      made.note.blocks = [{ blockId: foundry.utils.randomID(), text: `${title} body` }];
+      workspace.notes[made.note.id] = made.note;
+      workspace.layout.cards[made.note.id] = made.card;
+      ids.push(made.note.id);
+    }
+    await privateStore.save(page, workspace, privateStore.flags(page).rev ?? 0);
+    return { page, ids };
+  } finally {
+    game.user = previous;
+  }
+}
+
+/** Adds extra users for one test and returns a restore function for get/iterator. */
+function installExtraUsers(users) {
+  const extra = new Map(users.map(user => [user.id, user]));
+  const baseGet = game.users.get;
+  const baseIterator = game.users[Symbol.iterator];
+  game.users.get = id => extra.get(id) ?? baseGet.call(game.users, id);
+  game.users[Symbol.iterator] = function* () {
+    yield* baseIterator.call(game.users);
+    yield* extra.values();
+  };
+  return () => {
+    game.users.get = baseGet;
+    game.users[Symbol.iterator] = baseIterator;
+  };
+}
+
+/** Clicks through the view switch and renders the private canvas. */
+async function openPrivateView(app, host, redraw) {
+  host.querySelector(".jn-view-switch").click();
+  host.querySelector(".jn-view-option[data-view='private']").click();
+  await settle();
+  await redraw();
+}
+
+test("private transfer sender UI excludes self, waits for the GM ack, and names the copy target", async () => {
+  const pip = makeUser("SenderPip000001", { name: "Pip" });
+  const quinn = makeUser("SenderQuinn0001", { name: "Quinn" });
+  const restoreUsers = installExtraUsers([pip, quinn]);
+
+  const { ids: sentIds } = await addPrivateFixtureNotes(gmUser, ["Transfer Alpha", "Transfer Beta"]);
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  try {
+    await redraw();
+    host.querySelector(".jn-view-switch").click();
+    host.querySelector(".jn-view-option[data-view='private']").click();
+    await settle();
+    await redraw();
+    const canvasRoot = host.querySelector(".jn-canvas");
+    const card = id => canvasRoot.querySelector(`.jn-card[data-id="${id}"]`);
+    assert.ok(card(sentIds[0]) && card(sentIds[1]), "both sender fixtures render");
+
+    host.querySelector(".journalinator-private-inbox").click();
+    const emptyInbox = host.querySelector(".journalinator-transfer-inbox-panel");
+    assert.match(emptyInbox.textContent, /No incoming notes/, "an empty inbox is explained");
+    emptyInbox.querySelector(".jn-transfer-close").click();
+    assert.equal(emptyInbox.hidden, true, "the empty inbox can be closed");
+
+    const send = host.querySelector(".journalinator-private-send");
+    assert.equal(send.disabled, true, "send is disabled without a private selection");
+    clickCanvasCard({ root: canvasRoot }, sentIds[0]);
+    clickCanvasCard({ root: canvasRoot }, sentIds[1], { ctrlKey: true });
+    assert.equal(send.disabled, false, "send enables for the private selection");
+    quinn.active = false;
+    send.click();
+    const panel = host.querySelector(".journalinator-transfer-send");
+    assert.equal(panel.hidden, false, "the send popover opens");
+    assert.equal(document.activeElement, panel.querySelector(".jn-transfer-recipient"),
+      "focus starts on the recipient field");
+    const options = [...panel.querySelectorAll("option")].map(option => option.value);
+    assert.ok(!options.includes(gmUser.id), "the recipient list excludes the sender");
+    assert.ok(options.includes(pip.id) && options.includes(quinn.id), "players and GMs can receive");
+    assert.match([...panel.querySelectorAll("option")]
+      .find(option => option.value === quinn.id).textContent, /offline/,
+    "an offline recipient is still listed and marked");
+    assert.match(panel.textContent, /Only notes can be transferred/,
+      "the send panel states the copy-only boundary");
+    quinn.active = true;
+    panel.querySelector(".jn-transfer-recipient").value = pip.id;
+
+    const infoBefore = env.notifications.filter(([level]) => level === "info").length;
+    panel.querySelector(".jn-transfer-confirm").click();
+    assert.equal(panel.hidden, true, "the popover closes on send");
+    assert.equal(env.notifications.filter(([level]) => level === "info").length, infoBefore,
+      "no optimistic success notice");
+    await settle();
+
+    const record = privateStore.pendingTransfers(pip.id).at(-1);
+    assert.ok(record, "the GM stored the pending copy");
+    assert.equal(record.fromUserId, gmUser.id);
+    assert.deepEqual(record.summary.titles, ["Transfer Alpha", "Transfer Beta"]);
+    assert.ok(env.notifications.some(([level, text]) =>
+      level === "info" && text.includes("Sent 2 note(s) to Pip")),
+    "success appears only after the writeApplied acknowledgement");
+
+    // A later popover still excludes the sender and Escape closes it.
+    send.click();
+    assert.equal(panel.hidden, false);
+    panel.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    assert.equal(panel.hidden, true, "Escape closes the send popover");
+  } finally {
+    restoreUsers();
+    app._onClose();
+    host.remove();
+  }
+});
+
+test("private transfer inbox is recipient-only, accepts and declines only after ack, and refreshes the space", async () => {
+  const pip = makeUser("InboxPip000001", { name: "Pip" });
+  const quinn = makeUser("InboxQuinn0001", { name: "Quinn" });
+  const restoreUsers = installExtraUsers([pip, quinn]);
+
+  const { ids: gmIds } = await addPrivateFixtureNotes(gmUser, ["Inbox Alpha One", "Inbox Alpha Two"]);
+  await requestWrite({ type: "sendPrivateTransfer", toUserId: pip.id, noteIds: gmIds });
+  const { ids: secondPipIds } = await addPrivateFixtureNotes(gmUser, ["Inbox Alpha Three"]);
+  await requestWrite({ type: "sendPrivateTransfer", toUserId: pip.id, noteIds: secondPipIds });
+  const { ids: otherIds } = await addPrivateFixtureNotes(gmUser, ["Other Recipient Secret"]);
+  await requestWrite({ type: "sendPrivateTransfer", toUserId: quinn.id, noteIds: otherIds });
+  assert.equal(privateStore.findActive(pip.id), null, "the recipient starts without a private page");
+
+  game.user = pip;
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  try {
+    await redraw();
+    host.querySelector(".jn-view-switch").click();
+    host.querySelector(".jn-view-option[data-view='private']").click();
+    await settle();
+    await redraw();
+    assert.ok(host.querySelector(".jn-private-gate"), "a recipient with no page sees the private gate");
+    assert.equal(host.querySelector(".journalinator-private-inbox .jn-transfer-badge")?.textContent, "2",
+      "the badge counts every pending transfer for this recipient");
+    assert.match(host.querySelector(".journalinator-transfer-banner").textContent, /2 incoming note transfer\(s\)/);
+
+    host.querySelector(".journalinator-private-inbox").click();
+    const panel = host.querySelector(".journalinator-transfer-inbox-panel");
+    assert.equal(panel.hidden, false, "the inbox popover opens");
+    assert.match(panel.textContent, /From GM/);
+    assert.match(panel.textContent, /Inbox Alpha One/);
+    assert.match(panel.textContent, /Inbox Alpha Three/);
+    assert.match(panel.textContent, /2 note\(s\)/);
+    assert.ok(!panel.textContent.includes("Other Recipient Secret"),
+      "another recipient's titles never leak into this inbox");
+
+    const mark = env.socketLog.length;
+    const infoBefore = env.notifications.filter(([level]) => level === "info").length;
+    const acceptItem = [...panel.querySelectorAll(".jn-transfer-item")]
+      .find(item => item.textContent.includes("Inbox Alpha One"));
+    assert.ok(acceptItem, "the requested offer is listed among multiple pending transfers");
+    acceptItem.querySelector(".jn-transfer-accept").click();
+    assert.equal(env.notifications.filter(([level]) => level === "info").length, infoBefore,
+      "accept never shows an optimistic notice");
+    const acceptMessage = env.socketLog.slice(mark).map(entry => entry.message)
+      .find(message => message.type === "acceptPrivateTransfer");
+    assert.ok(acceptMessage, "accept is sent to the active GM");
+    assert.equal(privateStore.transfer(acceptMessage.transferId)?.toUserId, pip.id,
+      "the pending offer is still present before the ack");
+
+    const previousUser = game.user;
+    game.user = gmUser;
+    env.deliver(acceptMessage, pip.id);
+    await settle();
+    const acceptAck = env.socketLog.slice(mark).map(entry => entry.message)
+      .find(message => message.type === "writeApplied" && message.forUserId === pip.id);
+    assert.ok(acceptAck, "the active GM acknowledges the accepted transfer");
+    game.user = pip;
+    env.deliver(acceptAck, gmUser.id);
+    await settle();
+    assert.ok(env.notifications.some(([level, text]) =>
+      level === "info" && text.includes("Accepted 2 note(s)")),
+    "accept success waits for the acknowledgement");
+    assert.ok(privateStore.findActive(pip.id), "accepting created the recipient's private page");
+    await redraw();
+    assert.ok(host.querySelector(".jn-canvas"), "the private view refreshes with the imported notes");
+    assert.ok(host.textContent.includes("Inbox Alpha One"), "the imported copy is visible");
+
+    game.user = gmUser;
+    const { ids: declineIds } = await addPrivateFixtureNotes(gmUser, ["Inbox Decline Bravo"]);
+    await requestWrite({ type: "sendPrivateTransfer", toUserId: pip.id, noteIds: declineIds });
+    game.user = pip;
+    await redraw();
+    const notesBefore = Object.keys(privateStore.read(privateStore.findActive(pip.id)).notes).length;
+    host.querySelector(".journalinator-private-inbox").click();
+    const inbox = host.querySelector(".journalinator-transfer-inbox-panel");
+    assert.match(inbox.textContent, /Inbox Decline Bravo/);
+    const declineItem = [...inbox.querySelectorAll(".jn-transfer-item")]
+      .find(item => item.textContent.includes("Inbox Decline Bravo"));
+    assert.ok(declineItem, "the declined offer is identified among pending transfers");
+    const declineMark = env.socketLog.length;
+    const declineInfo = env.notifications.filter(([level]) => level === "info").length;
+    declineItem.querySelector(".jn-transfer-decline").click();
+    assert.equal(env.notifications.filter(([level]) => level === "info").length, declineInfo,
+      "decline never shows an optimistic notice");
+    const declineMessage = env.socketLog.slice(declineMark).map(entry => entry.message)
+      .find(message => message.type === "declinePrivateTransfer");
+    assert.ok(declineMessage, "decline is sent to the active GM");
+
+    game.user = gmUser;
+    env.deliver(declineMessage, pip.id);
+    await settle();
+    const declineAck = env.socketLog.slice(declineMark).map(entry => entry.message)
+      .find(message => message.type === "writeApplied" && message.forUserId === pip.id);
+    assert.ok(declineAck);
+    game.user = pip;
+    env.deliver(declineAck, gmUser.id);
+    await settle();
+    assert.ok(env.notifications.some(([level, text]) =>
+      level === "info" && text.includes("Declined 1 note(s)")));
+    assert.equal(Object.keys(privateStore.read(privateStore.findActive(pip.id)).notes).length, notesBefore,
+      "declining imports nothing");
+  } finally {
+    restoreUsers();
+    app._onClose();
+    host.remove();
+    game.user = gmUser;
+  }
+});
+
+test("a player can send a private copy to the GM and it appears in the GM inbox", async () => {
+  const player = makeUser("PlayerSender0001", { name: "Rook" });
+  const restoreUsers = installExtraUsers([player]);
+  const { ids } = await addPrivateFixtureNotes(player, ["Player To GM Copy"]);
+
+  game.user = player;
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  try {
+    await redraw();
+    host.querySelector(".jn-view-switch").click();
+    host.querySelector(".jn-view-option[data-view='private']").click();
+    await settle();
+    await redraw();
+    const canvasRoot = host.querySelector(".jn-canvas");
+    clickCanvasCard({ root: canvasRoot }, ids[0]);
+    host.querySelector(".journalinator-private-send").click();
+    const panel = host.querySelector(".journalinator-transfer-send");
+    const options = [...panel.querySelectorAll("option")].map(option => option.value);
+    assert.ok(!options.includes(player.id), "a player's recipient list excludes that player");
+    assert.ok(options.includes(gmUser.id), "the GM is a valid recipient");
+    panel.querySelector(".jn-transfer-recipient").value = gmUser.id;
+
+    const mark = env.socketLog.length;
+    panel.querySelector(".jn-transfer-confirm").click();
+    const sentMessage = env.socketLog.slice(mark).map(entry => entry.message)
+      .find(message => message.type === "sendPrivateTransfer");
+    assert.ok(sentMessage, "the player's send goes through the active GM");
+    assert.equal(sentMessage.toUserId, gmUser.id);
+
+    game.user = gmUser;
+    env.deliver(sentMessage, player.id);
+    await settle();
+    const sentAck = env.socketLog.slice(mark).map(entry => entry.message)
+      .find(message => message.type === "writeApplied" && message.forUserId === player.id
+        && message.action === "sent");
+    assert.ok(sentAck, "the GM acknowledges the player's send");
+    game.user = player;
+    env.deliver(sentAck, gmUser.id);
+    await settle();
+    assert.ok(env.notifications.some(([level, text]) =>
+      level === "info" && text.includes("Sent 1 note(s) to GM")));
+
+    // The GM now sees the pending copy in their own private inbox.
+    game.user = gmUser;
+    const gmApp = new JournalApp();
+    const gmHost = document.createElement("div");
+    gmApp.element = gmHost;
+    document.body.appendChild(gmHost);
+    const gmRedraw = async () => {
+      gmApp._replaceHTML(await gmApp._renderHTML(await gmApp._prepareContext()), gmHost);
+      gmApp._onRender();
+    };
+    gmApp._onFirstRender();
+    try {
+      await gmRedraw();
+      gmHost.querySelector(".jn-view-switch").click();
+      gmHost.querySelector(".jn-view-option[data-view='private']").click();
+      await settle();
+      await gmRedraw();
+      assert.ok(gmHost.querySelector(".jn-transfer-badge"), "the GM inbox carries a count badge");
+      gmHost.querySelector(".journalinator-private-inbox").click();
+      assert.match(gmHost.querySelector(".journalinator-transfer-inbox-panel").textContent,
+        /Player To GM Copy/);
+    } finally {
+      gmApp._onClose();
+      gmHost.remove();
+    }
+  } finally {
+    restoreUsers();
+    app._onClose();
+    host.remove();
+    game.user = gmUser;
+  }
+});
+
+test("banner click closes the inbox without reopening it", async () => {
+  const recipient = makeUser("BannerPip000001", { name: "Banner Pip" });
+  const restoreUsers = installExtraUsers([recipient]);
+  const { ids } = await addPrivateFixtureNotes(gmUser, ["Banner Copy"]);
+  await requestWrite({ type: "sendPrivateTransfer", toUserId: recipient.id, noteIds: ids });
+
+  game.user = recipient;
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  try {
+    await redraw();
+    await openPrivateView(app, host, redraw);
+    const banner = host.querySelector(".journalinator-transfer-banner");
+    assert.ok(banner, "the incoming banner is rendered");
+    banner.click();
+    const panel = host.querySelector(".journalinator-transfer-inbox-panel");
+    assert.equal(panel.hidden, false, "the banner opens the inbox");
+
+    banner.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    banner.click();
+    assert.equal(panel.hidden, true,
+      "clicking the banner again closes it instead of pointerdismiss-then-reopening");
+  } finally {
+    restoreUsers();
+    app._onClose();
+    host.remove();
+    game.user = gmUser;
+  }
+});
+
+test("offline disables private send and inbox actions", async () => {
+  const user = makeUser("OfflinePlayer0001", { name: "Offline Player" });
+  const restoreUsers = installExtraUsers([user]);
+  const { ids } = await addPrivateFixtureNotes(user, ["Offline Selection"]);
+  game.user = user;
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  const descriptor = Object.getOwnPropertyDescriptor(game.users, "activeGM");
+  Object.defineProperty(game.users, "activeGM", { configurable: true, get: () => null });
+  try {
+    await redraw();
+    await openPrivateView(app, host, redraw);
+    const canvasRoot = host.querySelector(".jn-canvas");
+    clickCanvasCard({ root: canvasRoot }, ids[0]);
+    const send = host.querySelector(".journalinator-private-send");
+    const inbox = host.querySelector(".journalinator-private-inbox");
+    assert.equal(send.disabled, true, "send is disabled without an active GM");
+    assert.equal(inbox.disabled, true, "inbox is disabled without an active GM");
+    send.click();
+    assert.equal(host.querySelector(".journalinator-transfer-send").hidden, true,
+      "a disabled send cannot open its popover");
+  } finally {
+    Object.defineProperty(game.users, "activeGM", descriptor);
+    restoreUsers();
+    app._onClose();
+    host.remove();
+    game.user = gmUser;
+  }
+});
+
+test("send is disabled and warns when the player has no private page", async () => {
+  const user = makeUser("NoPagePlayer0001", { name: "No Page" });
+  const restoreUsers = installExtraUsers([user]);
+  game.user = user;
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  try {
+    await redraw();
+    await openPrivateView(app, host, redraw);
+    const send = host.querySelector(".journalinator-private-send");
+    assert.equal(send.disabled, true, "send is disabled without a private page");
+    assert.match(send.getAttribute("aria-label"), /private journal/i);
+    send.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    assert.equal(host.querySelector(".journalinator-transfer-send").hidden, true);
+    assert.ok(env.notifications.some(([level, text]) =>
+      level === "warn" && /private journal/i.test(text)),
+    "clicking send warns that a private page is needed");
+  } finally {
+    restoreUsers();
+    app._onClose();
+    host.remove();
+    game.user = gmUser;
+  }
+});
+
+test("private transfer acknowledgements surface dropped links and waypoints", () => {
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  app._onFirstRender();
+  try {
+    const before = env.notifications.length;
+    Hooks.callAll("journalinatorWriteApplied", {
+      forUserId: game.user.id,
+      kind: "privateTransfer",
+      action: "sent",
+      count: 2,
+      toUserId: gmUser.id,
+      droppedLinks: 1,
+      droppedWaypoints: 2
+    });
+    const warnings = env.notifications.slice(before)
+      .filter(([level]) => level === "warn").map(([, text]) => text);
+    assert.ok(warnings.some(text => text.includes("Dropped 1 link")), "the link drop is shown");
+    assert.ok(warnings.some(text => text.includes("Dropped 2 route waypoint")),
+      "the waypoint drop is shown separately");
   } finally {
     app._onClose();
     host.remove();

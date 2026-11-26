@@ -33,6 +33,37 @@ These notes start with the small board and toolbar polish patches and cover the 
   another. The badge is derived per client from documents that client can already see; actor
   state is never copied into the shared journal.
 
+## 0.9.0 — Fit view, private transfers, and live stats
+
+- **Fit all:** a new canvas control frames every note at once, with a safe zoom limit so tiny and
+  huge boards both stay usable.
+- **Private note transfers:** select notes on your private canvas and send a copy to another
+  player. The recipient accepts or declines from an incoming-notes list. Transfers wait in the
+  private journal container until accepted. A failed save leaves the offer intact, and if the
+  copy saves but its inbox removal fails, retrying recognises the acceptance receipt and removes
+  the stale offer without importing duplicate notes. After an accept save, the importer re-reads
+  the workspace and re-imports once if a stale owner save overwrote the copied notes; if they are
+  still missing, the offer is kept and the recipient sees a localized retry error instead of a
+  false success. This is best-effort mitigation: Foundry's journal update has no server-side CAS,
+  so a write landing after the final verification can still overwrite a copy.
+- Pending inboxes are bounded: at most 20 offers per recipient, at most 5 from one sender to one
+  recipient, and offers older than 30 days are hidden on read and their flag keys deleted on the
+  next add.
+- Transfers copy only the selected notes, their cards, and stamps or labels attached to those
+  notes. Images, backgrounds, presentation, attachment settings, and note text travel with the
+  copy; links to notes outside the selection and route waypoints on outside notes are dropped,
+  and the sender/recipient see the actual dropped-link and dropped-waypoint counts. Free board
+  labels are never included, and shared or vault content is never copied.
+- Imported notes get fresh note, card, link, and label ids, keep their original spacing near the
+  source positions without overlapping existing cards (rotated cards use their true rotated
+  bounds), and belong to the recipient. A recipient with a pending private page activates it
+  before importing so the copy is visible immediately. Private journals and their pending
+  transfers remain plaintext: Foundry sends journal flags to every connected client, so this is
+  UI privacy, not encryption.
+- **Main-canvas stats count live shared notes only.** Trash is disclosed separately, and private
+  notes, private trash, pending transfers, and vault/secret notes are never counted in the shared
+  statistics window, even when the GM vault is unlocked and merged into the canvas.
+
 ## 0.8.4 — Keep the note type when copying
 
 - Ctrl/Cmd+C and Ctrl/Cmd+V now preserve the card type between the main and private canvases,

@@ -18,6 +18,7 @@ const containers = await makeContainers(env);
 
 const { vaultStore } = await import("../scripts/secrets/vault-store.mjs");
 const { notesStore } = await import("../scripts/store/notes-store.mjs");
+const { privateStore } = await import("../scripts/store/private-store.mjs");
 const secrets = await import("../scripts/secrets/secret-actions.mjs");
 const { registerSocket, requestWrite, sanitizeProjectionBox } = await import("../scripts/socket.mjs");
 const { resolvePresentation } = await import("../scripts/presentation.mjs");
@@ -2905,4 +2906,263 @@ test("final player-visible dump still excludes the remaining secret notes", () =
     assert.ok(!dump.includes(note.name), `end of suite: secret title "${note.name}" leaked`);
     assert.ok(!dump.includes(note.id), `end of suite: secret note id leaked`);
   }
+});
+
+function privateCardsOverlap(a, b) {
+  const aw = Number.isFinite(a.width) && a.width > 0 ? a.width : 200;
+  const ah = Number.isFinite(a.height) && a.height > 0 ? a.height : 90;
+  const bw = Number.isFinite(b.width) && b.width > 0 ? b.width : 200;
+  const bh = Number.isFinite(b.height) && b.height > 0 ? b.height : 90;
+  return !(a.x + aw <= b.x || b.x + bw <= a.x || a.y + ah <= b.y || b.y + bh <= a.y);
+}
+
+test("private transfers are sent, stay pending, and import as a recipient copy", async () => {
+  const statsBefore = JSON.stringify(notesStore.getStats()?.activity ?? {});
+  assert.equal(privateStore.findActive(player.id), null, "the player starts without a private page");
+
+  const gmPage = await privateStore.createFor(gmUser);
+  const workspace = privateStore.read(gmPage);
+  const alpha = privateStore.makeNote({ title: "Transfer Alpha", style: "memo", x: 0, y: 0, cards: {} });
+  const beta = privateStore.makeNote({
+    title: "Transfer Beta", style: "document", x: 450, y: 0,
+    cards: { [alpha.note.id]: alpha.card }
+  });
+  alpha.note.blocks = [{ blockId: "TransferBlockA", text: "private alpha text", authorId: gmUser.id }];
+  alpha.note.image = "assets/stylized/cork.svg";
+  alpha.note.backgroundImage = "assets/stylized/paper.webp";
+  alpha.note.presentation = {
+    ...alpha.note.presentation,
+    extendedStyle: "document", forceExtended: true, font: "hand", pictureLayout: "left", torn: true
+  };
+  alpha.note.attachment = {
+    ...alpha.note.attachment, pinStyle: "brass", mainSnapRadius: 12
+  };
+  beta.note.blocks = [{ blockId: "TransferBlockB", text: "private beta text", authorId: gmUser.id }];
+  alpha.note.links = [
+    {
+      id: "transfer-internal", targetId: beta.note.id, label: "internal", direction: "one",
+      color: "link1", lineStyle: "solid", origin: "drawn", edited: false,
+      createdBy: gmUser.id, hint: false, sourceAnchorId: "main", targetAnchorId: "main",
+      sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 },
+      routeAnchors: [{ noteId: beta.note.id, anchorId: "main" }]
+    },
+    { id: "transfer-external", targetId: "OutsideNote00001", label: "external", direction: "one" }
+  ];
+  workspace.notes[alpha.note.id] = alpha.note;
+  workspace.notes[beta.note.id] = beta.note;
+  workspace.layout.cards[alpha.note.id] = alpha.card;
+  workspace.layout.cards[beta.note.id] = beta.card;
+  workspace.layout.labels.attachedStamp = {
+    text: "", x: 0, y: 0, size: 14, color: "#c79848", stamp: "skull",
+    noteId: alpha.note.id, corner: "bottom-right"
+  };
+  workspace.layout.labels.free = {
+    text: "free label text", x: 20, y: 20, size: 14, color: "", stamp: "",
+    noteId: "", corner: "bottom-right"
+  };
+  await privateStore.save(gmPage, workspace, privateStore.flags(gmPage).rev ?? 0);
+
+  const acks = [];
+  const hookId = Hooks.on("journalinatorWriteApplied", message => acks.push(message));
+  try {
+    await requestWrite({
+      type: "sendPrivateTransfer", toUserId: player.id,
+      noteIds: [alpha.note.id, beta.note.id]
+    });
+  } finally {
+    Hooks.off("journalinatorWriteApplied", hookId);
+  }
+  const sent = acks.find(message => message.kind === "privateTransfer" && message.action === "sent");
+  assert.ok(sent, "the sender receives a writeApplied acknowledgement");
+  assert.equal(sent.count, 2);
+  assert.equal(sent.toUserId, player.id);
+  assert.ok(sent.transferId);
+  assert.ok(!JSON.stringify(sent).includes("private alpha text"),
+    "the acknowledgement carries no note payload");
+
+  const pending = privateStore.pendingTransfers(player.id);
+  assert.equal(pending.length, 1);
+  const record = pending[0];
+  assert.equal(record.id, sent.transferId);
+  assert.equal(record.fromUserId, gmUser.id);
+  assert.equal(record.toUserId, player.id);
+  assert.equal(record.notes.length, 2);
+  assert.deepEqual(record.summary, {
+    count: 2, titles: ["Transfer Alpha", "Transfer Beta"],
+    droppedLinks: 1, droppedWaypoints: 0
+  });
+  assert.equal(JSON.stringify(notesStore.getStats()?.activity ?? {}), statsBefore,
+    "pending transfers do not touch the main-canvas statistics");
+
+  env.notifications.length = 0;
+  await requestWrite({ type: "acceptPrivateTransfer", transferId: record.id });
+  assert.ok(env.notifications.some(([, text]) => text.includes("not addressed to you")),
+    "only the named recipient may accept");
+  assert.equal(privateStore.transfer(record.id)?.id, record.id, "a refused accept keeps the offer");
+
+  const ackMark = env.socketLog.length;
+  await fromPlayer({ type: "acceptPrivateTransfer", transferId: record.id });
+  const accepted = env.socketLog.slice(ackMark).map(entry => entry.message)
+    .find(message => message.type === "writeApplied" && message.kind === "privateTransfer");
+  assert.deepEqual(accepted, {
+    type: "writeApplied", forUserId: player.id, kind: "privateTransfer",
+    action: "accepted", count: 2, droppedLinks: 1, droppedWaypoints: 0
+  });
+  assert.equal(privateStore.pendingTransfers(player.id).length, 0);
+
+  const playerPage = privateStore.findActive(player.id);
+  assert.ok(playerPage, "accepting with no active page creates one");
+  const importedWorkspace = privateStore.read(playerPage);
+  assert.equal(Object.keys(importedWorkspace.notes).length, 2);
+  const importedAlpha = Object.values(importedWorkspace.notes)
+    .find(note => note.title === "Transfer Alpha");
+  const importedBeta = Object.values(importedWorkspace.notes)
+    .find(note => note.title === "Transfer Beta");
+  assert.ok(importedAlpha && importedBeta);
+  assert.notEqual(importedAlpha.id, alpha.note.id);
+  assert.notEqual(importedBeta.id, beta.note.id);
+  assert.equal(importedAlpha.blocks[0].text, "private alpha text");
+  assert.equal(importedAlpha.image, "assets/stylized/cork.svg");
+  assert.equal(importedAlpha.backgroundImage, "assets/stylized/paper.webp");
+  assert.equal(importedAlpha.presentation.font, "hand");
+  assert.equal(importedAlpha.presentation.torn, true);
+  assert.equal(importedAlpha.attachment.pinStyle, "brass");
+  assert.equal(importedAlpha.links.length, 1, "the external link is dropped");
+  assert.equal(importedAlpha.links[0].targetId, importedBeta.id);
+  assert.notEqual(importedAlpha.links[0].id, "transfer-internal");
+  assert.equal(importedAlpha.links[0].createdBy, player.id);
+  assert.deepEqual(importedAlpha.links[0].routeAnchors,
+    [{ noteId: importedBeta.id, anchorId: "main" }]);
+  const labels = Object.values(importedWorkspace.layout.labels);
+  assert.equal(labels.length, 1, "only attached labels travel");
+  assert.equal(labels[0].stamp, "skull");
+  assert.equal(labels[0].noteId, importedAlpha.id);
+  assert.ok(!labels.some(label => label.text === "free label text"));
+  assert.equal(privateCardsOverlap(
+    importedWorkspace.layout.cards[importedAlpha.id],
+    importedWorkspace.layout.cards[importedBeta.id]
+  ), false);
+  assert.equal(JSON.stringify(notesStore.getStats()?.activity ?? {}), statsBefore,
+    "accepted private copies never enter main-canvas statistics");
+
+  await privateStore.remove(gmPage);
+  await privateStore.remove(playerPage);
+});
+
+test("private transfer send/decline validates sender, recipient and payload", async () => {
+  const gmPage = privateStore.findActive(gmUser.id) ?? await privateStore.createFor(gmUser);
+  const playerPage = privateStore.findActive(player.id) ?? await privateStore.createFor(player);
+  const workspace = privateStore.read(gmPage);
+  const source = privateStore.makeNote({
+    title: "Decline Source", style: "memo", x: 0, y: 0, cards: workspace.layout.cards
+  });
+  source.note.blocks = [{ blockId: "DeclineBlock01", text: "decline body" }];
+  workspace.notes[source.note.id] = source.note;
+  workspace.layout.cards[source.note.id] = source.card;
+  await privateStore.save(gmPage, workspace, privateStore.flags(gmPage).rev ?? 0);
+
+  await requestWrite({
+    type: "sendPrivateTransfer", toUserId: player.id, noteIds: [source.note.id]
+  });
+  const record = privateStore.pendingTransfers(player.id)[0];
+  assert.ok(record);
+  const beforeNotes = Object.keys(privateStore.read(playerPage).notes).length;
+
+  env.notifications.length = 0;
+  await requestWrite({ type: "declinePrivateTransfer", transferId: record.id });
+  assert.ok(env.notifications.some(([, text]) => text.includes("not addressed to you")),
+    "only the named recipient may decline");
+  assert.ok(privateStore.transfer(record.id));
+
+  const ackMark = env.socketLog.length;
+  await fromPlayer({ type: "declinePrivateTransfer", transferId: record.id });
+  const declined = env.socketLog.slice(ackMark).map(entry => entry.message)
+    .find(message => message.type === "writeApplied" && message.kind === "privateTransfer");
+  assert.deepEqual(declined, {
+    type: "writeApplied", forUserId: player.id, kind: "privateTransfer",
+    action: "declined", count: 1
+  });
+  assert.equal(privateStore.transfer(record.id), null);
+  assert.equal(Object.keys(privateStore.read(playerPage).notes).length, beforeNotes,
+    "declining imports nothing");
+
+  env.notifications.length = 0;
+  await requestWrite({
+    type: "sendPrivateTransfer", toUserId: gmUser.id, noteIds: [source.note.id]
+  });
+  assert.ok(env.notifications.some(([, text]) => text.includes("cannot send notes to yourself")));
+
+  env.notifications.length = 0;
+  await requestWrite({
+    type: "sendPrivateTransfer", toUserId: "MissingUser00001", noteIds: [source.note.id]
+  });
+  assert.ok(env.notifications.some(([, text]) => text.includes("no longer exists")));
+
+  env.notifications.length = 0;
+  await requestWrite({ type: "sendPrivateTransfer", toUserId: player.id, noteIds: [] });
+  assert.ok(env.notifications.some(([, text]) => text.includes("no notes to send")));
+
+  env.notifications.length = 0;
+  await requestWrite({
+    type: "sendPrivateTransfer", toUserId: player.id, noteIds: ["MissingNote00001"]
+  });
+  assert.ok(env.notifications.some(([, text]) => text.includes("no longer available")));
+  assert.equal(privateStore.pendingTransfers(player.id).length, 0);
+
+  await privateStore.detach(playerPage);
+  const rejectionMark = env.socketLog.length;
+  await fromPlayer({
+    type: "sendPrivateTransfer", toUserId: gmUser.id, noteIds: [source.note.id]
+  });
+  assert.ok(rejectionReasonsSince(rejectionMark).some(reason =>
+    reason.includes("Create your private journal")),
+  "a sender without an active private page is rejected");
+  await privateStore.remove(playerPage);
+  await privateStore.remove(gmPage);
+});
+
+test("a failed transfer save keeps the offer and accepts cleanly on retry", async () => {
+  const gmPage = privateStore.findActive(gmUser.id) ?? await privateStore.createFor(gmUser);
+  const playerPage = privateStore.findActive(player.id) ?? await privateStore.createFor(player);
+  const workspace = privateStore.read(gmPage);
+  const source = privateStore.makeNote({
+    title: "Retry Source", style: "memo", x: 0, y: 0, cards: workspace.layout.cards
+  });
+  source.note.blocks = [{ blockId: "RetryBlock00001", text: "retry body" }];
+  workspace.notes[source.note.id] = source.note;
+  workspace.layout.cards[source.note.id] = source.card;
+  await privateStore.save(gmPage, workspace, privateStore.flags(gmPage).rev ?? 0);
+
+  await requestWrite({
+    type: "sendPrivateTransfer", toUserId: player.id, noteIds: [source.note.id]
+  });
+  const record = privateStore.pendingTransfers(player.id)[0];
+  assert.ok(record);
+  const beforeNotes = Object.keys(privateStore.read(playerPage).notes).length;
+
+  const originalUpdate = playerPage.update.bind(playerPage);
+  playerPage.update = async () => { throw new Error("injected transfer save failure"); };
+  const rejectionMark = env.socketLog.length;
+  try {
+    await fromPlayer({ type: "acceptPrivateTransfer", transferId: record.id });
+  } finally {
+    playerPage.update = originalUpdate;
+  }
+  assert.ok(rejectionReasonsSince(rejectionMark).some(reason =>
+    reason.includes("injected transfer save failure")));
+  assert.equal(privateStore.transfer(record.id)?.id, record.id,
+    "a failed save never loses the pending transfer");
+  assert.equal(Object.keys(privateStore.read(playerPage).notes).length, beforeNotes,
+    "no partial import was saved");
+
+  const ackMark = env.socketLog.length;
+  await fromPlayer({ type: "acceptPrivateTransfer", transferId: record.id });
+  const accepted = env.socketLog.slice(ackMark).map(entry => entry.message)
+    .find(message => message.type === "writeApplied" && message.kind === "privateTransfer");
+  assert.equal(accepted.action, "accepted");
+  assert.equal(privateStore.transfer(record.id), null);
+  assert.equal(Object.keys(privateStore.read(playerPage).notes).length, beforeNotes + 1);
+
+  await privateStore.remove(gmPage);
+  await privateStore.remove(playerPage);
 });

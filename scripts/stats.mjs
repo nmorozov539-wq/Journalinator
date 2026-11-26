@@ -34,10 +34,19 @@ export async function addSessionMarker(label) {
 }
 
 /**
- * Pure aggregation over plain note data — no Foundry calls, so it's easy to reason about and
- * reuse from both the stats dialog and (if ever wanted) a test. `notes` should include trashed
- * notes too: these are historical totals ("notes created", "characters written"), not a live
- * canvas view, so a deleted note's past contribution still counts.
+ * Main-canvas stats are shared-canvas work only. Callers pass `notesStore.getSharedNotes()` so
+ * the vault merge (secret notes) is bypassed even when the GM has it unlocked, then this keeps
+ * only live pages. Trashed pages are excluded from every live total and disclosed separately.
+ */
+export function selectLiveSharedNotes(sharedNotes) {
+  return (Array.isArray(sharedNotes) ? sharedNotes : [])
+    .filter(page => page && !page.system?.deleted);
+}
+
+/**
+ * Pure aggregation over an explicit note list — no Foundry calls, so it's easy to reason about
+ * and reuse from both the stats dialog and tests. The main dialog passes exactly the live shared
+ * pages from `selectLiveSharedNotes`; trashed and private notes never enter this list.
  */
 export function computeJournalStats(notes) {
   const chars = {}, notesCreated = {}, linksDrawn = {};

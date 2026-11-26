@@ -2258,6 +2258,55 @@ export default class JournalCanvas {
     this.view.y = (rect.height - (y1 - y0) * this.view.k) / 2 - y0 * this.view.k;
   }
 
+  /**
+   * Fits card bounds into the viewport (the "Fit all notes"/"Fit selection" toolbar action).
+   *
+   * Cards only: links, labels, stamps and thread pins deliberately do not widen the bounds, so a
+   * long link cannot zoom the board out past the notes it connects. `ids` narrows the fit to a
+   * selection; an empty/omitted value means every live card in `cardEls`. Rotated cards are
+   * measured by their world-space AABB, with 60px of breathing room. Fit never magnifies past
+   * 1.0 and shares the same 0.3 lower clamp as wheel zoom, so a single card stays readable.
+   */
+  fitNotes(ids = null) {
+    const wanted = Array.isArray(ids) && ids.length ? ids : [...this.cardEls.keys()];
+    const boxes = [];
+    for (const id of wanted) {
+      if (!this.cardEls.has(id)) continue;
+      const box = this.#cardBox(id);
+      const w = Number.isFinite(box.w) && box.w > 0 ? box.w : 190;
+      const h = Number.isFinite(box.h) && box.h > 0 ? box.h : 70;
+      const rotation = Number.isFinite(box.rotation) ? box.rotation : 0;
+      const rad = rotation * Math.PI / 180;
+      const cos = Math.abs(Math.cos(rad));
+      const sin = Math.abs(Math.sin(rad));
+      const rw = w * cos + h * sin;
+      const rh = w * sin + h * cos;
+      const cx = box.x + w / 2;
+      const cy = box.y + h / 2;
+      boxes.push({ x: cx - rw / 2, y: cy - rh / 2, w: rw, h: rh });
+    }
+    if (!boxes.length) return false;
+    const rect = this.root.getBoundingClientRect();
+    if (!(rect.width > 0) || !(rect.height > 0)) return false;
+
+    const padding = 60;
+    const x0 = Math.min(...boxes.map(box => box.x)) - padding;
+    const y0 = Math.min(...boxes.map(box => box.y)) - padding;
+    const x1 = Math.max(...boxes.map(box => box.x + box.w)) + padding;
+    const y1 = Math.max(...boxes.map(box => box.y + box.h)) + padding;
+    const width = x1 - x0;
+    const height = y1 - y0;
+    const raw = Math.min(rect.width / width, rect.height / height);
+    // The fit action is for locating cards, not for enlarging a lone note to fill the screen.
+    this.view.k = Math.min(1, Math.max(0.3, raw));
+    this.view.x = (rect.width - width * this.view.k) / 2 - x0 * this.view.k;
+    this.view.y = (rect.height - height * this.view.k) / 2 - y0 * this.view.k;
+    this.hasCentered = true;
+    this.#applyTransform();
+    this.#syncLinkToolbar();
+    return true;
+  }
+
   #applyTransform() {
     this.world.style.transform = `translate(${this.view.x}px, ${this.view.y}px) scale(${this.view.k})`;
     // Cork tile size is world-anchored: the base size is set once, CSS scales it by zoom, and

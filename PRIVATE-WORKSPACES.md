@@ -1,12 +1,14 @@
 # Private Workspaces — Design
 
-Status: implemented in 0.8.x.
+Status: implemented in 0.8.x; one-way private-to-private copies added in 0.9.0.
 
 ## Summary
 
 Every Foundry user gets one private workspace: a separate Journalinator canvas that only that
-profile can open through the UI. It is isolated from the shared board. There is no sharing and no
-reader list. Notes move between canvases only through an explicit Ctrl/Cmd+C and Ctrl/Cmd+V copy.
+profile can open through the UI. It is isolated from the shared board. There is no live sharing
+and no reader list. Notes move between canvases through an explicit Ctrl/Cmd+C and Ctrl/Cmd+V
+copy, and a player can send a one-way copy of selected private notes to another player's private
+inbox.
 
 This is a **UI-private** feature, not encryption. See the security boundary below.
 
@@ -18,11 +20,13 @@ This is a **UI-private** feature, not encryption. See the security boundary belo
 - Let the owner rename their private workspace.
 - Let the GM repair workspaces when a user is deleted, recreated, or needs reassignment.
 - Let notes be copied between the shared and private canvases with Ctrl/Cmd+C and Ctrl/Cmd+V.
+- Let a player send an explicit one-way copy of selected private notes to another player.
 
 ## Non-goals
 
 - Encryption at rest.
-- Sharing a private note with selected readers.
+- Live shared editing or in-place sharing of a private note. Transfers are copies; the two
+  private workspaces are never linked or kept in sync.
 - Merging two private workspaces.
 - Hiding the existence of a workspace from the GM or the host.
 
@@ -103,6 +107,8 @@ be opened and saved.
   - `pendingOwnerUserId: string | null`
   - `state: "active" | "orphaned" | "pending"`
   - `rev: number`
+  - `acceptedTransfers: string[]` — recent transfer ids imported into this page (capped at 50),
+    used to make the save-then-remove sequence idempotent
   - the private canvas payload:
     - notes (title, Markdown blocks, card style, card position)
     - layout and viewport
@@ -110,6 +116,10 @@ be opened and saved.
     - timestamps
 
 The page name is intentionally public metadata. The note contents are not.
+
+The **Private Journals** container also carries a `flags.fvtt-journalinator.transfers` object of
+pending private-to-private copies until the recipient accepts or declines them. Removal uses
+Foundry's per-key deletion syntax because ordinary object updates deep-merge on a real server.
 
 ### Ownership rules
 
@@ -206,6 +216,36 @@ The GM admin panel can also create a workspace for a player.
 
 The source notes remain exactly as they were.
 
+## Private transfer flow
+
+The 0.9.0 transfer feature adds a one-way copy between two private canvases; it is not live
+sharing.
+
+1. The sender selects one or more notes on their private canvas and chooses **Send to…**.
+2. The active GM packs only those notes, their cards, and labels or stamps attached to them into a
+   pending record on the **Private Journals** container. The sender keeps the originals.
+3. The recipient sees the pending copy in their private inbox and can accept or decline it.
+4. Accepting imports fresh note/card/link/label ids into the recipient's private workspace. If the
+   recipient already has a pending workspace offer, that page is activated first; otherwise the
+   active workspace is used or created.
+5. Links to notes outside the selection are dropped, as are route waypoints whose note is outside
+   the selection. The sender and recipient see the dropped-link and dropped-waypoint counts.
+6. The workspace save and an acceptance receipt (`acceptedTransfers`, capped at 50 ids) are
+   written together. The receipt also records the imported note ids. Immediately after the save,
+   the importer re-reads the page; if a stale owner save overwrote any imported note, it
+   re-imports once against the latest revision. If the notes are still missing, the pending
+   transfer is kept and the recipient gets a localized retry error. The pending record is removed
+   afterwards with Foundry deletion keys. If removal fails, a retry sees the receipt, verifies its
+   note ids still exist, skips the import and only removes the stale offer, so no duplicate notes
+   appear. This is best-effort: Foundry journal updates have no server-side compare-and-set, so a
+   stale write arriving after the final verification can still overwrite a copy.
+
+Transfers never include shared-journal content or vault/secret content. Pending records are
+plaintext flags on the private container, just like the workspaces themselves, and can be read by
+any client that can read raw journal flags. Inboxes are capped at 20 pending offers per recipient
+and 5 pending offers from one sender to one recipient. Offers older than 30 days are treated as
+expired: reads hide them immediately, and the next add deletes their flag keys.
+
 ## Testing checklist
 
 - Two different profiles see different private workspaces.
@@ -220,12 +260,14 @@ The source notes remain exactly as they were.
 - Ctrl/Cmd+C and Ctrl/Cmd+V copy notes in both directions; note types survive, while links,
   images, stamps, and layout do not.
 - Copying leaves the source note unchanged.
+- A player can send selected private notes to another player; the recipient accepts or declines a
+  copy, the sender keeps the originals, and a failed removal cannot duplicate the import.
 - Two sessions signed in as the same user do not overwrite each other silently.
 
 ## Explicitly deferred
 
 - Encryption and per-profile keys.
-- Sharing a private workspace or note with another player.
+- Live shared editing or in-place sharing of a private workspace or note.
 - Merging workspaces.
 - Private statistics across sessions.
 - Hiding workspace existence from the GM or host.
