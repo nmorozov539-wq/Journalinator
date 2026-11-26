@@ -222,3 +222,18 @@ Coordinator-run with independent validation reports from all prior phases. No ne
 | A28 | PASS local; no publish | manifest/package/launch docs; Foundry 14.367 smoke; no push/merge/release |
 
 Final known limitations: session-local active-GM undo (pin/route), private main-pin disable not redistributed, multi-link bulk not implemented, split fallback crash window on fake Foundry only, per-torn-card shadow cost to stress-test, and all real multiplayer/manual gates above.
+
+### Local commit history (no push/merge/release)
+
+| Phase | Commit |
+|---|---|
+| 1 universal schema + migration | `4c59576` |
+| 2 adaptive rendering/creation/search | `a252fee` |
+| 3 materials/theme/fonts/torn | `16f5a94` |
+| 4 configurable threads/fade | `38bdb3c` |
+| 5 optional pins | `6ccede4` |
+| 6 route notes A/B | `bdbd273` |
+| 7 floating toolbar/bulk | `7e68ea3` |
+| 8 docs/Foundry smoke/package | `1e6b928` |
+
+Final tree state: branch `stylized-canvas`, working tree clean except untracked `handoff/` (spec package) and ignored `dist/` artifact.
