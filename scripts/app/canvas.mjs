@@ -1,4 +1,3 @@
-import { CARD_STYLES, cardStyleKey } from "../styles/registry.mjs";
 import {
   CARD_SIDES, MAX_THREAD_PINS, THREAD_PIN_RADIUS, cardEdgeAt, cardPointAnchor, moveThreadPin, threadAttachment, validThreadPin
 } from "../card-ports.mjs";
@@ -9,6 +8,7 @@ import { noteImageSource } from "../image-url.mjs";
 import { hasAnyLock } from "../locks.mjs";
 import { renderMarkdown } from "../markdown.mjs";
 import { t } from "../i18n.mjs";
+import { classifyNote, resolvePresentation } from "../presentation.mjs";
 import { DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, STAMP_CORNERS, STAMP_IDS, stampUrl } from "../stamps.mjs";
 
 const DRAG_THRESHOLD = 5;
@@ -16,6 +16,22 @@ let threadMaskSequence = 0;
 const LINK_COLOR_OPTIONS = ["", ...LINK_COLOR_SLOTS];
 const LINK_DIRECTIONS = new Set(["none", "one", "two"]);
 const PATCH_NOTES_SELECTOR = ".jn-patch-notes, .jn-patch-notes-button";
+
+// Extended style class names stay aligned with the legacy theme token keys (`wanted` is Target).
+const STYLE_CLASSES = Object.freeze({
+  memo: "jn-card-memo",
+  document: "jn-card-document",
+  target: "jn-card-wanted"
+});
+
+// Nominal creation widths; inline manually-sized cards override these.
+const CREATE_WIDTHS = Object.freeze({
+  note: 120,
+  memo: 360,
+  document: 248,
+  target: 252,
+  location: 245
+});
 
 /**
  * The note canvas: pan/zoom viewport, absolutely-positioned cards, free text labels, and now
@@ -174,7 +190,8 @@ export default class JournalCanvas {
 
   #renderCard(note, stamp) {
     const cardData = this.layout.cards?.[note._id] ?? { x: 0, y: 0, rotation: 0 };
-    const styleDef = CARD_STYLES[cardStyleKey(note.system.style)];
+    const presentation = resolvePresentation(note);
+    const mode = classifyNote(note).mode;
     let el = this.cardEls.get(note._id);
     if (!el) {
       el = document.createElement("div");
@@ -182,14 +199,18 @@ export default class JournalCanvas {
       el.dataset.id = note._id;
       el.innerHTML = `
         <img class="jn-card-background" alt="" draggable="false" referrerpolicy="no-referrer" hidden>
-        <i class="jn-card-badge"></i>
         <button type="button" class="jn-card-image-button">
           <i class="fa-solid fa-camera" aria-hidden="true"></i><span aria-hidden="true">+</span>
         </button>
-        <strong class="jn-card-wanted-heading" data-card-text="heading" tabindex="0"></strong>
-        <div class="jn-card-image" hidden><img alt="" draggable="false" referrerpolicy="no-referrer"></div>
-        <h3 class="jn-card-title" data-card-text="title" tabindex="0"></h3>
-        <div class="jn-card-excerpt"></div>
+        <div class="jn-card-main">
+          <strong class="jn-card-wanted-heading" data-card-text="heading" tabindex="0" hidden></strong>
+          <h3 class="jn-card-title" data-card-text="label" tabindex="0" hidden></h3>
+          <div class="jn-card-body">
+            <div class="jn-card-image" hidden><img alt="" draggable="false" referrerpolicy="no-referrer"></div>
+            <div class="jn-card-text"><div class="jn-card-excerpt"></div></div>
+          </div>
+        </div>
+        <span class="jn-card-signature" aria-hidden="true"></span>
         <span class="jn-card-status" hidden></span>
         <div class="jn-card-stamps"></div>
         <span class="jn-card-lock-pill">&#9998;</span>
@@ -200,7 +221,14 @@ export default class JournalCanvas {
       this.cardResizeObserver?.observe(el, { box: "border-box" });
     }
 
-    el.className = `jn-card ${styleDef.cssClass}`;
+    const styleClass = STYLE_CLASSES[presentation.extendedStyle] ?? STYLE_CLASSES.memo;
+    el.className = [
+      "jn-card", styleClass,
+      mode === "compact" ? "jn-compact" : "jn-extended",
+      `jn-font-${presentation.font}`,
+      `jn-pic-${presentation.pictureLayout}`,
+      presentation.torn ? "jn-torn" : ""
+    ].filter(Boolean).join(" ");
     el.classList.toggle("jn-secret", !!note.secret);
     el.classList.toggle("jn-kind-location", note.system.kind === "location");
     el.classList.toggle("jn-hint", !!note.system.hint);
@@ -211,22 +239,27 @@ export default class JournalCanvas {
     el.style.left = `${cardData.x}px`;
     el.style.top = `${cardData.y}px`;
     el.style.setProperty("--jn-rotation", `${cardData.rotation ?? 0}deg`);
-    if (cardData.width) { el.style.width = `${cardData.width}px`; el.classList.add("jn-sized"); }
-    else { el.style.width = ""; el.classList.remove("jn-sized"); }
-    el.style.minHeight = cardData.height ? `${cardData.height}px` : "";
+    // Manual sizes live in the layout card; calculated compact/extended sizes live only in CSS.
+    const manualWidth = Number.isFinite(cardData.width) && cardData.width > 0;
+    const manualHeight = Number.isFinite(cardData.height) && cardData.height > 0;
+    el.classList.toggle("jn-sized", manualWidth || manualHeight);
+    el.style.width = manualWidth ? `${cardData.width}px` : "";
+    el.style.minHeight = manualHeight ? `${cardData.height}px` : "";
 
     const author = game.users.get(note.system.authorId);
     el.style.setProperty("--jn-author-color", author?.color ?? "#8d8d97");
-    const badge = el.querySelector(".jn-card-badge");
-    badge.textContent = (author?.name ?? "?")[0].toUpperCase();
+    const signature = el.querySelector(".jn-card-signature");
+    const initial = (author?.name ?? "?").trim().charAt(0).toUpperCase() || "?";
+    signature.textContent = initial;
+    signature.title = author?.name ?? "";
 
     const image = el.querySelector(".jn-card-image");
     const portrait = image.querySelector("img");
     const imageButton = el.querySelector(".jn-card-image-button");
-    const isTarget = styleDef.cssClass === "jn-card-wanted";
     const source = noteImageSource(note.system.image);
-    const imageAnchor = el.querySelector(isTarget ? ".jn-card-wanted-heading" : ".jn-card-excerpt");
-    if (image.previousElementSibling !== imageAnchor) imageAnchor.after(image);
+    // Only an explicit image earns the two-column picture layout; otherwise left/right would
+    // leave an empty column behind.
+    el.classList.toggle("jn-has-picture", !!source);
     const label = t(source ? "JN.Editor.ChangeImage" : "JN.Editor.SetImage");
     imageButton.title = label;
     imageButton.setAttribute("aria-label", label);
@@ -239,10 +272,20 @@ export default class JournalCanvas {
     if (backgroundSource && background.getAttribute("src") !== backgroundSource) background.setAttribute("src", backgroundSource);
     else if (!backgroundSource) background.removeAttribute("src");
 
+    // The optional label is the only visible identity on a card. The internal Foundry name is
+    // never rendered in normal view; an empty label simply hides the slot.
     const title = el.querySelector(".jn-card-title");
     const heading = el.querySelector(".jn-card-wanted-heading");
-    if (this.inlineText?.field !== title) title.textContent = note.name;
-    if (this.inlineText?.field !== heading) heading.textContent = note.system.targetHeading || t("JN.Style.Wanted");
+    const text = presentation.label.trim();
+    if (this.inlineText?.field !== title) {
+      title.textContent = text;
+      title.hidden = !text;
+    }
+    const isTarget = presentation.extendedStyle === "target";
+    heading.hidden = !isTarget;
+    if (this.inlineText?.field !== heading) {
+      heading.textContent = presentation.heading.trim() || t("JN.Style.Wanted");
+    }
     this.#renderCardBlocks(el.querySelector(".jn-card-excerpt"), note.system.blocks ?? []);
     const stampSlot = el.querySelector(".jn-card-stamps");
     if (stamp) el.dataset.sealCorner = stamp.dataset.sealCorner;
@@ -312,14 +355,20 @@ export default class JournalCanvas {
     if (!note || this.inlineText?.field === field) return;
     this.finishInlineText();
     const kind = field.dataset.cardText;
+    // The editor owns the internal Foundry name; the card only edits the optional label and
+    // the target heading.
+    if (kind !== "label" && kind !== "heading") return;
+    const presentation = resolvePresentation(note);
+    const current = kind === "label" ? presentation.label : presentation.heading;
     const input = document.createElement("input");
     input.type = "text";
     input.className = "jn-card-text-input";
-    input.maxLength = kind === "heading" ? 80 : 200;
-    input.value = this.callbacks.onReadCardText?.(id, kind) ?? field.textContent;
+    input.maxLength = kind === "label" ? 200 : 80;
+    input.value = this.callbacks.onReadCardText?.(id, kind) ?? current;
     if (kind === "heading") input.placeholder = t("JN.Style.Wanted");
-    input.setAttribute("aria-label", t(kind === "heading" ? "JN.Editor.TargetHeading" : "JN.Editor.RenameTitle"));
+    input.setAttribute("aria-label", t(kind === "heading" ? "JN.Editor.TargetHeading" : "JN.Editor.Label"));
     this.inlineText = { field, input, id, kind };
+    field.hidden = false;
     field.replaceChildren(input);
     input.onblur = () => this.finishInlineText();
     input.addEventListener("keydown", event => {
@@ -347,7 +396,14 @@ export default class JournalCanvas {
     input.onblur = null;
     const note = this.notes.find(item => item._id === id);
     if (!note) return;
-    field.textContent = kind === "title" ? note.name : note.system.targetHeading || t("JN.Style.Wanted");
+    const presentation = resolvePresentation(note);
+    if (kind === "label") {
+      const value = presentation.label.trim();
+      field.textContent = value;
+      field.hidden = !value;
+    } else {
+      field.textContent = presentation.heading.trim() || t("JN.Style.Wanted");
+    }
     if (save) this.callbacks.onSaveCardText?.(id, kind, input.value.trim());
   }
 
@@ -927,7 +983,8 @@ export default class JournalCanvas {
     } else this.contextMenu.innerHTML = `
       <button type="button" data-action="note">${t("JN.Context.NewNote")}</button>
       <button type="button" data-action="memo">${t("JN.Style.Memo")}</button>
-      <button type="button" data-action="wanted">${t("JN.Style.Wanted")}</button>
+      <button type="button" data-action="document">${t("JN.Style.Document")}</button>
+      <button type="button" data-action="target">${t("JN.Style.Wanted")}</button>
       <button type="button" data-action="location">${t("JN.Context.NewLocation")}</button>
       <button type="button" data-action="label">${t("JN.Context.NewLabel")}</button>
       ${gmItems}
@@ -989,12 +1046,21 @@ export default class JournalCanvas {
         if (button.dataset.stamp) this.callbacks.onAttachStamp?.(noteId, button.dataset.stamp, color, corner);
         else if (action === "remove-label") this.callbacks.onRemoveLabel?.(labelId);
         else if (action === "edit-label") this.callbacks.onEditLabel(labelId);
-        else if (action === "note") this.callbacks.onCreateNoteAt(point.x - 95, point.y - 35, { kind: "note" });
-        else if (action === "memo") this.callbacks.onCreateNoteAt(point.x - CARD_STYLES.memo.defaultWidth / 2, point.y - 35, { style: "memo" });
-        else if (action === "wanted") this.callbacks.onCreateNoteAt(point.x - 125, point.y - 35, { style: "wanted" });
-        else if (action === "location") this.callbacks.onCreateNoteAt(point.x - 122, point.y - 45, { kind: "location" });
+        else if (action === "note") this.callbacks.onCreateNoteAt(point.x - CREATE_WIDTHS.note / 2, point.y - 30, {
+          kind: "note", presentation: { extendedStyle: "memo", forceExtended: false }
+        });
+        else if (action === "memo") this.callbacks.onCreateNoteAt(point.x - CREATE_WIDTHS.memo / 2, point.y - 40, {
+          kind: "note", presentation: { extendedStyle: "memo", forceExtended: true }
+        });
+        else if (action === "document") this.callbacks.onCreateNoteAt(point.x - CREATE_WIDTHS.document / 2, point.y - 40, {
+          kind: "note", presentation: { extendedStyle: "document", forceExtended: true }
+        });
+        else if (action === "target") this.callbacks.onCreateNoteAt(point.x - CREATE_WIDTHS.target / 2, point.y - 40, {
+          kind: "note", presentation: { extendedStyle: "target", forceExtended: true }
+        });
+        else if (action === "location") this.callbacks.onCreateNoteAt(point.x - CREATE_WIDTHS.location / 2, point.y - 45, { kind: "location" });
         else if (action === "label") this.callbacks.onAddLabelAt(point.x, point.y);
-        else if (action === "secret-note") this.callbacks.onCreateNoteAt(point.x - 95, point.y - 35, { kind: "note", secret: true });
+        else if (action === "secret-note") this.callbacks.onCreateNoteAt(point.x - CREATE_WIDTHS.note / 2, point.y - 30, { kind: "note", secret: true });
         else if (action === "gm-label") this.callbacks.onAddGmLabelAt?.(point.x, point.y);
         this.#closeContextMenu();
       });

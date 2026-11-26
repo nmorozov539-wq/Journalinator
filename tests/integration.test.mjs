@@ -21,6 +21,8 @@ const { notesStore } = await import("../scripts/store/notes-store.mjs");
 const secrets = await import("../scripts/secrets/secret-actions.mjs");
 const { registerSocket, requestWrite } = await import("../scripts/socket.mjs");
 const { resolvePresentation } = await import("../scripts/presentation.mjs");
+const { noteMatchesQuery, noteSearchLabel, noteFilterKey } = await import("../scripts/app/note-search.mjs");
+const { noteCreationPresentation, noteCreationStyle } = await import("../scripts/app/note-dialog.mjs");
 registerSocket();
 
 const PASS = "correct horse battery staple";
@@ -582,6 +584,160 @@ test("presentation, label and attachment handlers roundtrip and reject invalid b
   await fromPlayer({ type: "setNoteLabel", noteId: note.id, label: longLabel });
   assert.equal(note.system.label.length, 200);
   assert.equal(note.name, originalName);
+});
+
+test("presentation force/font/layout roundtrip keeps the internal name separate from the label", async () => {
+  const note = sharedByName("Presentation Fixture");
+  const originalName = note.name;
+
+  await fromPlayer({ type: "setNoteLabel", noteId: note.id, label: "  Selected label  " });
+  await fromPlayer({
+    type: "setNotePresentation", noteIds: [note.id],
+    fields: {
+      extendedStyle: "memo", forceExtended: true, font: "display",
+      pictureLayout: "below", torn: true
+    }
+  });
+  assert.equal(note.system.label, "Selected label");
+  assert.equal(note.name, originalName, "label edits never rename the Foundry page");
+  assert.equal(note.system.presentation.extendedStyle, "memo");
+  assert.equal(note.system.presentation.forceExtended, true);
+  assert.equal(note.system.presentation.font, "display");
+  assert.equal(note.system.presentation.pictureLayout, "below");
+  assert.equal(note.system.presentation.torn, true);
+});
+
+test("creation presets force extended while a plain note stays automatic", async () => {
+  assert.deepEqual(noteCreationPresentation({}), {
+    extendedStyle: "memo", forceExtended: false
+  });
+  assert.deepEqual(noteCreationPresentation({ style: "memo" }), {
+    extendedStyle: "memo", forceExtended: true
+  });
+  assert.deepEqual(noteCreationPresentation({ style: "document" }), {
+    extendedStyle: "document", forceExtended: true
+  });
+  assert.deepEqual(noteCreationPresentation({ style: "wanted" }), {
+    extendedStyle: "target", forceExtended: true
+  });
+  assert.deepEqual(noteCreationPresentation({ kind: "location" }), {
+    extendedStyle: "document", forceExtended: true
+  });
+  assert.deepEqual(noteCreationPresentation({
+    style: "memo", presentation: { extendedStyle: "memo", forceExtended: false }
+  }), { extendedStyle: "memo", forceExtended: false }, "an explicit automatic preset can override the style default");
+  assert.equal(noteCreationStyle({}), "memo");
+  assert.equal(noteCreationStyle({ style: "wanted" }), "wanted");
+  assert.equal(noteCreationStyle({ kind: "location" }), "document");
+
+  await fromPlayer({ type: "createNote", title: "Automatic Creation", x: 900, y: 0 });
+  const automatic = sharedByName("Automatic Creation");
+  assert.equal(automatic.system.style, "memo", "the plain new note uses the Memo storage default");
+  assert.equal(automatic.system.label, "");
+  assert.equal(automatic.system.presentation.extendedStyle, "memo");
+  assert.equal(automatic.system.presentation.forceExtended, false);
+
+  await fromPlayer({
+    type: "createNote", title: "Labeled Target Creation", style: "wanted",
+    label: "Bounty board",
+    presentation: { extendedStyle: "target", forceExtended: true }
+  });
+  const preset = sharedByName("Labeled Target Creation");
+  assert.equal(preset.name, "Labeled Target Creation", "the internal name remains the lookup identity");
+  assert.equal(preset.system.label, "Bounty board");
+  assert.equal(preset.system.style, "wanted");
+  assert.equal(preset.system.presentation.extendedStyle, "target");
+  assert.equal(preset.system.presentation.forceExtended, true);
+
+  await fromPlayer({
+    type: "createNote", title: "Document Creation", style: "document",
+    label: "Dossier",
+    presentation: {
+      extendedStyle: "document", forceExtended: true, font: "serif",
+      pictureLayout: "right", torn: true
+    }
+  });
+  const document = sharedByName("Document Creation");
+  assert.equal(document.system.presentation.extendedStyle, "document");
+  assert.equal(document.system.presentation.forceExtended, true);
+  assert.equal(document.system.presentation.font, "serif");
+  assert.equal(document.system.presentation.pictureLayout, "right");
+  assert.equal(document.system.presentation.torn, true);
+});
+
+test("search uses labels and visible text but never internal names or hidden blocks", async () => {
+  await fromPlayer({ type: "createNote", title: "Search Fixture", label: "Harbor Label", x: 1050, y: 0 });
+  const page = sharedByName("Search Fixture");
+  const blockId = page.system.blocks[0].blockId;
+  await fromPlayer({ type: "requestLock", noteId: page.id, blockId });
+  await fromPlayer({
+    type: "saveBlock", noteId: page.id, blockId, text: "A visible lighthouse stands here."
+  });
+  await fromPlayer({ type: "releaseLock", noteId: page.id, blockId });
+  const hiddenId = await secrets.addHiddenBlock(page.id, blockId);
+  await secrets.saveSecretBlock(page.id, hiddenId, "The hidden cellar phrase.");
+
+  const merged = notesStore.getNote(page.id);
+  assert.equal(noteMatchesQuery(merged, "harbor label"), true, "the optional label is searchable");
+  assert.equal(noteMatchesQuery(merged, "visible lighthouse"), true, "visible Markdown text is searchable");
+  assert.equal(noteMatchesQuery(merged, "player", player.name), true, "the public author name is searchable");
+  assert.equal(noteMatchesQuery(merged, "hidden cellar"), false, "hidden blocks never enter search");
+  assert.equal(noteMatchesQuery(merged, "search fixture"), false, "the internal generated name is not searchable");
+  assert.equal(noteSearchLabel(merged), "Harbor Label");
+
+  await requestWrite({ type: "setNoteLabel", noteId: page.id, label: "" });
+  assert.deepEqual(
+    noteSearchLabel(notesStore.getNote(page.id)).startsWith("A visible lighthouse"),
+    true,
+    "unlabelled results use a deterministic visible excerpt"
+  );
+
+  await requestWrite({ type: "createNote", title: "Blank Search Fixture", x: 1150, y: 0 });
+  const blank = sharedByName("Blank Search Fixture");
+  assert.equal(noteSearchLabel(notesStore.getNote(blank.id)), "Untitled note",
+    "a blank note gets a neutral fallback, not its generated internal name");
+
+  const secretId = await secrets.createSecretNote({ title: "Search Secret", x: 1200, y: 0 });
+  await secrets.setSecretNoteLabel(secretId, "");
+  const secretBlock = vaultStore.data.notes[secretId].blocks[0].blockId;
+  await secrets.saveSecretBlock(secretId, secretBlock, "classified search phrase");
+  const secretView = notesStore.getNote(secretId);
+  assert.equal(noteMatchesQuery(secretView, "classified search phrase"), false,
+    "secret block text stays out of search");
+  assert.equal(noteMatchesQuery(secretView, "Search Secret"), false,
+    "the internal secret title stays out of search");
+  assert.equal(noteSearchLabel(secretView), "Untitled note");
+  await secrets.deleteSecretNote(secretId);
+
+  // Search sees the resolved heading, but never invisible URLs or HTML comments.
+  await fromPlayer({
+    type: "createNote", title: "Search Markdown Fixture", label: "Markdown Label", x: 1250, y: 0
+  });
+  const markdownPage = sharedByName("Search Markdown Fixture");
+  const markdownBlock = markdownPage.system.blocks[0].blockId;
+  await fromPlayer({ type: "requestLock", noteId: markdownPage.id, blockId: markdownBlock });
+  await fromPlayer({
+    type: "saveBlock", noteId: markdownPage.id, blockId: markdownBlock,
+    text: "See [the harbor](https://hidden.example/secretpath) and [the dock](/worlds/hidden/relative-path) <!-- hidden comment -->"
+  });
+  await fromPlayer({ type: "releaseLock", noteId: markdownPage.id, blockId: markdownBlock });
+  await requestWrite({
+    type: "setNotePresentation", noteIds: [markdownPage.id], fields: { heading: "Hidden Heading" }
+  });
+  const markdownView = notesStore.getNote(markdownPage.id);
+  assert.equal(noteMatchesQuery(markdownView, "the harbor"), true, "visible link text is searchable");
+  assert.equal(noteMatchesQuery(markdownView, "the dock"), true, "relative link labels stay searchable");
+  assert.equal(noteMatchesQuery(markdownView, "hidden heading"), true, "the resolved heading is searchable");
+  assert.equal(noteMatchesQuery(markdownView, "secretpath"), false, "raw link URLs never match");
+  assert.equal(noteMatchesQuery(markdownView, "relative-path"), false, "relative link destinations never match");
+  assert.equal(noteMatchesQuery(markdownView, "hidden comment"), false, "HTML comments never match");
+  await requestWrite({ type: "setNoteLabel", noteId: markdownPage.id, label: "" });
+  assert.equal(noteSearchLabel(notesStore.getNote(markdownPage.id)), "Hidden Heading",
+    "the excerpt fallback uses the resolved heading before visible text");
+
+  assert.equal(noteFilterKey(sharedByName("New Location")), "location");
+  assert.equal(noteFilterKey(sharedByName("Labeled Target Creation")), "target");
+  assert.equal(noteFilterKey(sharedByName("Automatic Creation")), "memo");
 });
 
 test("legacy setters keep presentation, heading, rename label and schema in sync", async () => {

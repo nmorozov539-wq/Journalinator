@@ -5,7 +5,8 @@ import NoteEditor from "./editor.mjs";
 import PrivateWorkspace from "./private-workspace.mjs";
 import { openPrivateAdmin } from "./private-admin.mjs";
 import { privateStore } from "../store/private-store.mjs";
-import { defaultNoteTitle, promptNewNote } from "./note-dialog.mjs";
+import { defaultNoteTitle, noteCreationPresentation, noteCreationStyle, promptNewNote } from "./note-dialog.mjs";
+import { noteFilterKey, noteMatchesQuery, notePresentationLabelKey, noteSearchLabel } from "./note-search.mjs";
 import { computeJournalStats, deriveSessions } from "../stats.mjs";
 import { CARD_STYLES, cardStyleKey } from "../styles/registry.mjs";
 import { applyTheme, getTheme, listThemes } from "../styles/themes.mjs";
@@ -16,6 +17,7 @@ import { openVaultDialog } from "../secrets/vault-ui.mjs";
 import * as secrets from "../secrets/secret-actions.mjs";
 import { t } from "../i18n.mjs";
 import { stripSecretPrefix } from "../secrets/model.mjs";
+import { resolvePresentation } from "../presentation.mjs";
 import { resolveActorStatus } from "../actor-status.mjs";
 
 /** Runs a GM vault action and surfaces failures (e.g. the vault was locked meanwhile). */
@@ -49,6 +51,14 @@ function toolbarButton(className, icon, label, disabled = false) {
 }
 
 const { ApplicationV2 } = foundry.applications.api;
+
+/** Filter keys are presentation semantics, not legacy style storage keys. */
+const NOTE_FILTERS = Object.freeze([
+  ["memo", "JN.Style.Memo"],
+  ["document", "JN.Style.Document"],
+  ["target", "JN.Style.Target"],
+  ["location", "JN.Kind.Location"]
+]);
 
 /**
  * Fullscreen app: a top bar (title, quick switcher, + New Note, + Label, Trash, Stats, preview
@@ -104,11 +114,15 @@ export default class JournalApp extends ApplicationV2 {
     onReadCardText: (id, kind) => {
       const note = notesStore.getNote(id);
       if (!note) return "";
-      if (kind === "heading") return note.system.targetHeading ?? "";
+      if (kind === "heading") return resolvePresentation(note).heading;
+      if (kind === "label") return note.system.label ?? "";
       return note.secret ? stripSecretPrefix(note.name) : note.name;
     },
-    onSaveCardText: (id, kind, value) => kind === "heading"
-      ? this.#editor.setTargetHeading(id, value) : this.#editor.renameNote(id, value),
+    onSaveCardText: (id, kind, value) => {
+      if (kind === "heading") return this.#editor.setTargetHeading(id, value);
+      if (kind === "label") return this.#editor.setNoteLabel(id, value);
+      return this.#editor.renameNote(id, value);
+    },
     onEditCardBlock: (id, blockId, slot) => {
       this.#editor.editBoardBlock(id, blockId, slot);
     },
@@ -275,17 +289,43 @@ export default class JournalApp extends ApplicationV2 {
     await requestWrite({ type: "linkActor", noteId, actorRef: result });
   }
 
-  async #createNoteAt({ x, y, secret = false, kind = "note", style, initialTitle, immediate = false }) {
+  async #createNoteAt({
+    x, y, secret = false, kind = "note", style, initialTitle, immediate = false, presentation, label = ""
+  }) {
     if (!game.users.activeGM) {
       ui.notifications?.warn(t("JN.TopBar.Offline"));
       return;
     }
+    const requestedPresentation = noteCreationPresentation({ kind, style, presentation });
+    const requestedStyle = noteCreationStyle({ kind, style, presentation });
+    const titleStyle = kind === "location" ? "document"
+      : (requestedPresentation.forceExtended ? requestedPresentation.extendedStyle : "auto");
     const note = immediate
-      ? { title: defaultNoteTitle(kind, style), style, autoTitle: true }
+      ? {
+        title: defaultNoteTitle(kind, titleStyle), style: requestedStyle,
+        autoTitle: true, presentation: requestedPresentation, label
+      }
       : await promptNewNote(t(secret ? "JN.Prompt.NewSecretNote" : "JN.Prompt.NewNote"), { kind, style, initialTitle });
     if (!note) return;
-    if (secret) return gm(async () => this.#select(await secrets.createSecretNote({ ...note, kind, x, y })));
-    return requestWrite({ type: "createNote", ...note, kind, x, y });
+
+    const fields = noteCreationPresentation({ kind, style: note.style, presentation: note.presentation });
+    const finalStyle = noteCreationStyle({ kind, style: note.style, presentation: note.presentation });
+    const finalLabel = typeof note.label === "string" ? note.label : "";
+    if (secret) {
+      return gm(async () => {
+        const noteId = await secrets.createSecretNote({
+          title: note.title, kind, x, y, style: finalStyle
+        });
+        if (!noteId) return;
+        await secrets.setSecretNotePresentation(noteId, fields);
+        await secrets.setSecretNoteLabel(noteId, finalLabel);
+        this.#select(noteId);
+      });
+    }
+    return requestWrite({
+      type: "createNote", title: note.title, style: finalStyle, kind, x, y,
+      autoTitle: note.autoTitle === true, presentation: fields, label: finalLabel
+    });
   }
 
   #copySelectedNotes() {
@@ -507,16 +547,15 @@ export default class JournalApp extends ApplicationV2 {
   #matchesQuery(note, q) {
     if (!q) return true;
     const author = game.users.get(note.system.authorId)?.name ?? "";
-    const haystack = `${note.name} ${note.system.blocks.map(b => b.text).join(" ")} ${author}`.toLowerCase();
-    return haystack.includes(q);
+    return noteMatchesQuery(note, q, author);
   }
 
   #matchesFilters(note) {
     if (this.#view === "private") {
-      return !this.#filterStyles.size || this.#filterStyles.has(cardStyleKey(note.system.style));
+      return !this.#filterStyles.size || this.#filterStyles.has(noteFilterKey(note));
     }
     if (this.#filterAuthors.size && !this.#filterAuthors.has(note.system.authorId)) return false;
-    if (this.#filterStyles.size && !this.#filterStyles.has(cardStyleKey(note.system.style))) return false;
+    if (this.#filterStyles.size && !this.#filterStyles.has(noteFilterKey(note))) return false;
     return true;
   }
 
@@ -600,7 +639,7 @@ export default class JournalApp extends ApplicationV2 {
             ${context.authors.length ? `<div class="jn-menu-heading">${t("JN.Filter.Authors")}</div>
               ${filters(context.authors.map(([id, u]) => [id, u.name, u.color]), this.#filterAuthors, "author")}` : ""}
             <div class="jn-menu-heading">${t("JN.Filter.Styles")}</div>
-            ${filters(Object.entries(CARD_STYLES).map(([id, style]) => [id, t(style.labelKey)]), this.#filterStyles, "style")}
+            ${filters(NOTE_FILTERS.map(([id, labelKey]) => [id, t(labelKey)]), this.#filterStyles, "style")}
           </div>
         </details>
         ${themePicker}
@@ -620,7 +659,7 @@ export default class JournalApp extends ApplicationV2 {
           <summary class="jn-toolbar-icon" ${tooltipAttrs(t("JN.Filter.Title"))}><i class="fa-solid fa-filter" aria-hidden="true"></i></summary>
           <div class="jn-toolbar-panel">
             <div class="jn-menu-heading">${t("JN.Filter.Styles")}</div>
-            ${filters(Object.entries(CARD_STYLES).map(([id, style]) => [id, t(style.labelKey)]), this.#filterStyles, "style")}
+            ${filters(NOTE_FILTERS.map(([id, labelKey]) => [id, t(labelKey)]), this.#filterStyles, "style")}
           </div>
         </details>
         ${themePicker}
@@ -953,8 +992,8 @@ export default class JournalApp extends ApplicationV2 {
       list.map((n, i) => `
         <div class="jn-switcher-item${i === this.#switcherHighlight ? " hi" : ""}" data-id="${n._id}">
           <span class="jn-dot" style="background:${game.users.get(n.system.authorId)?.color ?? "#8d8d97"}"></span>
-          <b>${foundry.utils.escapeHTML(n.name)}</b>
-          <small>${n.secret ? t("JN.Switcher.GMOnly") : ""}${t(CARD_STYLES[cardStyleKey(n.system.style)].labelKey)}</small>
+          <b>${foundry.utils.escapeHTML(noteSearchLabel(n))}</b>
+          <small>${n.secret ? t("JN.Switcher.GMOnly") : ""}${t(notePresentationLabelKey(n))}</small>
         </div>`).join("") +
       (offerCreate ? `<div class="jn-switcher-item jn-switcher-create${list.length === this.#switcherHighlight ? " hi" : ""}" data-create="1">${t("JN.Switcher.Create", { title: foundry.utils.escapeHTML(q) })}</div>` : "");
     el.style.display = "block";

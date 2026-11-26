@@ -1,14 +1,16 @@
 import JournalCanvas from "./canvas.mjs";
 import PrivateNoteEditor from "./private-editor.mjs";
 import { privateStore, MAX_TITLE_LENGTH } from "../store/private-store.mjs";
-import { CARD_STYLES, cardStyleKey } from "../styles/registry.mjs";
+import { CARD_STYLES } from "../styles/registry.mjs";
 import { linkAnchors, moveThreadPin } from "../card-ports.mjs";
 import { isLinkColor, normalizeLinkColor } from "../link-colors.mjs";
 import {
   LINK_ENDS, LINK_MATERIALS, LINK_PATTERNS, LINK_SLACK, LINK_THICKNESS,
+  NOTE_FONT_KEYS, PICTURE_LAYOUTS, PRESENTATION_STYLES,
   defaultLinkCosmetics, isGeneratedTitle, legacyStylePresentation, resolveAttachment,
   resolvePresentation, sanitizeCardAnchors, stripSecretPrefix
 } from "../presentation.mjs";
+import { noteCreationPresentation, noteCreationStyle } from "./note-dialog.mjs";
 import { attachedStampIds, DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, stampUrl } from "../stamps.mjs";
 import { toggleTaskListItem } from "../markdown.mjs";
 import { t } from "../i18n.mjs";
@@ -36,10 +38,15 @@ export default class PrivateWorkspace {
       onReadCardText: (id, kind) => {
         const note = this.getNote(id);
         if (!note) return "";
-        return kind === "heading" ? note.system.targetHeading : note.name;
+        if (kind === "heading") return note.system.targetHeading;
+        if (kind === "label") return note.system.label ?? "";
+        return note.name;
       },
-      onSaveCardText: (id, kind, value) => this.updateNote(id,
-        kind === "heading" ? { targetHeading: value } : { title: value }),
+      onSaveCardText: (id, kind, value) => {
+        if (kind === "heading") return this.updateNote(id, { targetHeading: value });
+        if (kind === "label") return this.updateNote(id, { label: value });
+        return this.updateNote(id, { title: value });
+      },
       onEditCardBlock: (id, blockId, slot) => this.editor.editBoardBlock(id, blockId, slot),
       onEditCardImage: id => this.editor.editNoteImage(id),
       onEditCardBackground: id => this.editor.editNoteImage(id, true),
@@ -168,10 +175,23 @@ export default class PrivateWorkspace {
     }
   }
 
-  async createNoteAt({ x = 0, y = 0, style = "sticky", kind = "note", title = "", immediate = false } = {}) {
+  async createNoteAt({
+    x = 0, y = 0, style, kind = "note", title = "", immediate = false, presentation, label = ""
+  } = {}) {
     if (!this.page) return null;
     const cards = this.workspace?.layout?.cards ?? {};
-    const { note, card } = privateStore.makeNote({ title, kind, style, x, y, cards });
+    const resolvedStyle = noteCreationStyle({ kind, style, presentation });
+    const fields = noteCreationPresentation({ kind, style, presentation });
+    const { note, card } = privateStore.makeNote({ title, kind, style: resolvedStyle, x, y, cards });
+    const noteLabel = typeof label === "string" ? label : "";
+    const resolved = resolvePresentation({
+      name: note.title,
+      system: { ...note, label: noteLabel, presentation: { ...(note.presentation ?? {}), ...fields } }
+    });
+    const { label: _ignored, ...presentationFields } = resolved;
+    note.label = noteLabel;
+    note.presentation = presentationFields;
+    note.schemaVersion = 1;
     const ok = await this.#save(data => {
       data.notes[note.id] = note;
       data.layout.cards[note.id] = card;
@@ -193,6 +213,7 @@ export default class PrivateWorkspace {
       const { label: resolvedLabel, ...presentationFields } = resolved;
       let label = resolvedLabel;
       let presentationTouched = false;
+      let labelTouched = false;
       const presentation = { ...presentationFields };
 
       if (typeof patch.title === "string") {
@@ -203,6 +224,21 @@ export default class PrivateWorkspace {
           if (!label || label === oldBare) label = stripSecretPrefix(title).trim();
           presentationTouched = true;
         }
+      }
+      if (typeof patch.label === "string") {
+        label = patch.label.slice(0, MAX_TITLE_LENGTH);
+        labelTouched = true;
+      }
+      if (patch.presentation && typeof patch.presentation === "object") {
+        const fields = patch.presentation;
+        if (PRESENTATION_STYLES.includes(fields.extendedStyle)) presentation.extendedStyle = fields.extendedStyle;
+        if (NOTE_FONT_KEYS.includes(fields.font)) presentation.font = fields.font;
+        if (PICTURE_LAYOUTS.includes(fields.pictureLayout)) presentation.pictureLayout = fields.pictureLayout;
+        if (typeof fields.forceExtended === "boolean") presentation.forceExtended = fields.forceExtended;
+        if (typeof fields.torn === "boolean") presentation.torn = fields.torn;
+        if (typeof fields.heading === "string") presentation.heading = fields.heading.slice(0, 80);
+        if (typeof fields.nameGenerated === "boolean") presentation.nameGenerated = fields.nameGenerated;
+        presentationTouched = true;
       }
       if (typeof patch.targetHeading === "string") {
         note.targetHeading = patch.targetHeading.slice(0, 80);
@@ -215,7 +251,7 @@ export default class PrivateWorkspace {
         Object.assign(presentation, legacyStylePresentation(patch.style));
         presentationTouched = true;
       }
-      if (presentationTouched) {
+      if (presentationTouched || labelTouched) {
         note.presentation = presentation;
         note.label = label.slice(0, MAX_TITLE_LENGTH);
         note.schemaVersion = 1;
@@ -487,8 +523,15 @@ export default class PrivateWorkspace {
       total + note.blocks.reduce((sum, block) => sum + block.text.length, 0), 0);
     const trashed = this.workspace?.trash?.length ?? 0;
     const styles = {};
+    const styleKey = note => {
+      if (note.kind === "location") return "location";
+      return resolvePresentation({ name: note.title, system: note }).extendedStyle;
+    };
+    const styleLabel = key => key === "location" ? "JN.Kind.Location"
+      : key === "document" ? "JN.Style.Document"
+        : key === "target" ? "JN.Style.Target" : "JN.Style.Memo";
     for (const note of notes) {
-      const style = cardStyleKey(note.style);
+      const style = styleKey(note);
       styles[style] = (styles[style] ?? 0) + 1;
     }
     await DialogV2.wait({
@@ -499,7 +542,7 @@ export default class PrivateWorkspace {
         <p>${t("JN.Private.StatsTrash", { count: trashed })}</p>
         <div class="journalinator-meta">${t("JN.Private.StatsStyles")}</div>
         ${Object.entries(styles).map(([style, count]) =>
-          `<div class="jn-stat-bar"><span>${esc(t(CARD_STYLES[style]?.labelKey ?? "JN.Style.Sticky"))}</span><em>${count}</em></div>`
+          `<div class="jn-stat-bar"><span>${esc(t(styleLabel(style)))}</span><em>${count}</em></div>`
         ).join("") || `<p class="journalinator-empty">${t("JN.Common.NoneYet")}</p>`}`,
       buttons: [{ action: "close", label: t("JN.Common.Close"), default: true }],
       rejectClose: false

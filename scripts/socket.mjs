@@ -377,8 +377,9 @@ async function createNotePage(shared, {
   title, kind, style, x, y, authorId, autoTitle = false, presentation, label, attachment, targetHeading
 }) {
   kind = kind === "location" ? "location" : "note";
-  const defaultStyle = kind === "location" ? "document" : "sticky";
-  style = typeof style === "string" && Object.hasOwn(CARD_STYLES, style) ? style : defaultStyle;
+  const styleProvided = typeof style === "string" && Object.hasOwn(CARD_STYLES, style);
+  const defaultStyle = kind === "location" ? "document" : "memo";
+  style = styleProvided ? style : defaultStyle;
   const defaultTitle = kind === "location" ? t("JN.Note.NewLocationTitle") : t("JN.Note.NewNoteTitle");
   const typedTitle = (title ?? "").trim();
   const requestedTitle = typedTitle || defaultTitle;
@@ -401,15 +402,21 @@ async function createNotePage(shared, {
   const spot = findFreeSpot(existingCards, cardWidth, CARD_STYLES[style]?.defaultHeight ?? 90, nearX, nearY);
 
   // New records start at schema 1, but keep legacy `style`/`targetHeading` so old editor calls and
-  // wikilink/rename logic keep working. The optional presentation patch can only use known keys.
+  // wikilink/rename logic keep working. A plain new note defaults to automatic Memo (force false);
+  // an explicit style is a creation preset and stays extended. Location is always Document/extended.
+  const baseStyle = styleProvided ? style : "sticky";
   const presentationPatch = sanitizePresentationFields(presentation) ?? {};
   const nextPresentation = {
-    ...legacyPresentation({ style, targetHeading }),
+    ...legacyPresentation({ style: baseStyle, targetHeading }),
     ...presentationPatch,
     nameGenerated: "nameGenerated" in presentationPatch
       ? presentationPatch.nameGenerated
       : (autoTitle || !typedTitle)
   };
+  if (kind === "location") {
+    nextPresentation.extendedStyle = "document";
+    nextPresentation.forceExtended = true;
+  }
   const nextLabel = typeof label === "string" ? label.trim().slice(0, MAX_LABEL_LENGTH) : "";
   const nextAttachment = resolveAttachment({ system: { attachment } });
 

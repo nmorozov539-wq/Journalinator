@@ -96,3 +96,18 @@ Delivered:
 - Tests: 200 pass / 0 fail; `npm run check` pass.
 
 Known deferred: destructive main-pin disable/redistribution is Phase 5; route A/B authoring is Phase 6. Vault migration is lazy (persists on next vault write).
+
+### Phase 2 — adaptive text, rendering, creation, search
+
+Implementation agents: `ses_de7edb7a3ffeHZ40wtmVyYOFEs` (card renderer), `ses_de7edb7a3ffdPffQGpfqrp7tno` (editor/creation/search), fixes `ses_de7d4315bffepQznMQZRsTQPCD`.
+Validation: `ses_de7dfc251ffebCMFu8UyshZpfY`, re-check `ses_de7cbc9b1ffez0rqlSYl4xyhnJ` (plus coordinator hardening).
+
+Delivered:
+- Universal card DOM: optional label only when populated (internal name never shown), target heading, explicit image with above/below/left/right layout, inline Markdown order preserved, author-initial signature, no author stripe/badge. Compact is content-sized (90–220 px, wraps); extended widths memo 360/document 248/target 252; manual size overrides compact cap; no calculated size writes.
+- Classifier: uses Showdown-rendered structure when available, with a conservative line-based fallback. Hidden blocks excluded; code/comments/reference definitions/escaped hashes never promote; headings/inline images/tables/code/complex/overlong content promote; `forceExtended` only override.
+- Editor: optional label, Auto/Memo/Document/Target + Location, font, picture layout, force extended, torn data, Target heading; shared/private/secret save paths.
+- Creation: Auto/Memo/Document/Target (+ Location/Label) with presets forcing extended; new notes default Memo/auto; legacy Sticky/Torn gone from UI.
+- Search: label + visible text + heading + public author; hidden/secret text and internal names excluded; deterministic excerpt/neutral fallback; filters Memo/Document/Target/Location.
+- Tests: **226 pass / 0 fail**; `npm run check` pass. Browser geometry checked manually via /tmp probes for picture layout and compact resize.
+
+Deferred: torn artwork is Phase 3 (data/class already present); real resize gesture geometry remains a manual Foundry check.

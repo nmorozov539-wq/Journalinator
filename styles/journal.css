@@ -813,7 +813,6 @@
 .jn-card-stamps:empty { display: none; }
 .jn-card[data-seal-corner^="top-"] .jn-card-stamps { top: -12px; bottom: auto; }
 .jn-card[data-seal-corner$="-left"] .jn-card-stamps { left: -12px; right: auto; }
-.jn-card[data-seal-corner="top-right"] .jn-card-badge { right: 34px; }
 .jn-card[data-seal-corner="top-right"] .jn-card-title { padding-right: 42px; }
 .jn-card[data-seal-corner="top-right"] .jn-card-lock-pill { right: 56px; }
 .jn-card.jn-being-edited[data-seal-corner="top-right"] .jn-card-title { padding-right: 70px; }
@@ -892,6 +891,7 @@
   --jn-stripe: 3px;
   --jn-rule: var(--jn-line);
   --jn-rule-width: 0px;
+  --jn-card-font: var(--jn-font-serif);
   --jn-title-font: var(--jn-ui-font);
   --jn-title-size: 14px;
   --jn-title-weight: 600;
@@ -908,12 +908,15 @@
   --jn-body-size: 11.5px;
   --jn-body-color: var(--jn-muted);
   --jn-align: left;
+  --jn-font-serif: Georgia, "Times New Roman", "PT Serif", serif;
+  --jn-font-hand: "Segoe Script", "Bradley Hand", "Comic Sans MS", "Caveat", cursive;
+  --jn-font-display: "Palatino Linotype", "Book Antiqua", Palatino, Georgia, serif;
   position: absolute;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
   width: 190px;
-  padding: 10px 12px 10px 14px;
+  padding: 12px 14px 30px;
   color: var(--jn-card-text);
   cursor: grab;
   user-select: none;
@@ -924,13 +927,6 @@
   border-radius: var(--jn-radius);
   box-shadow: var(--jn-card-shadow);
   text-align: var(--jn-align);
-}
-.jn-card::before {
-  content: "";
-  position: absolute;
-  left: 0; top: 0; bottom: 0;
-  width: var(--jn-stripe);
-  background: var(--jn-author-color);
 }
 /* Per-style theme tokens → the generic card variables above. */
 .jn-card-sticky {
@@ -1059,15 +1055,55 @@
   --jn-body-color: var(--jn-style-memo-body-color);
   --jn-align: var(--jn-style-memo-align);
 }
-.jn-card-badge {
+/* Font override per note. `default` uses the material serif for now; Phase 3 may refine the
+   per-material families without changing the class contract. */
+.jn-card.jn-font-default, .jn-card.jn-font-serif { --jn-card-font: var(--jn-font-serif); }
+.jn-card.jn-font-hand { --jn-card-font: var(--jn-font-hand); }
+.jn-card.jn-font-display { --jn-card-font: var(--jn-font-display); }
+
+/* Compact paper is derived from content, so it may not assume the old fixed sticky width. */
+.jn-card.jn-compact {
+  --jn-surface: var(--jn-style-sticky-surface);
+  --jn-surface-alpha: var(--jn-style-sticky-surface-alpha);
+  --jn-edge: var(--jn-style-sticky-edge);
+  --jn-edge-width: var(--jn-style-sticky-edge-width);
+  --jn-edge-style: var(--jn-style-sticky-edge-style);
+  --jn-radius: var(--jn-style-sticky-radius);
+  --jn-card-shadow: var(--jn-style-sticky-shadow);
+  --jn-card-text: var(--jn-style-sticky-text);
+  --jn-rule: var(--jn-style-sticky-rule);
+  --jn-rule-width: var(--jn-style-sticky-rule-width);
+  width: max-content;
+  min-width: 90px;
+  max-width: 220px;
+  padding: 10px 12px 26px;
+}
+/* A manual resize gesture enforces 130x80 and owns the size from then on; compact paper must
+   not clamp a deliberate width/height back to its content-driven maximum. */
+.jn-card.jn-compact.jn-sized {
+  min-width: 130px;
+  max-width: none;
+}
+.jn-card.jn-compact .jn-card-excerpt { margin-top: 0; }
+
+/* Bottom-left author initial. Kept clear of content with the card padding and above the resize
+   handle; pointer-events stay off so the whole card remains a drag target. */
+.jn-card-signature {
   position: absolute;
-  top: 7px; right: 7px;
-  width: 16px; height: 16px;
+  left: 10px;
+  bottom: 8px;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   background: var(--jn-author-color);
-  color: var(--jn-on-accent);
-  font: 600 10px/16px system-ui;
-  text-align: center;
+  color: #fff;
+  font: 700 9px/1 var(--jn-ui-font);
+  text-shadow: 0 1px 1px rgba(0, 0, 0, .7);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .38), inset 0 0 0 1px rgba(255, 255, 255, .2);
+  pointer-events: none;
 }
 .jn-card-lock-pill {
   display: none;
@@ -1089,19 +1125,33 @@
 /* Keep the title clear of the pill while someone is editing. */
 .jn-card.jn-being-edited .jn-card-title { padding-right: 46px; }
 
+.jn-card-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
 .jn-card-title {
-  margin: 0;
+  margin: 0 0 4px;
   padding-right: 18px;
-  font-family: var(--jn-title-font);
+  font-family: var(--jn-card-font, var(--jn-title-font));
   font-size: var(--jn-title-size);
   font-weight: var(--jn-title-weight);
+  line-height: 1.2;
   letter-spacing: calc(var(--jn-title-spacing) * 1em);
   text-transform: var(--jn-title-transform);
   color: var(--jn-title-color);
 }
+.jn-card-title[hidden] { display: none; }
+.jn-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.jn-card-text { min-width: 0; }
 .jn-card-excerpt {
   margin: 7px 0 0;
-  font-family: var(--jn-body-font);
+  font-family: var(--jn-card-font, var(--jn-body-font));
   font-size: var(--jn-body-size);
   line-height: 1.5;
   color: var(--jn-body-color);
@@ -1210,11 +1260,10 @@ input.jn-task-checkbox:disabled { cursor: default; }
 .jn-card-image {
   position: relative;
   flex: none;
-  margin-top: 8px;
-  overflow: hidden;
-}
-.jn-card-image {
+  min-width: 0;
   max-height: 200px;
+  margin: 0;
+  overflow: hidden;
   border-radius: 4px;
 }
 .jn-card-image img {
@@ -1226,9 +1275,9 @@ input.jn-task-checkbox:disabled { cursor: default; }
 }
 .jn-card .jn-card-background {
   position: absolute;
-  inset: 0 0 0 3px;
+  inset: 0;
   z-index: -1;
-  width: calc(100% - 3px);
+  width: 100%;
   height: 100%;
   max-width: none;
   max-height: none;
@@ -1243,6 +1292,20 @@ input.jn-task-checkbox:disabled { cursor: default; }
   text-shadow: 0 1px 3px var(--jn-shadow), 0 0 4px var(--jn-shadow);
 }
 .jn-card-wanted-heading { display: none; }
+.jn-card-wanted .jn-card-wanted-heading {
+  display: block;
+  padding: 0 0 6px;
+  border-bottom: var(--jn-rule-width) solid var(--jn-rule);
+  color: var(--jn-heading-color);
+  font-family: var(--jn-card-font, var(--jn-heading-font));
+  font-size: var(--jn-heading-size);
+  font-weight: var(--jn-heading-weight);
+  line-height: 1.15;
+  letter-spacing: calc(var(--jn-heading-spacing) * 1em);
+  text-transform: var(--jn-heading-transform);
+  overflow-wrap: anywhere;
+}
+.jn-card-wanted-heading[hidden] { display: none !important; }
 .jn-card .jn-card-image-button {
   position: absolute;
   top: 6px;
@@ -1271,37 +1334,29 @@ input.jn-task-checkbox:disabled { cursor: default; }
 }
 .jn-card .jn-card-image-button:hover { border-color: var(--jn-acc); }
 .jn-card[data-seal-corner="top-left"] .jn-card-image-button { left: 31px; }
-.jn-card.jn-card-wanted {
-  width: 250px;
-  gap: 7px;
-  padding: 14px 18px 17px;
+
+/* Picture layout is independent of the extended style. Explicit images above/below stay in the
+   column flow; left/right use a two-column grid only when an image is actually present, so an
+   image-less card never keeps an empty column. Inline Markdown images remain inside blocks. */
+.jn-card.jn-pic-below .jn-card-image { order: 2; }
+.jn-card.jn-pic-below .jn-card-text { order: 1; }
+.jn-card.jn-pic-left.jn-has-picture .jn-card-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+  align-items: start;
 }
-.jn-card-wanted .jn-card-wanted-heading {
-  display: block;
-  padding: 0 24px 6px;
-  border-bottom: var(--jn-rule-width) solid var(--jn-rule);
-  color: var(--jn-heading-color);
-  font-family: var(--jn-heading-font);
-  font-size: var(--jn-heading-size);
-  font-weight: var(--jn-heading-weight);
-  line-height: 1.15;
-  letter-spacing: calc(var(--jn-heading-spacing) * 1em);
-  text-transform: var(--jn-heading-transform);
-  overflow-wrap: anywhere;
+.jn-card.jn-pic-left .jn-card-image { order: 1; }
+.jn-card.jn-pic-left .jn-card-text { order: 2; }
+.jn-card.jn-pic-right.jn-has-picture .jn-card-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  align-items: start;
 }
-.jn-card-wanted .jn-card-image {
-  display: block;
-  height: auto;
-  aspect-ratio: 1.15;
-  margin: 0;
-  border: 1px solid var(--jn-line);
-  border-radius: 4px;
-  background-color: var(--jn-bg);
-}
-.jn-card-wanted .jn-card-image img { position: absolute; inset: 0; height: 100%; max-height: none; }
-.jn-card-image img:not([src]) { display: none; }
-.jn-card-wanted .jn-card-image[hidden] { opacity: .55; border-style: dashed; }
-.jn-card.jn-card-wanted > .jn-card-title {
+.jn-card.jn-pic-right .jn-card-image { order: 2; }
+.jn-card.jn-pic-right .jn-card-text { order: 1; }
+.jn-card.jn-pic-left .jn-card-image img,
+.jn-card.jn-pic-right .jn-card-image img { max-height: 160px; }
+.jn-card.jn-card-wanted .jn-card-title {
   padding: 0;
   line-height: 1.25;
 }
@@ -1336,36 +1391,16 @@ input.jn-task-checkbox:disabled { cursor: default; }
   opacity: 0.22;
 }
 
-.jn-card-document { width: 245px; }
-.jn-card-document .jn-card-title {
+/* Nominal extended widths; manually-sized cards override these with an inline width. */
+.jn-card.jn-extended.jn-card-memo { width: 360px; }
+.jn-card.jn-extended.jn-card-document { width: 248px; }
+.jn-card.jn-extended.jn-card-wanted { width: 252px; gap: 7px; padding: 14px 18px 30px; }
+.jn-card.jn-extended.jn-card-document .jn-card-title {
   padding-bottom: 6px;
   border-bottom: var(--jn-rule-width) solid var(--jn-rule);
 }
-.jn-card-torn {
-  --jn-torn-shape: polygon(0 0, 100% 0, 100% 8%, 97% 20%, 100% 33%, 96% 47%, 100% 60%, 97% 74%, 100% 88%, 96% 100%, 88% 96%, 78% 100%, 66% 95%, 55% 100%, 42% 96%, 30% 100%, 18% 95%, 8% 100%, 0 97%);
-  width: 225px;
-  padding-bottom: 26px;
-}
-.jn-card.jn-card-torn {
-  background: none;
-  border: 0;
-  box-shadow: none;
-}
-.jn-card-torn::before {
-  inset: 0;
-  width: auto;
-  z-index: -1;
-  background: linear-gradient(to right, var(--jn-author-color) var(--jn-stripe), var(--jn-surface) var(--jn-stripe));
-  clip-path: var(--jn-torn-shape);
-}
-.jn-card-torn > .jn-card-background { clip-path: var(--jn-torn-shape); }
-.jn-card-memo {
-  width: 360px;
-  min-height: 240px;
-}
-.jn-card-memo > .jn-card-title { display: none; }
-.jn-card-memo .jn-card-excerpt {
-  margin: 4px 18px 0 0;
+.jn-card.jn-extended.jn-card-memo .jn-card-excerpt {
+  margin: 4px 4px 0 0;
 }
 
 .jn-label {

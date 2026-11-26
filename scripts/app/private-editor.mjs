@@ -1,4 +1,4 @@
-import { CARD_STYLES, cardStyleKey } from "../styles/registry.mjs";
+import { NOTE_FONT_KEYS, PICTURE_LAYOUTS, resolvePresentation } from "../presentation.mjs";
 import { noteImagePath } from "../image-url.mjs";
 import { promptImageSource } from "./image-dialog.mjs";
 import { applyMarkdownAutocomplete } from "../markdown-edit.mjs";
@@ -173,9 +173,24 @@ export default class PrivateNoteEditor {
       this.root.replaceChildren();
       return;
     }
-    const currentType = note.system.kind === "location" ? "location" : cardStyleKey(note.system.style);
-    const styleOptions = Object.entries(CARD_STYLES)
-      .map(([key, def]) => `<option value="${key}" ${currentType === key ? "selected" : ""}>${t(def.labelKey)}</option>`)
+    const presentation = resolvePresentation(note);
+    const currentType = note.system.kind === "location"
+      ? "location" : (presentation.forceExtended ? presentation.extendedStyle : "auto");
+    const styleChoices = [
+      ["auto", "JN.Style.Auto"],
+      ["memo", "JN.Style.Memo"],
+      ["document", "JN.Style.Document"],
+      ["target", "JN.Style.Target"],
+      ["location", "JN.Kind.Location"]
+    ];
+    const styleOptions = styleChoices
+      .map(([key, labelKey]) => `<option value="${key}" ${currentType === key ? "selected" : ""}>${t(labelKey)}</option>`)
+      .join("");
+    const fontOptions = NOTE_FONT_KEYS
+      .map(key => `<option value="${key}" ${presentation.font === key ? "selected" : ""}>${t(`JN.Font.${key === "default" ? "Default" : key === "serif" ? "Serif" : key === "hand" ? "Hand" : "Display"}`)}</option>`)
+      .join("");
+    const layoutOptions = PICTURE_LAYOUTS
+      .map(key => `<option value="${key}" ${presentation.pictureLayout === key ? "selected" : ""}>${t(`JN.Picture.${key === "above" ? "Above" : key === "below" ? "Below" : key === "left" ? "Left" : "Right"}`)}</option>`)
       .join("");
     const backlinks = this.callbacks.getBacklinks?.(note.id) ?? [];
     const backlinkHTML = backlinks
@@ -184,20 +199,36 @@ export default class PrivateNoteEditor {
     const tool = (icon, label, content) => `<details class="jn-note-tool">
       <summary title="${esc(label)}" aria-label="${esc(label)}"><i class="fa-solid ${icon}" aria-hidden="true"></i></summary>
       <div class="jn-note-tool-panel">${content}</div></details>`;
+    const presentationPanel = `
+      <label class="jn-presentation-field">${t("JN.Editor.Font")}
+        <select class="journalinator-font" aria-label="${t("JN.Editor.Font")}">${fontOptions}</select>
+      </label>
+      <label class="jn-presentation-field">${t("JN.Editor.PictureLayout")}
+        <select class="journalinator-picture-layout" aria-label="${t("JN.Editor.PictureLayout")}">${layoutOptions}</select>
+      </label>
+      <label class="jn-presentation-check">
+        <input type="checkbox" class="journalinator-force-extended" ${presentation.forceExtended ? "checked" : ""}>
+        ${t("JN.Editor.ForceExtended")}
+      </label>
+      <label class="jn-presentation-check">
+        <input type="checkbox" class="journalinator-torn" ${presentation.torn ? "checked" : ""}>
+        ${t("JN.Editor.Torn")}
+      </label>`;
 
     this.root.innerHTML = `
       <div class="jn-note-tools">
         ${tool("fa-pencil", t("JN.Editor.RenameTitle"), `<div class="journalinator-eh">
           <b><button type="button" class="jn-inline-title" title="${t("JN.Editor.RenameTitle")}">${esc(note.name)}</button></b>
         </div>`)}
+        ${tool("fa-tag", t("JN.Editor.Label"), `<input type="text" class="journalinator-label" aria-label="${t("JN.Editor.Label")}"
+          value="${esc(note.system.label ?? "")}" placeholder="${t("JN.Editor.Label")}" maxlength="200">`)}
         ${tool("fa-link", t("JN.Editor.RelatedNotes"), `<div class="journalinator-chips">${backlinkHTML}</div>`)}
         ${tool("fa-layer-group", t("JN.Editor.Type"), `
-          <select class="journalinator-kind" aria-label="${t("JN.Editor.Type")}">${styleOptions}
-            <option value="location" ${currentType === "location" ? "selected" : ""}>${t("JN.Kind.Location")}</option>
-          </select>`)}
-        ${cardStyleKey(note.system.style) === "wanted" ? tool("fa-bullseye", t("JN.Style.Wanted"), `
-          <input type="text" class="journalinator-target-heading" aria-label="${t("JN.Style.Wanted")}"
-            value="${esc(note.system.targetHeading)}" placeholder="${t("JN.Style.Wanted")}" maxlength="80">`) : ""}
+          <select class="journalinator-kind" aria-label="${t("JN.Editor.Type")}">${styleOptions}</select>`)}
+        ${tool("fa-sliders", t("JN.Editor.Presentation"), presentationPanel)}
+        ${presentation.extendedStyle === "target" ? tool("fa-bullseye", t("JN.Style.Target"), `
+          <input type="text" class="journalinator-target-heading" aria-label="${t("JN.Style.Target")}"
+            value="${esc(presentation.heading)}" placeholder="${t("JN.Style.Target")}" maxlength="80">`) : ""}
         <button type="button" class="jn-note-action jn-private-delete"
           title="${t("JN.Common.Delete")}" aria-label="${t("JN.Common.Delete")}">
           <i class="fa-solid fa-trash" aria-hidden="true"></i></button>
@@ -239,10 +270,43 @@ export default class PrivateNoteEditor {
       chip.addEventListener("click", () => this.callbacks.onFocusNote?.(chip.dataset.id));
     });
 
+    const labelInput = this.root.querySelector(".journalinator-label");
+    labelInput?.addEventListener("change", () => this.callbacks.updateNote(noteId, { label: labelInput.value.trim() }));
+    labelInput?.addEventListener("keydown", event => {
+      if (event.isComposing || event.key !== "Enter") return;
+      event.preventDefault();
+      event.stopPropagation();
+      labelInput.blur();
+    });
+
     this.root.querySelector(".journalinator-kind")?.addEventListener("change", async event => {
       const type = event.target.value;
-      await this.callbacks.updateNote(noteId, type === "location"
-        ? { kind: "location", style: "document" } : { kind: "note", style: type });
+      if (type === "location") {
+        await this.callbacks.updateNote(noteId, {
+          kind: "location", presentation: { extendedStyle: "document", forceExtended: true }
+        });
+        return;
+      }
+      const kind = note.system.kind === "location" ? "note" : note.system.kind;
+      if (type === "auto") {
+        await this.callbacks.updateNote(noteId, { kind, presentation: { forceExtended: false } });
+      } else {
+        await this.callbacks.updateNote(noteId, {
+          kind, presentation: { extendedStyle: type, forceExtended: true }
+        });
+      }
+    });
+    this.root.querySelector(".journalinator-font")?.addEventListener("change", event => {
+      this.callbacks.updateNote(noteId, { presentation: { font: event.target.value } });
+    });
+    this.root.querySelector(".journalinator-picture-layout")?.addEventListener("change", event => {
+      this.callbacks.updateNote(noteId, { presentation: { pictureLayout: event.target.value } });
+    });
+    this.root.querySelector(".journalinator-force-extended")?.addEventListener("change", event => {
+      this.callbacks.updateNote(noteId, { presentation: { forceExtended: event.target.checked } });
+    });
+    this.root.querySelector(".journalinator-torn")?.addEventListener("change", event => {
+      this.callbacks.updateNote(noteId, { presentation: { torn: event.target.checked } });
     });
 
     const heading = this.root.querySelector(".journalinator-target-heading");

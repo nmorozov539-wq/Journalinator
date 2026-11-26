@@ -1,7 +1,7 @@
 import { notesStore } from "../store/notes-store.mjs";
 import { requestWrite } from "../socket.mjs";
 import { requestLock, releaseLock, sendHeartbeat, requestLockState, getLock, isHeldByMe } from "../locks.mjs";
-import { CARD_STYLES, cardStyleKey } from "../styles/registry.mjs";
+import { NOTE_FONT_KEYS, PICTURE_LAYOUTS, resolvePresentation } from "../presentation.mjs";
 import { noteImagePath } from "../image-url.mjs";
 import { promptImageSource } from "./image-dialog.mjs";
 import * as secrets from "../secrets/secret-actions.mjs";
@@ -195,6 +195,34 @@ export default class NoteEditor {
       : requestWrite({ type: "setTargetHeading", noteId, heading });
   }
 
+  /** Optional display label; empty is valid and never renames the internal Foundry page. */
+  setNoteLabel(noteId, label) {
+    if (this.readOnly) return this.#warnReadOnly();
+    const note = notesStore.getNote(noteId);
+    if (!note || note.system.deleted) return;
+    const value = String(label ?? "").trim();
+    if (value === (note.system.label ?? "")) return;
+    return note.secret ? gm(() => secrets.setSecretNoteLabel(noteId, value))
+      : requestWrite({ type: "setNoteLabel", noteId, label: value });
+  }
+
+  /** Stores explicit presentation fields; unknown values are rejected by the socket handler. */
+  setNotePresentation(noteId, fields) {
+    if (this.readOnly) return this.#warnReadOnly();
+    const note = notesStore.getNote(noteId);
+    if (!note || note.system.deleted || !fields || typeof fields !== "object") return;
+    return note.secret ? gm(() => secrets.setSecretNotePresentation(noteId, fields))
+      : requestWrite({ type: "setNotePresentation", noteIds: [noteId], fields });
+  }
+
+  setNoteKind(noteId, kind) {
+    if (this.readOnly) return this.#warnReadOnly();
+    const note = notesStore.getNote(noteId);
+    if (!note || note.system.deleted || !["note", "location"].includes(kind)) return;
+    return note.secret ? gm(() => secrets.setSecretNoteKind(noteId, kind))
+      : requestWrite({ type: "setNoteKind", noteId, kind });
+  }
+
   async editNoteImage(noteId, background = false) {
     if (this.readOnly) return this.#warnReadOnly();
     const note = notesStore.getNote(noteId);
@@ -271,9 +299,24 @@ export default class NoteEditor {
 
     const allNotes = notesStore.getAllNotes();
     const authorColor = game.users.get(note.system.authorId)?.color ?? "#8d8d97";
-    const currentType = note.system.kind === "location" ? "location" : cardStyleKey(note.system.style);
-    const styleOptions = Object.entries(CARD_STYLES)
-      .map(([key, def]) => `<option value="${key}" ${currentType === key ? "selected" : ""}>${t(def.labelKey)}</option>`)
+    const presentation = resolvePresentation(note);
+    const currentType = note.system.kind === "location"
+      ? "location" : (presentation.forceExtended ? presentation.extendedStyle : "auto");
+    const styleChoices = [
+      ["auto", "JN.Style.Auto"],
+      ["memo", "JN.Style.Memo"],
+      ["document", "JN.Style.Document"],
+      ["target", "JN.Style.Target"],
+      ["location", "JN.Kind.Location"]
+    ];
+    const styleOptions = styleChoices
+      .map(([key, labelKey]) => `<option value="${key}" ${currentType === key ? "selected" : ""}>${t(labelKey)}</option>`)
+      .join("");
+    const fontOptions = NOTE_FONT_KEYS
+      .map(key => `<option value="${key}" ${presentation.font === key ? "selected" : ""}>${t(`JN.Font.${key === "default" ? "Default" : key === "serif" ? "Serif" : key === "hand" ? "Hand" : "Display"}`)}</option>`)
+      .join("");
+    const layoutOptions = PICTURE_LAYOUTS
+      .map(key => `<option value="${key}" ${presentation.pictureLayout === key ? "selected" : ""}>${t(`JN.Picture.${key === "above" ? "Above" : key === "below" ? "Below" : key === "left" ? "Left" : "Right"}`)}</option>`)
       .join("");
     const backlinks = allNotes
       .map(n => [n, (n.system.links ?? []).find(l => l.targetId === note._id)
@@ -285,9 +328,22 @@ export default class NoteEditor {
     const tool = (icon, label, content) => `<details class="jn-note-tool">
       <summary title="${esc(label)}" aria-label="${esc(label)}"><i class="fa-solid ${icon}" aria-hidden="true"></i></summary>
       <div class="jn-note-tool-panel">${content}</div></details>`;
-    const type = `<select class="journalinator-kind" aria-label="${t("JN.Editor.Type")}">${styleOptions}
-      <option value="location" ${currentType === "location" ? "selected" : ""}>${t("JN.Kind.Location")}</option>
-    </select>`;
+    const type = `<select class="journalinator-kind" aria-label="${t("JN.Editor.Type")}">${styleOptions}</select>`;
+    const presentationPanel = `
+      <label class="jn-presentation-field">${t("JN.Editor.Font")}
+        <select class="journalinator-font" aria-label="${t("JN.Editor.Font")}">${fontOptions}</select>
+      </label>
+      <label class="jn-presentation-field">${t("JN.Editor.PictureLayout")}
+        <select class="journalinator-picture-layout" aria-label="${t("JN.Editor.PictureLayout")}">${layoutOptions}</select>
+      </label>
+      <label class="jn-presentation-check">
+        <input type="checkbox" class="journalinator-force-extended" ${presentation.forceExtended ? "checked" : ""}>
+        ${t("JN.Editor.ForceExtended")}
+      </label>
+      <label class="jn-presentation-check">
+        <input type="checkbox" class="journalinator-torn" ${presentation.torn ? "checked" : ""}>
+        ${t("JN.Editor.Torn")}
+      </label>`;
     const gmTools = note.secret ? `
       <div class="jn-gm-banner">
         <button type="button" class="journalinator-declassify">${t("JN.Editor.Declassify")}</button>
@@ -304,11 +360,14 @@ export default class NoteEditor {
           <span class="jn-dot" style="background:${authorColor}"></span>
           <b><button type="button" class="jn-inline-title" title="${t("JN.Editor.RenameTitle")}">${esc(note.name)}</button></b>
         </div>`)}
+        ${tool("fa-tag", t("JN.Editor.Label"), `<input type="text" class="journalinator-label" aria-label="${t("JN.Editor.Label")}"
+          value="${esc(note.system.label ?? "")}" placeholder="${t("JN.Editor.Label")}" maxlength="200">`)}
         ${tool("fa-link", t("JN.Editor.RelatedNotes"), `<div class="journalinator-chips">${backlinks}</div>`)}
         ${tool("fa-layer-group", t("JN.Editor.Type"), type)}
-        ${cardStyleKey(note.system.style) === "wanted" ? tool("fa-bullseye", t("JN.Style.Wanted"), `
-          <input type="text" class="journalinator-target-heading" aria-label="${t("JN.Style.Wanted")}"
-            value="${esc(note.system.targetHeading)}" placeholder="${t("JN.Style.Wanted")}" maxlength="80">`) : ""}
+        ${tool("fa-sliders", t("JN.Editor.Presentation"), presentationPanel)}
+        ${presentation.extendedStyle === "target" ? tool("fa-bullseye", t("JN.Style.Target"), `
+          <input type="text" class="journalinator-target-heading" aria-label="${t("JN.Style.Target")}"
+            value="${esc(presentation.heading)}" placeholder="${t("JN.Style.Target")}" maxlength="80">`) : ""}
         ${gmView || note.secret ? tool("fa-lock", t("JN.Editor.GMOnly"), gmTools + (this.callbacks.boardOnly ? note.system.blocks.map((block, index) =>
           `<div class="jn-note-block-tools" data-block-id="${esc(block.blockId)}"><span>${index + 1}</span>
             ${this.#gmBlockActions(note, block, !block.hidden && !!getLock(note._id, block.blockId))}</div>`).join("") : "")) : ""}
@@ -447,12 +506,38 @@ export default class NoteEditor {
       el.addEventListener("click", () => this.callbacks.onFocusNote(el.dataset.id));
     });
 
+    const labelInput = this.root.querySelector(".journalinator-label");
+    const commitLabel = () => this.setNoteLabel(noteId, labelInput.value);
+    labelInput?.addEventListener("change", commitLabel);
+    labelInput?.addEventListener("keydown", event => {
+      if (event.isComposing || event.key !== "Enter") return;
+      event.preventDefault();
+      event.stopPropagation();
+      labelInput.blur();
+    });
+
     this.root.querySelector(".journalinator-kind")?.addEventListener("change", ev => {
       const type = ev.target.value;
-      const kind = type === "location" ? "location" : "note";
-      const style = kind === "location" ? "document" : type;
-      if (note.secret) gm(() => secrets.setSecretNoteStyle(noteId, style, kind));
-      else requestWrite({ type: "setNoteStyle", noteId, style, kind });
+      if (type === "location") {
+        this.setNoteKind(noteId, "location");
+        this.setNotePresentation(noteId, { extendedStyle: "document", forceExtended: true });
+        return;
+      }
+      if (note.system.kind === "location") this.setNoteKind(noteId, "note");
+      if (type === "auto") this.setNotePresentation(noteId, { forceExtended: false });
+      else this.setNotePresentation(noteId, { extendedStyle: type, forceExtended: true });
+    });
+    this.root.querySelector(".journalinator-font")?.addEventListener("change", ev => {
+      this.setNotePresentation(noteId, { font: ev.target.value });
+    });
+    this.root.querySelector(".journalinator-picture-layout")?.addEventListener("change", ev => {
+      this.setNotePresentation(noteId, { pictureLayout: ev.target.value });
+    });
+    this.root.querySelector(".journalinator-force-extended")?.addEventListener("change", ev => {
+      this.setNotePresentation(noteId, { forceExtended: ev.target.checked });
+    });
+    this.root.querySelector(".journalinator-torn")?.addEventListener("change", ev => {
+      this.setNotePresentation(noteId, { torn: ev.target.checked });
     });
 
     const targetHeading = this.root.querySelector(".journalinator-target-heading");

@@ -340,7 +340,7 @@ test("keyboard deletion shortcuts ignore text inputs", () => {
   editable.remove();
 });
 
-test("creation dialog offers five styles and keeps a custom title", async () => {
+test("creation dialog offers automatic and three presets and keeps a custom title", async () => {
   const { promptNewNote } = await import(`${JN}/scripts/app/note-dialog.mjs`);
   const dialog = foundry.applications.api.DialogV2;
   const prompt = dialog.prompt;
@@ -351,22 +351,31 @@ test("creation dialog offers five styles and keeps a custom title", async () => 
       form.innerHTML = options.content;
       options.render(null, { element: form });
       const { style, noteTitle } = form.elements;
-      assert.deepEqual([...style.options].map(option => option.value), ["sticky", "document", "torn", "wanted", "memo"]);
+      assert.deepEqual([...style.options].map(option => option.value), ["auto", "memo", "document", "target"],
+        "no Sticky or Torn creation entries");
+      assert.doesNotMatch([...style.options].map(option => option.textContent).join(" "), /Sticky Note|Torn Paper/i,
+        "creation labels never show the legacy Sticky/Torn vocabulary");
       assert.equal(document.activeElement, noteTitle);
       assert.equal(noteTitle.selectionEnd, noteTitle.value.length);
       noteTitle.value = "Missing Person";
-      style.value = "wanted";
+      style.value = "target";
       style.dispatchEvent(new Event("change"));
       return options.ok.callback(null, { form });
     };
-    assert.deepEqual(await promptNewNote("New Note"), { title: "Missing Person", style: "wanted", autoTitle: false });
+    assert.deepEqual(await promptNewNote("New Note"), {
+      title: "Missing Person",
+      style: "wanted",
+      autoTitle: false,
+      presentation: { extendedStyle: "target", forceExtended: true },
+      label: ""
+    });
   } finally {
     dialog.prompt = prompt;
     form.remove();
   }
 });
 
-test("clicking a sidebar name renames the note independently of its target heading", async () => {
+test("renaming a note fills an empty label while the target heading stays independent", async () => {
   await requestWrite({ type: "createNote", title: "Person of Interest", style: "wanted", x: 2000, y: 0 });
   await settle();
   const noteId = sharedByName("Person of Interest").id;
@@ -384,12 +393,122 @@ test("clicking a sidebar name renames the note independently of its target headi
   heading.value = "Witness";
   heading.dispatchEvent(new Event("change"));
   await settle();
-  assert.equal(sharedByName("Known Witness").system.targetHeading, "Witness");
+  const page = sharedByName("Known Witness");
+  assert.equal(page.system.targetHeading, "Witness");
+  assert.equal(page.system.label, "Known Witness", "a meaningful rename fills an empty label");
   const canvas = new JournalCanvas({});
   canvas.update(notesStore.getAllNotes(), notesStore.getLayout());
   const card = canvas.root.querySelector(`[data-id="${noteId}"]`);
   assert.equal(card.querySelector(".jn-card-wanted-heading").textContent, "Witness");
   assert.equal(card.querySelector(".jn-card-title").textContent, "Known Witness");
+  assert.equal(card.querySelector(".jn-card-title").hidden, false);
+  assert.equal(card.querySelector(".jn-card-title").dataset.cardText, "label");
+});
+
+test("editor saves the label (including empty) and presentation controls", async () => {
+  await requestWrite({ type: "createNote", title: "Control Fixture", x: 2900, y: 0 });
+  await settle();
+  const page = sharedByName("Control Fixture");
+  const reopen = () => {
+    editor.open(page.id);
+    editor.render();
+  };
+  const change = (selector, value, event = "change") => {
+    const control = editor.root.querySelector(selector);
+    assert.ok(control, `${selector} is rendered`);
+    if (control.type === "checkbox") control.checked = value;
+    else control.value = value;
+    control.dispatchEvent(new Event(event, { bubbles: true }));
+  };
+
+  reopen();
+  change(".journalinator-label", "Visible Label");
+  await settle();
+  assert.equal(sharedByName("Control Fixture").system.label, "Visible Label");
+
+  reopen();
+  change(".journalinator-label", "");
+  await settle();
+  assert.equal(sharedByName("Control Fixture").system.label, "", "empty label is a valid save");
+
+  reopen();
+  change(".journalinator-font", "hand");
+  await settle();
+  assert.equal(sharedByName("Control Fixture").system.presentation.font, "hand");
+
+  reopen();
+  change(".journalinator-picture-layout", "left");
+  await settle();
+  assert.equal(sharedByName("Control Fixture").system.presentation.pictureLayout, "left");
+
+  reopen();
+  assert.equal(editor.root.querySelector(".journalinator-force-extended").checked, false);
+  change(".journalinator-force-extended", true);
+  await settle();
+  assert.equal(sharedByName("Control Fixture").system.presentation.forceExtended, true);
+
+  reopen();
+  assert.equal(editor.root.querySelector(".journalinator-torn").checked, false);
+  change(".journalinator-torn", true);
+  await settle();
+  assert.equal(sharedByName("Control Fixture").system.presentation.torn, true);
+});
+
+test("private editor saves the label (including empty) and presentation controls", async () => {
+  const user = makeUser("Player000000011", { name: "Private Controls" });
+  const page = await privateStore.createFor(user);
+  const workspace = new PrivateWorkspace({ onChange() {} });
+  workspace.setPage(page);
+  const slot = document.createElement("div");
+  document.body.appendChild(slot);
+  try {
+    const noteId = await workspace.createNoteAt({ title: "Private Control Note", x: 0, y: 0 });
+    workspace.editor.open(noteId);
+    workspace.editor.mount(slot);
+    const root = workspace.editor.root;
+    const reopen = () => workspace.editor.render();
+    const change = (selector, value, event = "change") => {
+      const control = root.querySelector(selector);
+      assert.ok(control, `${selector} is rendered in the private editor`);
+      if (control.type === "checkbox") control.checked = value;
+      else control.value = value;
+      control.dispatchEvent(new Event(event, { bubbles: true }));
+    };
+
+    reopen();
+    change(".journalinator-label", "Private Label");
+    await settle();
+    assert.equal(privateStore.read(page).notes[noteId].label, "Private Label");
+
+    reopen();
+    change(".journalinator-label", "");
+    await settle();
+    assert.equal(privateStore.read(page).notes[noteId].label, "", "empty label is saved privately");
+
+    reopen();
+    change(".journalinator-font", "display");
+    await settle();
+    assert.equal(privateStore.read(page).notes[noteId].presentation.font, "display");
+
+    reopen();
+    change(".journalinator-picture-layout", "right");
+    await settle();
+    assert.equal(privateStore.read(page).notes[noteId].presentation.pictureLayout, "right");
+
+    reopen();
+    change(".journalinator-force-extended", true);
+    await settle();
+    assert.equal(privateStore.read(page).notes[noteId].presentation.forceExtended, true);
+
+    reopen();
+    change(".journalinator-torn", true);
+    await settle();
+    assert.equal(privateStore.read(page).notes[noteId].presentation.torn, true);
+  } finally {
+    workspace.destroy();
+    slot.remove();
+    await privateStore.remove(page);
+  }
 });
 
 test("one click edits each target field on the board and saves through the existing writes", async () => {
@@ -427,7 +546,8 @@ test("one click edits each target field on the board and saves through the exist
     input.value = "New Name";
     key(input, "Enter");
     await settle();
-    assert.equal(page.name, "New Name");
+    assert.equal(page.system.label, "New Name", "the card edits the optional label, not the Foundry name");
+    assert.equal(page.name, "Known Witness", "the internal name is owned by the editor");
     await redraw();
 
     click(".jn-card-block-empty");
@@ -508,17 +628,26 @@ test("the context menu creates the chosen card immediately and the toolbar opens
     app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
     app._onRender();
     const canvas = host.querySelector(".jn-canvas");
+    canvas.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, button: 2 }));
+    assert.deepEqual([...canvas.querySelectorAll(".jn-context-menu button[data-action]")]
+      .map(button => button.dataset.action),
+    ["note", "memo", "document", "target", "location", "label", "secret-note", "gm-label"],
+    "creation menu offers New note then the three extended presets with no Sticky or Torn entries");
+    canvas.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    canvas.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0 }));
     const existing = new Set(containers.shared.pages.keys());
-    for (const action of ["note", "memo", "wanted", "location", "note"]) {
+    for (const action of ["note", "memo", "document", "target", "location"]) {
       canvas.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, button: 2 }));
       canvas.querySelector(`[data-action="${action}"]`).click();
     }
     await settle();
     const created = [...containers.shared.pages.values()].filter(page => !existing.has(page.id));
-    assert.deepEqual(created.map(page => [page.system.kind, page.system.style]), [
-      ["note", "sticky"], ["note", "memo"], ["note", "wanted"], ["location", "document"], ["note", "sticky"]
-    ]);
-    assert.notEqual(created[0].name, created[4].name);
+    assert.deepEqual(created.map(page => page.system.kind), ["note", "note", "note", "note", "location"]);
+    assert.deepEqual(created.slice(0, 4).map(page => page.system.presentation.extendedStyle),
+      ["memo", "memo", "document", "target"]);
+    assert.deepEqual(created.slice(0, 4).map(page => page.system.presentation.forceExtended),
+      [false, true, true, true]);
+    assert.notEqual(created[0].name, created[1].name);
     assert.equal(prompts, 0);
     host.querySelector(".journalinator-new").click();
     assert.equal(prompts, 1);
@@ -544,7 +673,7 @@ test("toolbar dropdowns filter cards and change the saved board theme", async ()
     filters.querySelector("summary").click();
     assert.equal(filters.open, true);
     assert.ok(filters.querySelector(`[data-kind="author"][value="${game.user.id}"]`));
-    const style = filters.querySelector('[value="memo"]');
+    const style = filters.querySelector('[value="document"]');
     style.click();
     const tavern = host.querySelector(`.jn-card[data-id="${tavernId}"]`);
     assert.ok(tavern.classList.contains("jn-dimmed"));
@@ -573,7 +702,7 @@ test("toolbar dropdowns filter cards and change the saved board theme", async ()
   }
 });
 
-test("cards place foreground images by type and change the background independently", async () => {
+test("cards place explicit images by layout and change the background independently", async () => {
   await requestWrite({ type: "createNote", title: "Camera test", style: "document", x: 0, y: 0 });
   await settle();
   const note = sharedByName("Camera test");
@@ -594,8 +723,20 @@ test("cards place foreground images by type and change the background independen
     camera.click();
     await settle();
     await redraw();
-    assert.ok(card.querySelector(".jn-card-excerpt + .jn-card-image"));
+    assert.equal(card.querySelector(".jn-card-image").hidden, false);
+    assert.ok(card.querySelector(".jn-card-body > .jn-card-image"), "explicit image lives in the card body");
+    assert.ok(card.querySelector(".jn-card-body > .jn-card-text .jn-card-excerpt"));
     assert.equal(card.querySelector(".jn-card-image img").getAttribute("src"), "https://example.com/content.png");
+    assert.ok(card.classList.contains("jn-extended"), "adding an image promotes the card");
+    assert.ok(card.classList.contains("jn-card-document"), "adding an image never selects Target");
+    assert.ok(card.classList.contains("jn-pic-above"));
+
+    await requestWrite({ type: "setNotePresentation", noteIds: [note.id], fields: { pictureLayout: "left" } });
+    await settle();
+    await redraw();
+    assert.ok(card.classList.contains("jn-pic-left"), "picture layout is independent of the style");
+    assert.ok(card.classList.contains("jn-card-document"));
+
     card.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, button: 2 }));
     answers.push("https://example.com/background.png");
     host.querySelector('[data-action="card-background"]').click();
@@ -611,12 +752,16 @@ test("cards place foreground images by type and change the background independen
     assert.ok(sidebar.querySelector(".jn-note-tool summary"));
     assert.equal(sidebar.querySelector(".journalinator-set-image, .journalinator-style, .journalinator-authors-toggle"), null);
     const type = sidebar.querySelector(".journalinator-kind");
-    type.value = "wanted";
+    type.value = "target";
     type.dispatchEvent(new Event("change", { bubbles: true }));
     await settle();
     await redraw();
     assert.equal(camera.hidden, false);
-    assert.ok(card.querySelector(".jn-card-wanted-heading + .jn-card-image"));
+    assert.ok(card.classList.contains("jn-card-wanted"));
+    assert.ok(card.querySelector(".jn-card-wanted-heading"));
+    assert.equal(card.querySelector(".jn-card-wanted-heading").hidden, false);
+    assert.ok(card.querySelector(".jn-card-body > .jn-card-image"));
+    assert.ok(card.classList.contains("jn-pic-left"), "changing extended style keeps the picture layout");
     answers.push("https://example.com/target.png");
     camera.click();
     await settle();
@@ -640,6 +785,150 @@ test("cards place foreground images by type and change the background independen
   }
 });
 
+test("cards hide the internal name, show labels, and promote on qualifying content", () => {
+  const canvas = new JournalCanvas({});
+  document.body.appendChild(canvas.root);
+  const base = (id, system = {}) => ({
+    _id: id,
+    name: "New Note 7",
+    system: {
+      style: "sticky", authorId: gmUser.id, links: [],
+      blocks: [{ blockId: `${id}-block`, text: "three short words" }],
+      ...system
+    }
+  });
+  const notes = [
+    base("untitledcard0001"),
+    base("labelledcard0001", { label: "Captain Vex" }),
+    base("headingcard00001", { presentation: { heading: "Bounty" } }),
+    base("picturecard00001", { image: "worlds/test/picture.webp" }),
+    base("targetcard00001", {
+      style: "wanted",
+      presentation: { extendedStyle: "target", forceExtended: true, heading: "" }
+    })
+  ];
+  const cards = Object.fromEntries(notes.map((note, index) => [note._id, { x: index * 300, y: 0, rotation: 0 }]));
+  try {
+    canvas.update(notes, { cards, labels: {} });
+    const card = id => canvas.root.querySelector(`.jn-card[data-id="${id}"]`);
+
+    const untitled = card("untitledcard0001");
+    assert.ok(untitled.classList.contains("jn-compact"));
+    assert.equal(untitled.querySelector(".jn-card-title").hidden, true);
+    assert.equal(untitled.querySelector(".jn-card-title").textContent, "");
+    assert.equal(untitled.textContent.includes("New Note 7"), false, "the internal Foundry name is never displayed");
+    assert.ok(untitled.querySelector(".jn-card-signature").textContent, "the author signature stays visible");
+
+    const labelled = card("labelledcard0001");
+    assert.ok(labelled.classList.contains("jn-extended"), "a label promotes to extended");
+    assert.equal(labelled.querySelector(".jn-card-title").hidden, false);
+    assert.equal(labelled.querySelector(".jn-card-title").textContent, "Captain Vex");
+    assert.equal(labelled.querySelector(".jn-card-title").dataset.cardText, "label");
+
+    assert.ok(card("headingcard00001").classList.contains("jn-extended"), "a heading promotes to extended");
+    const picture = card("picturecard00001");
+    assert.ok(picture.classList.contains("jn-extended"), "a picture promotes to extended");
+    assert.equal(picture.classList.contains("jn-card-wanted"), false, "a picture never selects Target");
+
+    const target = card("targetcard00001");
+    assert.equal(target.querySelector(".jn-card-wanted-heading").hidden, false);
+    assert.equal(target.querySelector(".jn-card-wanted-heading").textContent, "Target",
+      "an empty target heading falls back to the Target label");
+    assert.equal(target.querySelector(".jn-card-title").hidden, true);
+
+    delete notes[3].system.image;
+    canvas.update(notes, { cards, labels: {} });
+    assert.ok(card("picturecard00001").classList.contains("jn-compact"),
+      "removing the only promoting condition demotes the card");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("inline label editing reads and saves through the card callbacks", () => {
+  const calls = [];
+  const canvas = new JournalCanvas({
+    onSelectNote() {},
+    onReadCardText: (id, kind) => kind === "label" ? "Old label" : "",
+    onSaveCardText: (id, kind, value) => calls.push([id, kind, value])
+  });
+  document.body.appendChild(canvas.root);
+  const note = {
+    _id: "labelcard000001",
+    name: "Internal Name",
+    system: {
+      style: "sticky", authorId: gmUser.id, label: "Old label", links: [],
+      blocks: [{ blockId: "labelblock0001", text: "short text" }]
+    }
+  };
+  const layout = { cards: { [note._id]: { x: 0, y: 0, rotation: 0 } }, labels: {} };
+  try {
+    canvas.update([note], layout);
+    const card = canvas.root.querySelector(`.jn-card[data-id="${note._id}"]`);
+    const title = card.querySelector(".jn-card-title");
+    title.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0 }));
+    const input = title.querySelector("input");
+    assert.ok(input, "clicking the label opens an inline input");
+    assert.equal(input.value, "Old label");
+    input.value = "New label";
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    assert.deepEqual(calls, [[note._id, "label", "New label"]]);
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("picture classes require an image and compact cards keep manual sizes", () => {
+  const canvas = new JournalCanvas({});
+  document.body.appendChild(canvas.root);
+  const note = (id, system = {}) => ({
+    _id: id,
+    name: "New Note",
+    system: {
+      style: "sticky", authorId: gmUser.id, links: [],
+      blocks: [{ blockId: `${id}-block`, text: "three short words" }],
+      ...system
+    }
+  });
+  const notes = [
+    note("compactsize00001", { presentation: { pictureLayout: "left" } }),
+    note("picturelayout001", {
+      image: "worlds/test/portrait.webp",
+      presentation: { pictureLayout: "left" }
+    })
+  ];
+  const cards = {
+    compactsize00001: { x: 0, y: 0, rotation: 0, width: 260, height: 140 },
+    picturelayout001: { x: 400, y: 0, rotation: 0 }
+  };
+  try {
+    canvas.update(notes, { cards, labels: {} });
+    const compact = canvas.root.querySelector(`.jn-card[data-id="compactsize00001"]`);
+    assert.ok(compact.classList.contains("jn-compact"));
+    assert.ok(compact.classList.contains("jn-sized"), "a manual size marks the card as sized");
+    assert.ok(compact.classList.contains("jn-pic-left"));
+    assert.equal(compact.style.width, "260px", "manual width is written inline beyond the compact max");
+    assert.equal(compact.style.minHeight, "140px");
+    assert.equal(compact.classList.contains("jn-has-picture"), false,
+      "no explicit image means no picture column");
+
+    const picture = canvas.root.querySelector(`.jn-card[data-id="picturelayout001"]`);
+    assert.ok(picture.classList.contains("jn-has-picture"));
+    assert.ok(picture.classList.contains("jn-pic-left"));
+
+    delete notes[1].system.image;
+    canvas.update(notes, { cards, labels: {} });
+    assert.equal(picture.classList.contains("jn-has-picture"), false,
+      "removing the explicit image drops the picture layout class");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
 test("search holds focus and results through input and a background redraw", async () => {
   const app = new JournalApp();
   const host = document.createElement("div");
@@ -649,6 +938,9 @@ test("search holds focus and results through input and a background redraw", asy
     app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
     app._onRender();
   };
+  // Search finds the optional label and visible content, never the internal Foundry name.
+  await requestWrite({ type: "setNoteLabel", noteId: tavernId, label: "Tavern" });
+  await settle();
   await redraw();
   try {
     let input = host.querySelector(".journalinator-search");
@@ -659,6 +951,11 @@ test("search holds focus and results through input and a background redraw", asy
     input.dispatchEvent(new Event("input", { bubbles: true }));
     assert.equal(document.activeElement, input);
     assert.ok(host.querySelector(`.jn-switcher-item[data-id="${tavernId}"]`));
+    assert.doesNotMatch(
+      host.querySelector(`.jn-switcher-item[data-id="${tavernId}"]`).textContent,
+      /Sticky Note|Torn Paper/i,
+      "search metadata uses the new style vocabulary"
+    );
     const documentFilter = host.querySelector('.journalinator-filters [data-kind="style"][value="document"]');
     documentFilter.checked = true;
     documentFilter.dispatchEvent(new Event("change", { bubbles: true }));
@@ -667,6 +964,26 @@ test("search holds focus and results through input and a background redraw", asy
     documentFilter.checked = false;
     documentFilter.dispatchEvent(new Event("change", { bubbles: true }));
     assert.ok(host.querySelector(`.jn-switcher-item[data-id="${tavernId}"]`));
+
+    await requestWrite({ type: "createNote", title: "Internal Only Search Name", x: 1300, y: 0 });
+    await settle();
+    await redraw();
+    input = host.querySelector(".journalinator-search");
+    input.focus();
+    input.value = "Internal Only Search Name";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    const internalNote = sharedByName("Internal Only Search Name");
+    assert.equal(host.querySelector(`.jn-switcher-item[data-id="${internalNote.id}"]`), null,
+      "the internal Foundry name never appears as a search result");
+    assert.doesNotMatch(
+      host.querySelector(".jn-switcher").textContent,
+      /Sticky Note|Torn Paper/i,
+      "search results never show the legacy style names"
+    );
+
+    input.value = "Tavern";
+    input.setSelectionRange(1, 3);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
     await redraw();
     input = host.querySelector(".journalinator-search");
     assert.equal(document.activeElement, input);
@@ -726,7 +1043,7 @@ test("legacy attachments follow the board edge when a card resizes", async () =>
 
 test("Alt-click connects edges through saved board pins and the toolbar can replace the route", async () => {
   const a = sharedByName("Tavern");
-  const b = sharedByName("New Name");
+  const b = sharedByName("Known Witness");
   await requestWrite({ type: "resizeCard", noteId: a.id, width: 250, height: 120 });
   await requestWrite({ type: "resizeCard", noteId: b.id, width: 250, height: 120 });
   const app = new JournalApp();
@@ -743,7 +1060,7 @@ test("Alt-click connects edges through saved board pins and the toolbar can repl
     const data = notesStore.getLayout().cards[page.id];
     const angle = data.rotation * Math.PI / 180;
     const dx = (x - 0.5) * 250, dy = (y - 0.5) * 120;
-    card(page.id).querySelector(".jn-card-title").dispatchEvent(new MouseEvent("click", {
+    card(page.id).dispatchEvent(new MouseEvent("click", {
       bubbles: true, button: 0, altKey,
       clientX: data.x + 125 + dx * Math.cos(angle) - dy * Math.sin(angle),
       clientY: data.y + 60 + dx * Math.sin(angle) + dy * Math.cos(angle)
@@ -1052,7 +1369,7 @@ test("canvas cards render Markdown and forward task checkboxes", () => {
   }
 });
 
-test("actor status renders as a card badge without replacing the seal", () => {
+test("actor status renders as a card marker without replacing the seal", () => {
   const canvas = new JournalCanvas({});
   document.body.appendChild(canvas.root);
   const note = {
@@ -1195,9 +1512,8 @@ test("private canvas is separate and copies notes through the clipboard", async 
 
     // Shared -> private copy/paste.
     const copiedCard = sharedCanvas.querySelector(`.jn-card[data-id="${copied.id}"]`);
-    const badge = copiedCard.querySelector(".jn-card-badge");
-    badge.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 0, clientY: 0 }));
-    badge.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 0, clientY: 0 }));
+    copiedCard.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 0, clientY: 0 }));
+    copiedCard.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 0, clientY: 0 }));
     sharedCanvas.dispatchEvent(new KeyboardEvent("keydown", {
       key: "c", ctrlKey: true, bubbles: true, cancelable: true
     }));
