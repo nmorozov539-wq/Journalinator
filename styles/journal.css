@@ -318,6 +318,14 @@
   opacity: 0.4;
   cursor: not-allowed;
 }
+/* The fixed theme selector stays visible but reads as inactive; `inert` still blocks it. */
+.journalinator-theme[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.journalinator-theme[aria-disabled="true"] summary {
+  cursor: not-allowed;
+}
 .journalinator-root:has([data-placing-link]) .journalinator-add-link {
   border-color: var(--jn-acc);
   color: var(--jn-acc);

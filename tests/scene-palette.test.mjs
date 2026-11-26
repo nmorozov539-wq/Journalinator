@@ -5,6 +5,7 @@ import {
   activeSceneSource, analyzePixels, clearSceneThemeCache, contrastRatio, labToHex,
   oklabToRgb, paletteToTheme, rgbToOklab, SCENE_PROFILE, sceneCacheKey, sceneTheme
 } from "../scripts/scene-palette.mjs";
+import { STYLIZED_MATERIALS, themeToVars } from "../scripts/styles/themes.mjs";
 import { CARD_STYLES } from "../scripts/styles/registry.mjs";
 
 function buildPixels(entries, size = 64) {
@@ -153,6 +154,16 @@ test("a palette maps to a complete normalized theme", () => {
   for (const style of Object.keys(CARD_STYLES)) {
     assert.ok(theme.styles[style], `missing ${style}`);
     assert.ok(theme.styles[style].type, `${style} has no typography`);
+  }
+  // The scene palette only recolours the compatible chrome/colour roles; the canvas itself
+  // keeps the new Stylized Canvas materials.
+  assert.deepEqual(theme.materials, STYLIZED_MATERIALS);
+  const vars = themeToVars(theme);
+  for (const name of [
+    "--jn-sc-cork", "--jn-sc-paper-memo", "--jn-sc-font-body", "--jn-sc-pin-default",
+    "--jn-sc-thread-1", "--jn-sc-thread-fade-time"
+  ]) {
+    assert.ok(name in vars, `${name} missing from the scene theme`);
   }
 });
 

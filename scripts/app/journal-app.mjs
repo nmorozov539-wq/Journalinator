@@ -30,13 +30,23 @@ function gm(job) {
 
 /** The saved theme choice, resolved to a registered theme. `scene` is generated on demand. */
 async function resolveThemeChoice(id) {
-  if (id === SCENE_THEME_ID) return (await sceneTheme()) ?? getTheme("classic");
+  if (id === SCENE_THEME_ID) return (await sceneTheme()) ?? getTheme("stylized");
   return getTheme(id);
 }
 
 /** Keyboard shortcuts must never replace the browser/editor's native typing behaviour. */
 export function isTextEntryTarget(target) {
   return !!target?.closest?.("input, textarea, select, [contenteditable]:not([contenteditable='false'])");
+}
+
+/**
+ * Debounces `journalinatorThemeChanged`. The id catches ordinary theme switches; the object
+ * reference catches a regenerated scene palette that keeps the synthetic "scene" id. Repeated
+ * renders return the same cached scene theme object, so they stay silent.
+ */
+export function themeApplicationChanged(previous, next) {
+  if (!next) return false;
+  return !previous || previous.id !== next.id || previous.theme !== next;
 }
 
 /** Foundry's tooltip manager is instant and themed; fall back to the native title if it is missing. */
@@ -94,6 +104,7 @@ export default class JournalApp extends ApplicationV2 {
   #onToolbarPointerDown = null;
   #toolbarPointerTarget = null;
   #focusedCanvasRenders = new WeakSet();
+  #lastAppliedTheme = null;
   #deletionHistory = [];
   #clipboard = [];
   #replacingHTML = false;
@@ -399,7 +410,7 @@ export default class JournalApp extends ApplicationV2 {
     this.#hookIds.push(["journalinatorVaultChanged", Hooks.on("journalinatorVaultChanged", rerender)]);
     this.#hookIds.push(["journalinatorThemeRegistered", Hooks.on("journalinatorThemeRegistered", rerender)]);
     const rerenderForScene = () => {
-      if ((game.settings.get("fvtt-journalinator", "boardTheme") ?? "classic") !== SCENE_THEME_ID) return;
+      if ((game.settings.get("fvtt-journalinator", "boardTheme") ?? "stylized") !== SCENE_THEME_ID) return;
       clearSceneThemeCache();
       rerender();
     };
@@ -579,7 +590,7 @@ export default class JournalApp extends ApplicationV2 {
     const q = this.#query.trim().toLowerCase();
     const authors = isPrivate ? [] : [...new Map(notes.map(n => [n.system.authorId, game.users.get(n.system.authorId)])).entries()]
       .filter(([, u]) => u);
-    const themeChoice = game.settings.get("fvtt-journalinator", "boardTheme") ?? "classic";
+    const themeChoice = game.settings.get("fvtt-journalinator", "boardTheme") ?? "stylized";
     const theme = await resolveThemeChoice(themeChoice);
     return {
       view,
@@ -613,6 +624,12 @@ export default class JournalApp extends ApplicationV2 {
     const privateView = context.view === "private";
     root.className = `journalinator-root${context.merged ? " jn-gm-view" : ""}${privateView ? " jn-private-view" : ""}`;
     applyTheme(root, context.themeObj);
+    // Announce only real changes: a re-render of the same theme (including the cached scene
+    // theme) must not spam the hook, but a scene palette regeneration must.
+    if (themeApplicationChanged(this.#lastAppliedTheme, context.themeObj)) {
+      this.#lastAppliedTheme = { id: context.themeObj.id, theme: context.themeObj };
+      Hooks.callAll("journalinatorThemeChanged", context.themeObj.id, context.themeObj);
+    }
     const escape = foundry.utils.escapeHTML;
     const offline = !context.gmOnline;
     const privatePage = context.privatePage;
@@ -620,10 +637,13 @@ export default class JournalApp extends ApplicationV2 {
       `<label class="jn-menu-option"><input type="checkbox" data-kind="${kind}" value="${escape(id)}"
         ${selected.has(id) ? "checked" : ""}>${color ? `<span class="jn-dot" style="background:${escape(String(color))}"></span>` : ""}
         <span>${escape(label)}</span></label>`).join("");
-    const themePicker = `<details class="jn-toolbar-dropdown journalinator-theme">
-      <summary class="jn-toolbar-icon" ${tooltipAttrs(t("JN.Theme.Picker"))}><i class="fa-solid fa-palette" aria-hidden="true"></i></summary>
-      <div class="jn-toolbar-panel">
-        ${context.themeList.map(item => `<button type="button" data-theme-choice="${escape(item.id)}" aria-pressed="${context.themeChoice === item.id}">${escape(item.label)}</button>`).join("")}
+    // The theme selector stays in place for layout/API compatibility but is deliberately inert:
+    // no palette popup, no click handlers, and every choice is rendered disabled.
+    const themePicker = `<details class="jn-toolbar-dropdown journalinator-theme" aria-disabled="true"
+        aria-label="${t("JN.Theme.PickerInactive")}">
+      <summary class="jn-toolbar-icon" aria-disabled="true" inert ${tooltipAttrs(t("JN.Theme.PickerInactive"))}><i class="fa-solid fa-palette" aria-hidden="true"></i></summary>
+      <div class="jn-toolbar-panel" aria-hidden="true" inert>
+        ${context.themeList.map(item => `<button type="button" disabled aria-pressed="${context.themeChoice === item.id}">${escape(item.label)}</button>`).join("")}
       </div>
     </details>`;
     const sharedToolbar = `
@@ -818,32 +838,14 @@ export default class JournalApp extends ApplicationV2 {
         dropdown.querySelector("summary").focus();
       });
     }
-    for (const button of root.querySelectorAll("[data-theme-choice]")) {
-      button.addEventListener("click", async () => {
-        const choice = button.dataset.themeChoice;
-        await game.settings.set("fvtt-journalinator", "boardTheme", choice);
-        if (choice === SCENE_THEME_ID) {
-          clearSceneThemeCache();
-          if (!(await sceneTheme())) ui.notifications?.warn(t("JN.Theme.SceneUnavailable"));
-          await this.render();
-          return;
-        }
-        const selected = getTheme(choice);
-        const board = this.element.querySelector(".journalinator-root");
-        if (!board) return;
-        applyTheme(board, selected);
-        this.#canvas.setTheme(selected);
-        this.#private.canvas.setTheme(selected);
-        const dropdown = board.querySelector(".journalinator-theme");
-        for (const choice of dropdown.querySelectorAll("[data-theme-choice]")) {
-          choice.setAttribute("aria-pressed", String(choice.dataset.themeChoice === selected.id));
-        }
-        dropdown.open = false;
-        if (dropdown.contains(document.activeElement)) dropdown.querySelector("summary").focus();
-        Hooks.callAll("journalinatorThemeChanged", selected.id, selected);
-      });
-    }
-
+    // The theme dropdown is permanently inactive in this presentation. `inert` blocks it in
+    // modern browsers; this guard also keeps it closed where `inert` is not implemented.
+    const lockedTheme = root.querySelector(".journalinator-theme");
+    lockedTheme?.querySelector("summary")?.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      lockedTheme.open = false;
+    });
     const search = root.querySelector(".journalinator-search");
     search?.addEventListener("input", ev => {
       this.#query = ev.target.value;

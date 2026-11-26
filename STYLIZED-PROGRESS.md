@@ -111,3 +111,18 @@ Delivered:
 - Tests: **226 pass / 0 fail**; `npm run check` pass. Browser geometry checked manually via /tmp probes for picture layout and compact resize.
 
 Deferred: torn artwork is Phase 3 (data/class already present); real resize gesture geometry remains a manual Foundry check.
+
+### Phase 3 — materials, theme tokens, fonts, torn edges
+
+Implementation agents: `ses_de7bff737ffemRtBkr3WoaYuxR` (theme/API), `ses_de7bff736ffeBL8Nj31ifXT71U` (materials/torn), fixes `ses_de79230d1ffep40t2O0x3rvHcn`.
+Validation: `ses_de7b43eb6ffe5JzUPTu9j83dE7`.
+
+Delivered:
+- New `styles/stylized.css` (loaded after fonts): dark cork `#7b5233` with bundled 320px procedural tile, warm light/vignette, no grid/dots; paper surfaces on `.jn-card-main` so pins/stamps/signature/resize stay outside torn clips.
+- Materials: compact `#d9c08f` + 19px ruling, memo `#ead9b4` Caveat, document `#efe5c9` with 20px margin + double-rule label, target `#e8dbc0` with inset frame/formal label; picture layouts; author signature; no stripe/badge.
+- Torn modifier: stable ID-seeded `scripts/tear.mjs` polygon, straight top edge, fiber rim, padding avoids clipping; no DOM-index seed.
+- Bundled OFL fonts under `assets/fonts` (Alegreya/Caveat variable, IM Fell, Old Standard TT Cyrillic) with `styles/fonts.css`; no CDN. EN/RU fallback verified.
+- Theme schema extended with validated `materials` (board/paper/fonts/pins/threads), new `stylized` built-in default, all `--jn-sc-*` tokens; module-prefixed asset routes; old themes normalize to new materials; selector visible, named, inert, accessible; `journalinatorThemeChanged` fires on actual applied-theme changes.
+- Tests: **251 pass / 0 fail**; syntax pass; fonts/contrast/tear tests added. Headless Chromium probe verified cork/grain load, rules visible, resize handle hit-test, selector inert.
+
+Reserved for later phases: pin size/style tokens and thread dye/fade tokens are emitted but consumed in Phases 4–5. Per-torn-card drop-shadow performance remains a Phase 8 measurement item.

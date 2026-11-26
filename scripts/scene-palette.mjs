@@ -376,7 +376,7 @@ export function paletteToTheme(palette, { id = SCENE_THEME_ID } = {}) {
       color: "bg",
       pattern: "dots",
       patternColor: c.line,
-      patternSize: 24,
+      patternSize: 320,
       patternOpacity: mode === "dark" ? 0.75 : 0.5,
       image: null,
       vignette: mode === "dark" ? 0.2 : 0.06

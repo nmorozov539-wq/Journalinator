@@ -18,6 +18,7 @@
  */
 import { CARD_STYLES } from "./registry.mjs";
 import { LINK_COLOR_SLOTS } from "../link-colors.mjs";
+import { PIN_STYLES } from "../presentation.mjs";
 
 export const COLOR_TOKENS = Object.freeze([
   "bg", "panel", "text", "muted", "line", "acc", "gm", "hint", "thread",
@@ -32,6 +33,33 @@ export const ALIGNMENTS = Object.freeze(["left", "center", "right"]);
 export const FONT_KEYS = Object.freeze(["system", "serif", "mono", "rounded"]);
 export const SHADOW_KEYS = Object.freeze(["none", "flat", "paper", "raised", "deep"]);
 export const LINK_SHADOW_KEYS = Object.freeze(["none", "soft"]);
+
+/**
+ * Material typography is a bounded enum, never a raw CSS font stack. The keys map to the
+ * locally bundled families (see styles/fonts.css); unknown or misspelled keys fall back.
+ */
+export const MATERIAL_FONT_KEYS = Object.freeze(["alegreya", "caveat", "fell", "oldstandard"]);
+
+export const MATERIAL_FONT_STACKS = Object.freeze({
+  alegreya: 'Alegreya, Georgia, "Times New Roman", serif',
+  caveat: '"Caveat", "Segoe Print", "Bradley Hand", Georgia, serif',
+  fell: '"IM Fell English", "Old Standard TT", Georgia, serif',
+  oldstandard: '"Old Standard TT", Georgia, serif'
+});
+
+const MATERIAL_FONT_DEFAULTS = Object.freeze({
+  body: "alegreya",
+  hand: "caveat",
+  display: "fell",
+  formal: "oldstandard"
+});
+
+/**
+ * The grain layer is a fixed bundled asset; it is not a theme-controlled URL.
+ * Foundry resolves module assets from a module-prefixed data path, so the module id must be
+ * part of the stored value (`getRoute` then yields `/modules/...`, not a bare `/assets/...`).
+ */
+export const STYLIZED_GRAIN_TILE = "modules/fvtt-journalinator/assets/stylized/grain.svg";
 
 const FONTS = Object.freeze({
   system: "system-ui, sans-serif",
@@ -167,6 +195,64 @@ function normalizeLinks(raw, board) {
   };
 }
 
+/**
+ * Merges a partial `materials` block over the fixed Stylized Canvas defaults. Unknown keys are
+ * dropped, numbers are clamped, paths go through the same safe data-path check as board images,
+ * and font choices are limited to the bundled enum. No raw CSS or remote URL survives.
+ */
+function normalizeMaterials(raw) {
+  const input = isObject(raw) ? raw : {};
+  const base = BASE_MATERIALS;
+
+  const rawBoard = isObject(input.board) ? input.board : {};
+  const board = {
+    cork: colorRef(rawBoard.cork, base.board.cork),
+    corkTile: imagePath(rawBoard.corkTile) ?? base.board.corkTile,
+    size: num(rawBoard.size, 64, 640, base.board.size),
+    border: colorRef(rawBoard.border, base.board.border),
+    radius: num(rawBoard.radius, 0, 24, base.board.radius),
+    lightOpacity: num(rawBoard.lightOpacity, 0, 0.6, base.board.lightOpacity),
+    vignetteColor: colorRef(rawBoard.vignetteColor, base.board.vignetteColor),
+    vignetteStart: num(rawBoard.vignetteStart, 0, 90, base.board.vignetteStart),
+    vignetteEnd: num(rawBoard.vignetteEnd, 0, 100, base.board.vignetteEnd)
+  };
+
+  const rawPaper = isObject(input.paper) ? input.paper : {};
+  const paper = {};
+  for (const key of Object.keys(base.paper)) paper[key] = colorRef(rawPaper[key], base.paper[key]);
+
+  const rawFonts = isObject(input.fonts) ? input.fonts : {};
+  const fonts = {};
+  for (const key of Object.keys(MATERIAL_FONT_DEFAULTS)) {
+    fonts[key] = pickEnum(rawFonts[key], MATERIAL_FONT_KEYS, MATERIAL_FONT_DEFAULTS[key]);
+  }
+
+  const rawPins = isObject(input.pins) ? input.pins : {};
+  const pins = {
+    mainSize: num(rawPins.mainSize, 12, 32, base.pins.mainSize),
+    minorSize: num(rawPins.minorSize, 5, 16, base.pins.minorSize),
+    routeSize: num(rawPins.routeSize, 6, 24, base.pins.routeSize),
+    rim: colorRef(rawPins.rim, base.pins.rim),
+    defaultStyle: pickEnum(rawPins.defaultStyle, PIN_STYLES, base.pins.defaultStyle)
+  };
+
+  const rawThreads = isObject(input.threads) ? input.threads : {};
+  let dyes = [...base.threads.dyes];
+  if (Array.isArray(rawThreads.dyes)) {
+    const valid = rawThreads.dyes.filter(isColorRef).slice(0, 6);
+    dyes = Array.from({ length: 6 }, (_, index) => valid[index] ?? base.threads.dyes[index]);
+  }
+  const threads = {
+    dyes,
+    accent: colorRef(rawThreads.accent, base.threads.accent),
+    shadow: colorRef(rawThreads.shadow, base.threads.shadow),
+    fade: num(rawThreads.fade, 0, 1, base.threads.fade),
+    fadeTime: Math.round(num(rawThreads.fadeTime, 0, 400, base.threads.fadeTime))
+  };
+
+  return { board, paper, fonts, pins, threads };
+}
+
 const BASE_TYPE = Object.freeze({
   uiFont: "system",
   titleFont: "system", titleSize: 14, titleWeight: 600, titleSpacing: 0,
@@ -205,6 +291,49 @@ const BASE_LINKS = Object.freeze({
   colors: DEFAULT_LINK_COLORS
 });
 
+/**
+ * Selected Stylized Canvas materials (spec §2, visual reference). These are the only
+ * defaults: legacy and custom theme inputs normalize to them, because the new presentation
+ * deliberately does not preserve old palettes or card surfaces.
+ */
+export const STYLIZED_MATERIALS = Object.freeze({
+  board: {
+    cork: "#7b5233",
+    // Module-prefixed so `foundry.utils.getRoute` produces a working module URL. Custom themes
+    // still pass through `imagePath` and remain safe relative data paths (no module rewrite).
+    corkTile: "modules/fvtt-journalinator/assets/stylized/cork.svg",
+    size: 320,
+    border: "#5a402d",
+    radius: 8,
+    lightOpacity: 0.12,
+    vignetteColor: "rgba(8, 4, 0, 0.55)",
+    vignetteStart: 38,
+    vignetteEnd: 100
+  },
+  paper: {
+    compact: "#d9c08f",
+    memo: "#ead9b4",
+    document: "#efe5c9",
+    target: "#e8dbc0",
+    fiber: "#f0e4c9",
+    ink: "#3c2b19",
+    inkFace: "#45321f",
+    rule: "rgba(107,81,37,.12)",
+    docMargin: "rgba(139,102,55,.14)"
+  },
+  fonts: { ...MATERIAL_FONT_DEFAULTS },
+  pins: { mainSize: 20, minorSize: 9, routeSize: 12, rim: "#b69a67", defaultStyle: "enamel" },
+  threads: {
+    dyes: ["#b85d4d", "#c7a45e", "#8fa574", "#7297b2", "#ac89aa", "#d1c2a0"],
+    accent: "#d8c49d",
+    shadow: "#21150c",
+    fade: 0.15,
+    fadeTime: 160
+  }
+});
+
+const BASE_MATERIALS = STYLIZED_MATERIALS;
+
 /** The current look, expressed in the new token vocabulary. */
 export const CLASSIC_THEME = Object.freeze({
   id: "classic",
@@ -216,7 +345,7 @@ export const CLASSIC_THEME = Object.freeze({
     dangerText: "#e8b9b9", onAccent: "#17171a", shadow: "#000000", stamp: "#e8d9b9"
   },
   board: {
-    color: "bg", pattern: "dots", patternColor: "#2d2d33", patternSize: 24,
+    color: "bg", pattern: "dots", patternColor: "#2d2d33", patternSize: 320,
     patternOpacity: 1, image: null, imageOpacity: 1, imageSize: "cover", vignette: 0
   },
   // The old toolbar palette, kept verbatim so existing worlds look untouched.
@@ -255,7 +384,7 @@ export const WARM_THEME = Object.freeze({
     dangerText: "#f0c6bd", onAccent: "#17171a", shadow: "#150906", stamp: "#e6d6b4"
   },
   board: {
-    color: "#281e18", pattern: "dots", patternColor: "#4a3628", patternSize: 24,
+    color: "#281e18", pattern: "dots", patternColor: "#4a3628", patternSize: 320,
     patternOpacity: 1, image: null, imageOpacity: 1, imageSize: "cover", vignette: 0.22
   },
   links: {
@@ -282,7 +411,7 @@ export const PARCHMENT_THEME = Object.freeze({
     dangerText: "#6b1f1f", onAccent: "#fff8ec", shadow: "#2b1d0f", stamp: "#f6efdc"
   },
   board: {
-    color: "#e7ddc6", pattern: "grid", patternColor: "#c6b795", patternSize: 26,
+    color: "#e7ddc6", pattern: "grid", patternColor: "#c6b795", patternSize: 320,
     patternOpacity: 0.55, image: null, imageOpacity: 1, imageSize: "cover", vignette: 0.08
   },
   links: {
@@ -316,6 +445,27 @@ export const PARCHMENT_THEME = Object.freeze({
 });
 
 /**
+ * The new default. Chrome/colour roles stay on the compatible classic palette so the existing
+ * CSS-variable API keeps working; all canvas surfaces come from `materials`, and the old board
+ * pattern is disabled by `applyTheme`.
+ */
+export const STYLIZED_THEME = Object.freeze({
+  id: "stylized",
+  nameKey: "JN.Theme.Stylized",
+  colors: { ...CLASSIC_THEME.colors },
+  board: { ...CLASSIC_THEME.board, pattern: "none" },
+  // Dye-based link defaults replace the old toolbar palette; the reference endpoint pin is 4px.
+  links: {
+    ...CLASSIC_THEME.links,
+    pinRadius: 4,
+    colors: { link1: "#b85d4d", link2: "#c7a45e", link3: "#8fa574" }
+  },
+  type: {},
+  materials: STYLIZED_MATERIALS,
+  styles: {}
+});
+
+/**
  * Fills a partial theme out to a complete, safe one. Unknown keys are dropped; every number
  * is clamped; images are restricted to Foundry data paths.
  */
@@ -333,7 +483,7 @@ export function normalizeTheme(raw, { id = "custom", name = null } = {}) {
     color: colorRef(rawBoard.color, base.board.color),
     pattern: pickEnum(rawBoard.pattern, BOARD_PATTERNS, base.board.pattern),
     patternColor: colorRef(rawBoard.patternColor, base.board.patternColor),
-    patternSize: num(rawBoard.patternSize, 4, 200, base.board.patternSize),
+    patternSize: num(rawBoard.patternSize, 4, 640, base.board.patternSize),
     patternOpacity: num(rawBoard.patternOpacity, 0, 1, base.board.patternOpacity),
     image: imagePath(rawBoard.image),
     imageOpacity: num(rawBoard.imageOpacity, 0, 1, base.board.imageOpacity),
@@ -373,6 +523,7 @@ export function normalizeTheme(raw, { id = "custom", name = null } = {}) {
     colors,
     board,
     links,
+    materials: normalizeMaterials(input.materials),
     type: globalType,
     styles
   };
@@ -475,6 +626,57 @@ export function themeToVars(theme) {
   const uiFont = theme.type?.uiFont ?? "system";
   vars["--jn-ui-font"] = FONTS[uiFont] ?? FONTS.system;
 
+  // --- Stylized Canvas material tokens -------------------------------------------------------
+  // A normalized theme always has `materials`; re-normalizing here also makes the emitter safe
+  // for the exported frozen theme constants and for callers that pass a raw theme.
+  const materials = normalizeMaterials(theme.materials);
+  const materialBoard = materials.board;
+  const materialPaper = materials.paper;
+
+  vars["--jn-sc-cork"] = resolveColor(materialBoard.cork, colors);
+  vars["--jn-sc-cork-tile"] = cssUrl(materialBoard.corkTile);
+  vars["--jn-sc-cork-size"] = pixel(materialBoard.size);
+  vars["--jn-sc-board-border"] = resolveColor(materialBoard.border, colors);
+  vars["--jn-sc-board-radius"] = pixel(materialBoard.radius);
+  // `stylized.css` composes these colours and the normalized stops into its highlight/vignette
+  // layers, so a theme can move the vignette without editing CSS.
+  vars["--jn-sc-board-light"] = `rgba(255, 225, 160, ${materialBoard.lightOpacity})`;
+  vars["--jn-sc-board-vignette"] = resolveColor(materialBoard.vignetteColor, colors);
+  vars["--jn-sc-board-vignette-start"] = `${materialBoard.vignetteStart}%`;
+  vars["--jn-sc-board-vignette-end"] = `${materialBoard.vignetteEnd}%`;
+  vars["--jn-sc-grain"] = cssUrl(STYLIZED_GRAIN_TILE);
+
+  vars["--jn-sc-paper-compact"] = resolveColor(materialPaper.compact, colors);
+  vars["--jn-sc-paper-memo"] = resolveColor(materialPaper.memo, colors);
+  vars["--jn-sc-paper-document"] = resolveColor(materialPaper.document, colors);
+  vars["--jn-sc-paper-target"] = resolveColor(materialPaper.target, colors);
+  vars["--jn-sc-torn-fiber"] = resolveColor(materialPaper.fiber, colors);
+  vars["--jn-sc-ink"] = resolveColor(materialPaper.ink, colors);
+  vars["--jn-sc-ink-face"] = resolveColor(materialPaper.inkFace, colors);
+  vars["--jn-sc-rule"] = resolveColor(materialPaper.rule, colors);
+  vars["--jn-sc-doc-margin"] = resolveColor(materialPaper.docMargin, colors);
+
+  vars["--jn-sc-font-body"] = MATERIAL_FONT_STACKS[materials.fonts.body];
+  vars["--jn-sc-font-hand"] = MATERIAL_FONT_STACKS[materials.fonts.hand];
+  vars["--jn-sc-font-display"] = MATERIAL_FONT_STACKS[materials.fonts.display];
+  vars["--jn-sc-font-formal"] = MATERIAL_FONT_STACKS[materials.fonts.formal];
+
+  // Pins and thread materials are part of the public theme API now; the canvas consumes them in
+  // Phases 4/5. Keep emitting them so themes written today keep working then.
+  vars["--jn-sc-pin-main-size"] = pixel(materials.pins.mainSize);
+  vars["--jn-sc-pin-minor-size"] = pixel(materials.pins.minorSize);
+  vars["--jn-sc-pin-route-size"] = pixel(materials.pins.routeSize);
+  vars["--jn-sc-pin-rim"] = resolveColor(materials.pins.rim, colors);
+  vars["--jn-sc-pin-default"] = materials.pins.defaultStyle;
+
+  for (const [index, dye] of materials.threads.dyes.entries()) {
+    vars[`--jn-sc-thread-${index + 1}`] = resolveColor(dye, colors);
+  }
+  vars["--jn-sc-thread-accent"] = resolveColor(materials.threads.accent, colors);
+  vars["--jn-sc-thread-shadow"] = resolveColor(materials.threads.shadow, colors);
+  vars["--jn-sc-thread-fade"] = String(materials.threads.fade);
+  vars["--jn-sc-thread-fade-time"] = `${materials.threads.fadeTime}ms`;
+
   for (const [styleKey, style] of Object.entries(theme.styles)) {
     const prefix = `--jn-style-${styleKey}-`;
     const type = style.type;
@@ -521,7 +723,9 @@ export function themeToVars(theme) {
 export function applyTheme(root, theme) {
   if (!root) return theme;
   root.dataset.theme = theme.id;
-  root.dataset.boardPattern = theme.board.pattern;
+  // Stylized Canvas is the only presentation: old dot/grid boards are never painted.
+  root.dataset.visual = "stylized";
+  root.dataset.boardPattern = "none";
   root.dataset.boardImage = theme.board.image ? "on" : "off";
   const vars = themeToVars(theme);
   for (const [name, value] of Object.entries(vars)) root.style.setProperty(name, value);
@@ -533,7 +737,7 @@ export function applyTheme(root, theme) {
 const registry = new Map();
 const customSources = new Map();
 const REGISTERED_ORDER = [];
-export const BUILTIN_THEME_IDS = Object.freeze(["classic", "fantasy", "parchment"]);
+export const BUILTIN_THEME_IDS = Object.freeze(["stylized", "classic", "fantasy", "parchment"]);
 
 /**
  * Registers (or replaces) a theme. Used by the built-ins at load time and by other modules
@@ -553,7 +757,7 @@ export function listThemes() {
 }
 
 export function getTheme(id) {
-  return registry.get(id) ?? registry.get(CLASSIC_THEME.id);
+  return registry.get(id) ?? registry.get(STYLIZED_THEME.id) ?? registry.get(CLASSIC_THEME.id);
 }
 
 /** Re-registers themes saved to the client setting, preserving their picker order. */
@@ -576,6 +780,7 @@ export function savedThemes() {
   return Object.fromEntries(customSources);
 }
 
+registerTheme("stylized", STYLIZED_THEME);
 registerTheme("classic", CLASSIC_THEME);
 registerTheme("fantasy", WARM_THEME);
 registerTheme("parchment", PARCHMENT_THEME);

@@ -4,6 +4,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { JSDOM } from "jsdom";
 import showdown from "showdown";
 
@@ -45,7 +46,8 @@ const { privateStore } = await import(`${JN}/scripts/store/private-store.mjs`);
 const { resolvePresentation } = await import(`${JN}/scripts/presentation.mjs`);
 const { default: NoteEditor } = await import(`${JN}/scripts/app/editor.mjs`);
 const { default: JournalCanvas } = await import(`${JN}/scripts/app/canvas.mjs`);
-const { default: JournalApp, isTextEntryTarget } = await import(`${JN}/scripts/app/journal-app.mjs`);
+const { default: JournalApp, isTextEntryTarget, themeApplicationChanged } =
+  await import(`${JN}/scripts/app/journal-app.mjs`);
 const { default: PrivateWorkspace } = await import(`${JN}/scripts/app/private-workspace.mjs`);
 const { parsePatchNotes } = await import(`${JN}/scripts/app/patch-notes.mjs`);
 const { applyTheme, getTheme } = await import(`${JN}/scripts/styles/themes.mjs`);
@@ -658,7 +660,7 @@ test("the context menu creates the chosen card immediately and the toolbar opens
   }
 });
 
-test("toolbar dropdowns filter cards and change the saved board theme", async () => {
+test("toolbar dropdowns filter cards and keep the theme selector inert", async () => {
   const app = new JournalApp();
   const host = document.createElement("div");
   app.element = host;
@@ -680,23 +682,100 @@ test("toolbar dropdowns filter cards and change the saved board theme", async ()
     assert.equal(filters.open, true);
     style.click();
     assert.ok(!tavern.classList.contains("jn-dimmed"));
+
+    // The theme selector stays in place but is visibly inactive: no palette popup, no write,
+    // no appearance change. Theme token/API coverage lives in tests/theme.test.mjs.
     const theme = host.querySelector(".journalinator-theme");
+    assert.ok(theme, "the theme selector is still rendered");
     assert.equal(filters.nextElementSibling, theme);
     assert.equal(theme.closest(".jn-toolbar-group").nextElementSibling.querySelector(".journalinator-trash") !== null, true);
-    theme.querySelector("summary").dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
-    assert.equal(filters.open, false);
-    theme.querySelector("summary").click();
-    theme.querySelector('[data-theme-choice="parchment"]').click();
-    await settle();
-    assert.equal(game.settings.get("fvtt-journalinator", "boardTheme"), "parchment");
+    assert.notEqual(theme.hidden, true, "the selector stays visible");
+    const control = theme.matches("button, summary") ? theme : theme.querySelector("button, summary");
+    const inactive = [theme, control].filter(Boolean).some(node =>
+      node.disabled === true
+      || node.hasAttribute("disabled")
+      || node.getAttribute("aria-disabled") === "true"
+      || node.hasAttribute("inert")
+      || node.dataset.disabled === "true"
+      || node.dataset.inactive === "true");
+    assert.ok(inactive, "the theme selector is disabled or inert");
+    const inactiveLabel = game.i18n.localize("JN.Theme.PickerInactive");
+    assert.equal(theme.getAttribute("aria-label"), inactiveLabel, "the inert details has an accessible name");
+    assert.equal(control?.getAttribute("aria-label"), inactiveLabel, "the summary has an accessible name");
+    assert.equal(theme.open, false, "the disabled details starts closed");
+    const panel = theme.querySelector(".jn-toolbar-panel");
+    assert.equal(panel.getAttribute("aria-hidden"), "true", "the panel is hidden from assistive tech");
+    assert.equal(panel.hasAttribute("inert"), true, "the panel is inert");
+    const choices = [...panel.querySelectorAll("button")];
+    assert.ok(choices.length >= 2, "the theme list is still rendered");
+    assert.ok(choices.every(button => button.disabled), "every theme choice is disabled");
     const board = host.querySelector(".journalinator-root");
-    assert.equal(board.dataset.theme, "parchment");
-    assert.equal(board.style.getPropertyValue("--jn-bg"), "#e7ddc6");
-    assert.equal(board.style.getPropertyValue("--jn-style-sticky-surface"), "#f6e6a6");
-    assert.equal(board.querySelector(".jn-canvas").dataset.boardPattern, "grid");
-    assert.equal(theme.open, false);
+    const themeBefore = board.dataset.theme;
+    control?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    control?.click();
+    await settle();
+    assert.equal(theme.open, false, "trying to open the inert details is refused");
+    assert.equal(game.settings.get("fvtt-journalinator", "boardTheme"), initialTheme,
+      "clicking the inert selector never changes the saved theme");
+    assert.equal(board.dataset.theme, themeBefore, "the applied theme never changes");
+
+    // The disabled look is CSS-only; the selector never becomes hidden.
+    const journalCss = readFileSync(new URL("../../styles/journal.css", import.meta.url), "utf8");
+    assert.match(journalCss,
+      /\.journalinator-theme\[aria-disabled="true"\]\s*\{[^}]*opacity:\s*0?\.55;[^}]*cursor:\s*not-allowed;/,
+      "the inert theme selector has a disabled opacity and cursor");
+    assert.match(journalCss,
+      /\.journalinator-theme\[aria-disabled="true"\]\s+summary\s*\{[^}]*cursor:\s*not-allowed;/,
+      "the inert summary has a disabled cursor");
+    const canvas = board.querySelector(".jn-canvas");
+    assert.ok(["none", "stylized"].includes(canvas.dataset.boardPattern),
+      `the board uses the stylized material, not "${canvas.dataset.boardPattern}"`);
+    assert.notEqual(canvas.dataset.boardPattern, "dots");
+    assert.notEqual(canvas.dataset.boardPattern, "grid");
+    assert.equal(canvas.style.getPropertyValue("--jn-board-cork-size"), "320px",
+      "the applied theme uses the 320px cork material, not the retired pattern size");
   } finally {
     await game.settings.set("fvtt-journalinator", "boardTheme", initialTheme);
+    app._onClose();
+    host.remove();
+  }
+});
+
+test("journalinatorThemeChanged fires when the applied theme changes, not on every render", async () => {
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const initial = game.settings.get("fvtt-journalinator", "boardTheme");
+  const seen = [];
+  const onChange = (id, theme) => seen.push([id, theme.id]);
+  const hookId = Hooks.on("journalinatorThemeChanged", onChange);
+  const draw = async () => app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+  try {
+    await game.settings.set("fvtt-journalinator", "boardTheme", "stylized");
+    await draw();
+    assert.deepEqual(seen, [["stylized", "stylized"]], "the first applied theme is announced");
+
+    await draw();
+    await draw();
+    assert.equal(seen.length, 1, "re-rendering the same theme does not refire the hook");
+
+    await game.settings.set("fvtt-journalinator", "boardTheme", "parchment");
+    await draw();
+    assert.deepEqual(seen.at(-1), ["parchment", "parchment"]);
+    assert.equal(seen.length, 2);
+
+    await draw();
+    assert.equal(seen.length, 2, "a re-render of parchment stays silent");
+
+    // A regenerated scene palette keeps the synthetic "scene" id but changes the theme object.
+    const sceneA = { id: "scene", theme: { id: "scene" } };
+    const sceneB = { id: "scene", theme: { id: "scene" } };
+    assert.equal(themeApplicationChanged(sceneA, sceneA.theme), false, "same cached scene object is silent");
+    assert.equal(themeApplicationChanged(sceneA, sceneB.theme), true, "a new scene palette is announced");
+  } finally {
+    Hooks.off("journalinatorThemeChanged", hookId);
+    await game.settings.set("fvtt-journalinator", "boardTheme", initial);
     app._onClose();
     host.remove();
   }
@@ -840,6 +919,120 @@ test("cards hide the internal name, show labels, and promote on qualifying conte
     canvas.update(notes, { cards, labels: {} });
     assert.ok(card("picturecard00001").classList.contains("jn-compact"),
       "removing the only promoting condition demotes the card");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("stylized canvas uses cork, paper surfaces, fonts and torn clipping on the paper only", () => {
+  const canvas = new JournalCanvas({});
+  document.body.appendChild(canvas.root);
+  const base = (id, system = {}) => ({
+    _id: id,
+    name: `Internal ${id}`,
+    system: {
+      style: "sticky", authorId: gmUser.id, links: [],
+      blocks: [{ blockId: `${id}-block`, text: "three short words" }],
+      ...system
+    }
+  });
+  const notes = [
+    base("stylizedcompact01"),
+    base("stylizedmemo0001", {
+      presentation: { extendedStyle: "memo", forceExtended: true, font: "default", torn: true }
+    }),
+    base("stylizeddoc00001", {
+      presentation: { extendedStyle: "document", forceExtended: true, font: "hand" }
+    }),
+    base("stylizedtarget01", {
+      presentation: { extendedStyle: "target", forceExtended: true, font: "display", torn: true }
+    })
+  ];
+  const cards = Object.fromEntries(notes.map((note, index) => [note._id, { x: index * 300, y: 0, rotation: 0 }]));
+  const layout = { cards, labels: {} };
+  try {
+    canvas.update(notes, layout);
+    const card = id => canvas.root.querySelector(`.jn-card[data-id="${id}"]`);
+
+    assert.equal(canvas.root.dataset.boardPattern, "stylized", "the board advertises the stylized material");
+    assert.notEqual(canvas.root.dataset.boardPattern, "dots");
+    assert.notEqual(canvas.root.dataset.boardPattern, "grid");
+    assert.equal(canvas.root.style.getPropertyValue("--jn-board-cork-size"), "320px",
+      "the cork tile keeps its world size");
+
+    for (const note of notes) {
+      const el = card(note._id);
+      assert.ok(el, `card ${note._id} rendered`);
+      assert.ok(el.querySelector(":scope > .jn-card-main"), "paper surface is the main wrapper");
+      assert.ok(el.querySelector(":scope > .jn-card-signature").textContent, "author signature remains");
+      assert.equal(el.querySelector(".jn-author-stripe, .jn-author-badge, .jn-card-author-stripe, .jn-card-author-badge"), null,
+        "no legacy author stripe/badge");
+      assert.equal(el.classList.contains("jn-card-sticky"), false, "no legacy sticky class");
+      assert.equal(el.classList.contains("jn-card-torn"), false, "torn is a modifier, not a legacy type");
+    }
+
+    const compact = card("stylizedcompact01");
+    const memo = card("stylizedmemo0001");
+    const documentCard = card("stylizeddoc00001");
+    const target = card("stylizedtarget01");
+    assert.ok(compact.classList.contains("jn-compact"));
+    assert.ok(memo.classList.contains("jn-extended") && memo.classList.contains("jn-card-memo"));
+    assert.ok(documentCard.classList.contains("jn-extended") && documentCard.classList.contains("jn-card-document"));
+    assert.ok(target.classList.contains("jn-extended") && target.classList.contains("jn-card-wanted"));
+    assert.ok(documentCard.classList.contains("jn-font-hand"), "per-note font class is preserved");
+    assert.ok(target.classList.contains("jn-font-display"), "per-note font class is preserved");
+    assert.ok(compact.classList.contains("jn-font-default"));
+
+    assert.ok(memo.classList.contains("jn-torn"));
+    const tear = memo.style.getPropertyValue("--jn-tear");
+    assert.match(tear, /^polygon\(/, "torn cards expose a CSS polygon");
+    assert.ok(memo.dataset.tearSeed, "torn profile is seeded from the stable note id");
+    assert.equal(documentCard.classList.contains("jn-torn"), false);
+    assert.equal(documentCard.style.getPropertyValue("--jn-tear"), "");
+    assert.ok(target.classList.contains("jn-torn"));
+    assert.notEqual(target.style.getPropertyValue("--jn-tear"), tear,
+      "different note ids get different torn edges");
+
+    canvas.update(notes, layout);
+    assert.equal(memo.style.getPropertyValue("--jn-tear"), tear,
+      "re-rendering keeps the same torn edge for one note");
+
+    const css = readFileSync(new URL("../../styles/stylized.css", import.meta.url), "utf8");
+    assert.ok(css.includes("../assets/stylized/cork.svg"), "cork is a local bundled asset");
+    assert.ok(css.includes("../assets/stylized/grain.svg"), "paper grain is a local bundled asset");
+    for (const token of ["--jn-sc-paper-compact", "--jn-sc-paper-memo", "--jn-sc-paper-document",
+      "--jn-sc-paper-target", "--jn-sc-torn-fiber", "--jn-sc-ink"]) {
+      assert.ok(css.includes(`var(${token}`), `${token} is a theme hook`);
+    }
+    assert.match(css,
+      /\.jn-canvas \.jn-card\.jn-torn\s*>\s*\.jn-card-main\s*\{[^}]*clip-path:\s*var\(--jn-tear/,
+      "clip-path is applied to the paper wrapper, not the card root");
+    assert.doesNotMatch(css,
+      /\.jn-canvas \.jn-card\.jn-torn\s*\{[^}]*clip-path:/,
+      "the card root itself stays unclipped for pins, stamps, signature and resize");
+    assert.equal(css.includes("--jn-board-pattern-paint"), false, "the legacy dot/grid paint is gone");
+
+    // The resize handle sits above the paper wrapper and keeps receiving pointer events.
+    assert.match(css,
+      /\.jn-canvas \.jn-card \.jn-card-resize\s*\{[^}]*z-index:\s*8;[^}]*pointer-events:\s*auto;/,
+      "the resize handle is above .jn-card-main and pointer-interactive");
+
+    // The vignette stops come from the normalized theme data, not hardcoded CSS percentages.
+    assert.match(css, /transparent var\(--jn-sc-board-vignette-start, 38%\)/);
+    assert.match(css, /var\(--jn-sc-board-vignette-end, 100%\)/);
+
+    // Compact/document layer order: gloss, rules/margin, grain; the grain multiplies underneath.
+    const compactBlock = css.match(/\.jn-canvas \.jn-card\.jn-compact > \.jn-card-main \{[^}]*\}/)?.[0] ?? "";
+    const documentBlock = css.match(/\.jn-canvas \.jn-card\.jn-card-document > \.jn-card-main \{[^}]*\}/)?.[0] ?? "";
+    const inOrder = (block, ...parts) =>
+      parts.every((part, index) => index === 0 || block.indexOf(parts[index - 1]) < block.indexOf(part));
+    assert.ok(inOrder(compactBlock, "linear-gradient(180deg", "repeating-linear-gradient", "var(--jn-sc-grain"),
+      "compact paints gloss and ruling above the grain");
+    assert.match(compactBlock, /background-blend-mode:\s*normal, normal, multiply;/);
+    assert.ok(inOrder(documentBlock, "linear-gradient(180deg", "var(--jn-sc-doc-margin", "var(--jn-sc-grain"),
+      "document paints the gloss and margin band above the grain");
+    assert.match(documentBlock, /background-blend-mode:\s*normal, normal, multiply;/);
   } finally {
     canvas.disconnectGeometry();
     canvas.root.remove();

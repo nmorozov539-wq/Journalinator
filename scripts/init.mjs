@@ -33,7 +33,7 @@ Hooks.once("init", () => {
     scope: "world", config: false, type: Number, default: 0
   });
   game.settings.register(MODULE_ID, "boardTheme", {
-    scope: "client", config: false, type: String, default: "classic"
+    scope: "client", config: false, type: String, default: "stylized"
   });
   game.settings.register(MODULE_ID, "customThemes", {
     scope: "client", config: false, type: Object, default: {}
@@ -51,7 +51,7 @@ Hooks.once("init", () => {
  *
  * Registrations persist in the client setting by default; pass `{ persist: false }` for a
  * session-only theme. `journalinatorThemeRegistered` fires on registration and
- * `journalinatorThemeChanged` fires when a theme is applied.
+ * `journalinatorThemeChanged` fires when the applied theme actually changes (not on every render).
  */
 function exposeThemeApi() {
   game.journalinator = {

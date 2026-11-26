@@ -9,6 +9,7 @@ import { hasAnyLock } from "../locks.mjs";
 import { renderMarkdown } from "../markdown.mjs";
 import { t } from "../i18n.mjs";
 import { classifyNote, resolvePresentation } from "../presentation.mjs";
+import { tearPolygon, tearSeed } from "../tear.mjs";
 import { DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, STAMP_CORNERS, STAMP_IDS, stampUrl } from "../stamps.mjs";
 
 const DRAG_THRESHOLD = 5;
@@ -75,8 +76,9 @@ export default class JournalCanvas {
 
     this.root = document.createElement("div");
     this.root.className = "jn-canvas";
-    this.root.dataset.boardPattern = "dots";
-    this.patternSize = 24;
+    // Canvas 2 paints the selected cork material; there is no dot/grid presentation.
+    this.root.dataset.boardPattern = "stylized";
+    this.patternSize = 320;
     // Programmatic focus keeps canvas keyboard shortcuts scoped to an intentional canvas click
     // without adding the canvas itself to Foundry's normal Tab order.
     this.root.tabIndex = -1;
@@ -236,6 +238,20 @@ export default class JournalCanvas {
     el.classList.toggle("selected", this.selectedNoteIds.has(note._id) || note._id === this.selectedNoteId);
     el.classList.toggle("jn-being-edited", hasAnyLock(note._id));
     el.classList.toggle("jn-dimmed", !this.dimMatch(note));
+
+    // The torn outline is a stable function of the permanent document id, never DOM order or
+    // another client's view. Only the paper (`.jn-card-main`) is clipped; pins, stamps, the
+    // signature and the resize handle stay outside it and keep their hit areas.
+    if (presentation.torn) {
+      el.style.setProperty("--jn-tear", tearPolygon(note._id));
+      // The numeric seed is recorded for diagnostics/tests; the silhouette itself stays a
+      // pure function of the stable id.
+      el.dataset.tearSeed = String(tearSeed(note._id));
+    } else {
+      el.style.removeProperty("--jn-tear");
+      delete el.dataset.tearSeed;
+    }
+
     el.style.left = `${cardData.x}px`;
     el.style.top = `${cardData.y}px`;
     el.style.setProperty("--jn-rotation", `${cardData.rotation ?? 0}deg`);
@@ -720,8 +736,12 @@ export default class JournalCanvas {
 
   #applyTransform() {
     this.world.style.transform = `translate(${this.view.x}px, ${this.view.y}px) scale(${this.view.k})`;
-    const pattern = (this.patternSize || 24) * this.view.k;
-    this.root.style.setProperty("--jn-board-pattern-size", `${pattern}px`);
+    // Cork tile size is world-anchored: the base size is set once, CSS scales it by zoom, and
+    // the tile origin follows pan. That keeps the texture locked to the board instead of
+    // drifting or shimmering behind the cards.
+    const cork = this.patternSize || 320;
+    this.root.style.setProperty("--jn-board-cork-size", `${cork}px`);
+    this.root.style.setProperty("--jn-board-zoom", String(this.view.k));
     this.root.style.setProperty("--jn-board-pattern-pos", `${this.view.x}px ${this.view.y}px`);
     this.root.classList.toggle("jn-far-zoom", this.view.k < 0.48);
     this.#queueZoomComp();
@@ -753,8 +773,16 @@ export default class JournalCanvas {
    * size/position cannot live purely in CSS. Everything else is on the app root.
    */
   setTheme(theme) {
-    this.patternSize = theme?.board?.patternSize ?? 24;
-    this.root.dataset.boardPattern = theme?.board?.pattern ?? "dots";
+    // Cork size belongs to the material token, not the retired legacy board-pattern size.
+    const materialSize = Number(theme?.materials?.board?.size);
+    const boardSize = Number(theme?.board?.patternSize);
+    this.patternSize = Number.isFinite(materialSize) && materialSize > 0
+      ? materialSize
+      : (Number.isFinite(boardSize) && boardSize > 0 ? boardSize : 320);
+    // The visual canvas has no legacy dot/grid option. Keep the dataset limited to the two
+    // supported values: "stylized" for the cork material or "none" when a theme explicitly
+    // disables board patterning.
+    this.root.dataset.boardPattern = theme?.board?.pattern === "none" ? "none" : "stylized";
     this.#applyTransform();
   }
 

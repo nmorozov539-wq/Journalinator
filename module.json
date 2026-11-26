@@ -21,7 +21,7 @@
     }
   ],
   "esmodules": ["scripts/init.mjs"],
-  "styles": ["styles/journal.css"],
+  "styles": ["styles/journal.css", "styles/fonts.css", "styles/stylized.css"],
   "languages": [
     {
       "lang": "en",

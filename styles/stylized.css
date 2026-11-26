@@ -1,0 +1,606 @@
+/* Stylized canvas materials.
+ *
+ * Loaded after journal.css, this file replaces the legacy digital board and the old card
+ * chrome with the selected cork/paper presentation. It deliberately paints the *paper* on
+ * `.jn-card-main`; the card root stays an unclipped, transparent placement box so pins,
+ * stamps, the author signature, the resize handle and selection outlines never sit inside the
+ * torn edge's clip-path. All colour/type hooks are theme tokens with local fallbacks.
+ */
+
+/* --- Board: dark cork, warm light, vignette ------------------------------------------------ */
+
+.jn-canvas {
+  /* Internal stacks keep the public token names available to themes while giving every
+     material a local, offline-safe fallback. */
+  --jn-paper-font-body: var(--jn-sc-font-body, "Alegreya", "Old Standard TT", Georgia, "Times New Roman", serif);
+  --jn-paper-font-hand: var(--jn-sc-font-hand, "Caveat", "Segoe Print", "Bradley Hand", "Comic Sans MS", cursive);
+  --jn-paper-font-display: var(--jn-sc-font-display, "IM Fell English", "Old Standard TT", Georgia, "Times New Roman", serif);
+  --jn-paper-font-formal: var(--jn-sc-font-formal, "Old Standard TT", "IM Fell English", Georgia, "Times New Roman", serif);
+
+  background-color: var(--jn-sc-cork, #7b5233);
+  background-image: none;
+  border: 0;
+  border-radius: var(--jn-sc-board-radius, 8px);
+  /* The canvas fills the viewport; the board edge is a subtle inset rather than a layout box. */
+  box-shadow: inset 0 0 0 1px var(--jn-sc-board-border, #5a402d);
+}
+
+/* Cork texture is its own layer. Size and position are world-anchored by canvas.mjs, so the
+   grain tracks pan/zoom instead of shimmering independently of the cards. */
+.jn-canvas::before {
+  display: block;
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background-color: transparent;
+  background-image: var(--jn-sc-cork-tile, url("../assets/stylized/cork.svg"));
+  background-size: calc(var(--jn-board-cork-size, var(--jn-sc-cork-size, 320px)) * var(--jn-board-zoom, 1));
+  background-position: var(--jn-board-pattern-pos, 0 0);
+  background-repeat: repeat;
+  opacity: 1;
+  pointer-events: none;
+}
+/* Old dot/grid datasets may still arrive from a stored theme value. The selected Canvas 2
+   board is always the cork material; no digital pattern is painted for any dataset value. */
+.jn-canvas[data-board-pattern="dots"]::before,
+.jn-canvas[data-board-pattern="grid"]::before,
+.jn-canvas[data-board-pattern="none"]::before,
+.jn-canvas[data-board-pattern="stylized"]::before {
+  background-image: var(--jn-sc-cork-tile, url("../assets/stylized/cork.svg"));
+}
+/* Keep a readable material at far zoom without paying for a dense, aliasing tile. */
+.jn-canvas.jn-far-zoom::before {
+  display: block;
+  opacity: .5;
+}
+
+/* Warm light at 50% 40% above the cork, then the edge vignette. */
+.jn-canvas::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background:
+    radial-gradient(ellipse at 50% 40%,
+      var(--jn-sc-board-light, rgba(255, 225, 160, .12)), transparent 62%),
+    radial-gradient(ellipse at center,
+      transparent var(--jn-sc-board-vignette-start, 38%),
+      var(--jn-sc-board-vignette, rgba(8, 4, 0, .55)) var(--jn-sc-board-vignette-end, 100%));
+  pointer-events: none;
+}
+
+/* --- Card root: transparent placement box ------------------------------------------------- */
+
+.jn-canvas .jn-card {
+  --jn-paper: var(--jn-sc-paper-memo, #ead9b4);
+  --jn-paper-ink: var(--jn-sc-ink, #3c2b19);
+  --jn-paper-ink-soft: var(--jn-sc-ink-face, #45321f);
+  --jn-paper-rule: var(--jn-sc-rule, rgba(107, 81, 37, .16));
+  --jn-note-font: var(--jn-paper-font-body);
+  --jn-note-heading-font: var(--jn-paper-font-body);
+  --jn-note-size: 16px;
+  --jn-note-line: 1.48;
+  --jn-note-title-size: 20px;
+  --jn-note-title-weight: 400;
+  --jn-note-title-spacing: 0;
+  --jn-note-title-transform: none;
+  --jn-paper-pad-bottom: 30px;
+
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+  color: var(--jn-paper-ink-soft);
+  background: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  isolation: isolate;
+}
+/* The old fixed compact/extended paddings live on the root; the surface now owns them. */
+.jn-canvas .jn-card.jn-compact,
+.jn-canvas .jn-card.jn-extended,
+.jn-canvas .jn-card.jn-extended.jn-card-wanted {
+  padding: 0;
+  gap: 0;
+}
+
+/* --- Shared paper surface ----------------------------------------------------------------- */
+
+.jn-canvas .jn-card > .jn-card-main {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 23px 20px var(--jn-paper-pad-bottom, 30px);
+  color: var(--jn-paper-ink-soft);
+  background-color: var(--jn-paper);
+  background-image:
+    var(--jn-sc-grain, url("../assets/stylized/grain.svg")),
+    linear-gradient(180deg, rgba(255, 255, 255, .19), transparent 16%);
+  background-size: 200px 200px, 100% 100%;
+  background-repeat: repeat, no-repeat;
+  background-blend-mode: multiply, normal;
+  border: 1px solid color-mix(in srgb, var(--jn-paper-ink) 18%, transparent);
+  border-radius: 2px 2px 6px 2px;
+  box-shadow:
+    2px 5px 4px rgba(0, 0, 0, .35),
+    7px 12px 12px rgba(0, 0, 0, .18);
+  color-scheme: light;
+  overflow-wrap: anywhere;
+}
+
+/* --- Compact: S3 warm scrap with faint horizontal ruling ---------------------------------- */
+
+.jn-canvas .jn-card.jn-compact {
+  width: max-content;
+  min-width: 76px;
+  max-width: 220px;
+  --jn-paper: var(--jn-sc-paper-compact, #d9c08f);
+  --jn-note-font: var(--jn-paper-font-body);
+  --jn-note-heading-font: var(--jn-paper-font-body);
+  --jn-note-size: 15px;
+  --jn-note-line: 1.45;
+  --jn-note-title-size: 18px;
+  --jn-paper-pad-bottom: 29px;
+}
+.jn-canvas .jn-card.jn-compact.jn-sized {
+  min-width: 130px;
+  max-width: none;
+}
+.jn-canvas .jn-card.jn-compact > .jn-card-main {
+  padding: 18px 14px var(--jn-paper-pad-bottom, 29px);
+  /* Layers paint bottom-to-top: grain sits under the ruling and the top gloss highlight. */
+  background-image:
+    linear-gradient(180deg, rgba(255, 255, 255, .18), transparent 16%),
+    repeating-linear-gradient(180deg, transparent 0 18px,
+      var(--jn-paper-rule) 18px 19px),
+    var(--jn-sc-grain, url("../assets/stylized/grain.svg"));
+  background-size: 100% 100%, 100% 19px, 200px 200px;
+  background-repeat: no-repeat, repeat, repeat;
+  background-blend-mode: normal, normal, multiply;
+  /* S3 has no folded corner. */
+  border-radius: 2px 2px 5px 2px;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+/* --- Memo: M1 plain warm parchment, generous handwriting ---------------------------------- */
+
+.jn-canvas .jn-card.jn-card-memo.jn-extended {
+  width: 360px;
+  --jn-paper: var(--jn-sc-paper-memo, #ead9b4);
+  --jn-note-font: var(--jn-paper-font-hand);
+  --jn-note-heading-font: var(--jn-paper-font-hand);
+  --jn-note-size: 21px;
+  --jn-note-line: 1.15;
+  --jn-note-title-size: 25px;
+  --jn-note-title-weight: 700;
+  --jn-paper-pad-bottom: 30px;
+}
+.jn-canvas .jn-card.jn-card-memo.jn-extended > .jn-card-main {
+  min-height: 160px;
+  padding: 24px 22px var(--jn-paper-pad-bottom, 30px);
+}
+
+/* --- Document: D2 light stock, margin band and formal serif label ------------------------- */
+
+.jn-canvas .jn-card.jn-card-document {
+  width: 248px;
+  --jn-paper: var(--jn-sc-paper-document, #efe5c9);
+  --jn-note-font: var(--jn-paper-font-body);
+  --jn-note-heading-font: var(--jn-paper-font-display);
+  --jn-note-size: 15px;
+  --jn-note-line: 1.5;
+  --jn-note-title-size: 20px;
+  --jn-note-title-weight: 400;
+  --jn-paper-pad-bottom: 30px;
+}
+.jn-canvas .jn-card.jn-card-document > .jn-card-main {
+  padding: 28px 20px var(--jn-paper-pad-bottom, 30px);
+  /* Grain is the base; the margin band and the gloss highlight read on top of it. */
+  background-image:
+    linear-gradient(180deg, rgba(255, 255, 255, .3), transparent 20%),
+    linear-gradient(90deg,
+      var(--jn-sc-doc-margin, rgba(139, 102, 55, .14)) 0 20px, transparent 20px),
+    var(--jn-sc-grain, url("../assets/stylized/grain.svg"));
+  background-size: 100% 100%, 100% 100%, 200px 200px;
+  background-repeat: no-repeat, no-repeat, repeat;
+  background-blend-mode: normal, normal, multiply;
+}
+.jn-canvas .jn-card.jn-card-document > .jn-card-main::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--jn-paper-ink) 16%, transparent),
+    inset 0 0 22px color-mix(in srgb, var(--jn-paper-ink) 8%, transparent);
+  pointer-events: none;
+}
+
+/* --- Target: P1/P2 parchment dossier frame ------------------------------------------------ */
+
+.jn-canvas .jn-card.jn-card-wanted {
+  width: 252px;
+  --jn-paper: var(--jn-sc-paper-target, #e8dbc0);
+  --jn-note-font: var(--jn-paper-font-body);
+  --jn-note-heading-font: var(--jn-paper-font-formal);
+  --jn-note-size: 15px;
+  --jn-note-line: 1.45;
+  --jn-note-title-size: 13px;
+  --jn-note-title-weight: 700;
+  --jn-note-title-spacing: .14em;
+  --jn-note-title-transform: uppercase;
+  --jn-paper-pad-bottom: 30px;
+}
+.jn-canvas .jn-card.jn-card-wanted > .jn-card-main {
+  padding: 17px 18px var(--jn-paper-pad-bottom, 30px);
+}
+.jn-canvas .jn-card.jn-card-wanted > .jn-card-main::after {
+  content: "";
+  position: absolute;
+  inset: 10px;
+  border: 1px solid color-mix(in srgb, var(--jn-paper-ink) 28%, transparent);
+  pointer-events: none;
+}
+
+/* --- Typography shared by all papers ------------------------------------------------------ */
+
+.jn-canvas .jn-card .jn-card-title {
+  order: 1;
+  margin: 0 0 8px;
+  padding: 0;
+  color: var(--jn-paper-ink);
+  font-family: var(--jn-note-heading-font);
+  font-size: var(--jn-note-title-size);
+  font-weight: var(--jn-note-title-weight);
+  line-height: 1.12;
+  letter-spacing: var(--jn-note-title-spacing);
+  text-transform: var(--jn-note-title-transform);
+  overflow-wrap: anywhere;
+}
+.jn-canvas .jn-card .jn-card-title[hidden] {
+  display: none;
+}
+.jn-canvas .jn-card .jn-card-wanted-heading {
+  order: 2;
+  display: block;
+  margin: 0 0 8px;
+  padding: 0;
+  border: 0;
+  color: var(--jn-paper-ink);
+  font-family: var(--jn-note-heading-font);
+  font-size: 20px;
+  font-weight: 400;
+  line-height: 1.15;
+  letter-spacing: 0;
+  text-transform: none;
+  overflow-wrap: anywhere;
+}
+.jn-canvas .jn-card .jn-card-wanted-heading[hidden] {
+  display: none !important;
+}
+.jn-canvas .jn-card .jn-card-body {
+  order: 3;
+  gap: 8px;
+}
+.jn-canvas .jn-card .jn-card-excerpt {
+  margin: 0;
+  color: var(--jn-paper-ink-soft);
+  font-family: var(--jn-note-font);
+  font-size: var(--jn-note-size);
+  line-height: var(--jn-note-line);
+  overflow-wrap: anywhere;
+}
+.jn-canvas .jn-card.jn-compact .jn-card-excerpt {
+  margin-top: 0;
+}
+
+/* Style-specific label treatments sit after the shared rules. */
+.jn-canvas .jn-card.jn-card-memo.jn-extended .jn-card-title {
+  font-family: var(--jn-note-heading-font);
+  font-size: 25px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+.jn-canvas .jn-card.jn-card-document .jn-card-title {
+  padding: 0 0 7px;
+  margin: 0 0 10px;
+  border-bottom: 3px double color-mix(in srgb, var(--jn-paper-ink) 48%, transparent);
+  font-family: var(--jn-note-heading-font);
+  font-size: 20px;
+  font-weight: 400;
+  line-height: 1.12;
+}
+.jn-canvas .jn-card.jn-card-wanted .jn-card-title {
+  order: 1;
+  margin: 0 0 8px;
+  padding: 0 0 7px;
+  border-bottom: 1px solid color-mix(in srgb, var(--jn-paper-ink) 32%, transparent);
+  text-align: center;
+  font-family: var(--jn-note-font);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+.jn-canvas .jn-card.jn-card-wanted .jn-card-wanted-heading {
+  order: 2;
+  text-align: center;
+  font-family: var(--jn-note-heading-font);
+  font-size: 20px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.jn-canvas .jn-card.jn-card-wanted .jn-card-excerpt {
+  margin: 0;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--jn-paper-ink) 24%, transparent);
+}
+
+/* Per-note font override. Default leaves the material's own face in place. */
+.jn-canvas .jn-card[class].jn-font-serif {
+  --jn-note-font: var(--jn-paper-font-body);
+  --jn-note-heading-font: var(--jn-paper-font-body);
+}
+.jn-canvas .jn-card[class].jn-font-hand {
+  --jn-note-font: var(--jn-paper-font-hand);
+  --jn-note-heading-font: var(--jn-paper-font-hand);
+}
+.jn-canvas .jn-card[class].jn-font-display {
+  --jn-note-font: var(--jn-paper-font-display);
+  --jn-note-heading-font: var(--jn-paper-font-display);
+}
+
+/* --- Markdown on paper -------------------------------------------------------------------- */
+
+.jn-canvas .jn-card .jn-card-block-body {
+  white-space: normal;
+}
+.jn-canvas .jn-card .jn-card-block-body > :first-child {
+  margin-top: 0;
+}
+.jn-canvas .jn-card .jn-card-block-body > :last-child {
+  margin-bottom: 0;
+}
+.jn-canvas .jn-card .jn-card-block-body p {
+  margin: 0 0 .6em;
+}
+.jn-canvas .jn-card .jn-card-block-body p + p {
+  margin-top: .55em;
+}
+.jn-canvas .jn-card .jn-card-block-body h1,
+.jn-canvas .jn-card .jn-card-block-body h2,
+.jn-canvas .jn-card .jn-card-block-body h3,
+.jn-canvas .jn-card .jn-card-block-body h4,
+.jn-canvas .jn-card .jn-card-block-body h5,
+.jn-canvas .jn-card .jn-card-block-body h6 {
+  color: var(--jn-paper-ink);
+  font-family: var(--jn-note-heading-font);
+  line-height: 1.15;
+}
+.jn-canvas .jn-card .jn-card-block-body h1 { font-size: 1.5em; }
+.jn-canvas .jn-card .jn-card-block-body h2 { font-size: 1.25em; }
+.jn-canvas .jn-card .jn-card-block-body h3 { font-size: 1.1em; }
+.jn-canvas .jn-card .jn-card-block-body h4 { font-size: 1em; }
+.jn-canvas .jn-card .jn-card-block-body h5,
+.jn-canvas .jn-card .jn-card-block-body h6 { font-size: 1em; color: var(--jn-paper-ink-soft); }
+.jn-canvas .jn-card .jn-card-block-body ul,
+.jn-canvas .jn-card .jn-card-block-body ol {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+.jn-canvas .jn-card .jn-card-block-body li {
+  margin: .15em 0;
+}
+.jn-canvas .jn-card .jn-card-block-body blockquote {
+  margin: 7px 0;
+  padding: .1em 0 .1em 9px;
+  border-left: 2px solid color-mix(in srgb, var(--jn-paper-ink) 42%, transparent);
+  color: color-mix(in srgb, var(--jn-paper-ink-soft) 86%, transparent);
+  font-style: italic;
+}
+.jn-canvas .jn-card .jn-card-block-body code {
+  padding: .1em .3em;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--jn-paper-ink) 11%, transparent);
+  color: var(--jn-paper-ink);
+  /* Font overrides never make code handwritten/unreadable. */
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: .92em;
+  line-height: 1.4;
+}
+.jn-canvas .jn-card .jn-card-block-body pre {
+  margin: .5em 0;
+  padding: 6px 8px;
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, var(--jn-paper-ink) 24%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--jn-paper) 82%, var(--jn-paper-ink) 6%);
+  color: var(--jn-paper-ink);
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+}
+.jn-canvas .jn-card .jn-card-block-body pre code {
+  padding: 0;
+  background: none;
+  font: inherit;
+}
+/* Link and task colours are verified against all four paper tokens (>=4.5:1 link text,
+   >=3:1 interactive checkbox). The dark-purple link keeps its own contrast rather than
+   borrowing a thread dye; the layered thread outline arrives in Phase 4. */
+.jn-canvas .jn-card .jn-card-block-body a {
+  color: #5c437f;
+  text-decoration: underline;
+  text-underline-offset: 1px;
+}
+.jn-canvas .jn-card .jn-card-block-body a:hover {
+  color: #4c356e;
+}
+.jn-canvas .jn-card .jn-card-block-body hr {
+  margin: 12px 0;
+  border: 0;
+  border-top: 3px double color-mix(in srgb, var(--jn-paper-ink) 44%, transparent);
+}
+.jn-canvas .jn-card .jn-card-block-body table {
+  max-width: 100%;
+  margin: 8px 0;
+  border-collapse: collapse;
+  font-size: .88em;
+}
+.jn-canvas .jn-card .jn-card-block-body th,
+.jn-canvas .jn-card .jn-card-block-body td {
+  padding: 3px 6px;
+  /* 52% ink over any paper clears the ~2.5:1 table-border target (the reference stock is
+     darker than a low-contrast hairline). */
+  border: 1px solid color-mix(in srgb, var(--jn-paper-ink) 52%, transparent);
+  text-align: left;
+}
+.jn-canvas .jn-card .jn-card-block-body th {
+  background: color-mix(in srgb, var(--jn-paper-ink) 6%, transparent);
+}
+.jn-canvas .jn-card input.jn-task-checkbox {
+  accent-color: #785736;
+}
+.jn-canvas .jn-card .jn-card-block-body img {
+  max-width: 100%;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--jn-paper-ink) 16%, transparent);
+}
+
+/* Explicit picture slot: keep the editor's layout classes, but make the image sit on paper. */
+.jn-canvas .jn-card .jn-card-image {
+  border-radius: 2px;
+}
+.jn-canvas .jn-card .jn-card-image img {
+  border-radius: 2px;
+}
+
+/* Background images stay a true card background: above the board, under a translucent paper
+   wash so the ink stays readable. */
+.jn-canvas .jn-card > .jn-card-background {
+  z-index: 0;
+  border-radius: 2px;
+  opacity: var(--jn-card-image-opacity, .62);
+}
+.jn-canvas .jn-card:has(> .jn-card-background[src]) > .jn-card-main {
+  background-color: color-mix(in srgb, var(--jn-paper) 82%, transparent);
+}
+.jn-canvas .jn-card:has(> .jn-card-background[src]) :is(.jn-card-title, .jn-card-wanted-heading, .jn-card-excerpt) {
+  text-shadow: 0 1px 2px rgba(250, 241, 221, .85), 0 0 4px rgba(250, 241, 221, .65);
+}
+
+/* --- Torn modifier: clip paper only, never controls --------------------------------------- */
+
+.jn-canvas .jn-card.jn-torn {
+  /* The root is not clipped; its filter draws the shadow for the clipped paper shape.
+     Phase 8 note: one filter per torn card can be a paint-cost hotspot on busy boards. A
+     shared pseudo-element shadow would avoid it, but it cannot follow an arbitrary polygon
+     without duplicating the clip path, so this stays and is flagged for performance testing. */
+  filter:
+    drop-shadow(2px 5px 4px rgba(0, 0, 0, .35))
+    drop-shadow(7px 12px 12px rgba(0, 0, 0, .18));
+}
+.jn-canvas .jn-card.jn-torn > .jn-card-main {
+  clip-path: var(--jn-tear, polygon(0% 0%, 100% 0%, 100% 100%, 0% 100%));
+  /* Extra paper at the bottom keeps the final text line away from the irregular cut. */
+  padding-bottom: calc(var(--jn-paper-pad-bottom, 30px) + 14px);
+  box-shadow: none;
+}
+/* A card background image is part of the paper; match the same silhouette so no unclipped
+   rectangle peeks past a torn edge. Controls and the optional image slot stay untouched. */
+.jn-canvas .jn-card.jn-torn > .jn-card-background[src] {
+  clip-path: var(--jn-tear, polygon(0% 0%, 100% 0%, 100% 100%, 0% 100%));
+}
+.jn-canvas .jn-card.jn-torn > .jn-card-main::before {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  z-index: 4;
+  border-radius: inherit;
+  box-shadow:
+    inset 0 0 0 1px var(--jn-sc-torn-fiber, rgba(249, 238, 210, .62)),
+    inset 0 0 14px rgba(255, 248, 225, .22);
+  pointer-events: none;
+}
+/* The document/target inner frames still paint inside the torn paper. */
+.jn-canvas .jn-card.jn-torn.jn-card-document > .jn-card-main::after,
+.jn-canvas .jn-card.jn-torn.jn-card-wanted > .jn-card-main::after {
+  z-index: 3;
+}
+
+/* --- Signature and state affordances ------------------------------------------------------ */
+
+.jn-canvas .jn-card .jn-card-signature {
+  position: absolute;
+  left: 10px;
+  bottom: 8px;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  box-sizing: border-box;
+  border: 1.4px solid color-mix(in srgb, var(--jn-author-color, #8d8d97) 70%, #1c120a);
+  border-radius: 50%;
+  background: #e8dec9;
+  background: color-mix(in srgb, var(--jn-author-color, #8d8d97) 20%, #f2e6cf);
+  color: #2a1a0d;
+  color: color-mix(in srgb, var(--jn-author-color, #8d8d97) 58%, #21150b);
+  font: 700 10px/1 var(--jn-ui-font, system-ui, sans-serif);
+  text-shadow: 0 0 1px rgba(255, 255, 255, .8);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, .28),
+    inset 0 0 0 1px rgba(255, 255, 255, .25);
+  transform: rotate(-9deg);
+  opacity: .95;
+  pointer-events: none;
+}
+
+.jn-canvas .jn-card .jn-card-resize {
+  /* The paper wrapper is z-index 1; keep the handle above it and pointer-interactive. */
+  z-index: 8;
+  pointer-events: auto;
+  border-color: var(--jn-paper-ink, #3c2b19);
+  filter: drop-shadow(0 0 1px rgba(255, 250, 236, .9));
+}
+.jn-canvas .jn-card.selected .jn-card-resize {
+  display: block;
+}
+.jn-canvas .jn-card.jn-hint {
+  border-radius: 3px;
+  box-shadow:
+    0 0 0 1px var(--jn-hint, #d6a45c),
+    0 0 14px color-mix(in srgb, var(--jn-hint, #d6a45c) 35%, transparent);
+}
+.jn-canvas .jn-card.jn-secret {
+  outline-offset: 4px;
+}
+.jn-canvas .jn-card .jn-card-lock-pill {
+  z-index: 6;
+}
+
+/* Old author stripe/badge decoration is intentionally absent in Canvas 2. */
+.jn-canvas .jn-card .jn-author-stripe,
+.jn-canvas .jn-card .jn-author-badge,
+.jn-canvas .jn-card .jn-card-author-stripe,
+.jn-canvas .jn-card .jn-card-author-badge {
+  display: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jn-canvas::before,
+  .jn-canvas::after,
+  .jn-canvas .jn-card,
+  .jn-canvas .jn-card > .jn-card-main {
+    transition: none;
+    animation: none;
+  }
+}
