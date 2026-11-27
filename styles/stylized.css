@@ -780,7 +780,7 @@
   }
 }
 
-/* --- Attachment pins (main handle + minor thread anchors) ---------------------------------- */
+/* --- Attachment pins (one shared pin type) ------------------------------------------------- */
 
 /* Pins are DOM buttons on the card root, outside the torn paper clip. Normalized left/top
    coordinates mean resizing and rotation are already handled by the transform hierarchy. */
@@ -789,8 +789,8 @@
   --jn-pin-color: #8d8d97;
   position: absolute;
   /* The card lives inside the zoom-scaled world. --jn-zoom-comp = 1/k, so multiplying the DOM
-     size keeps the *screen* diameter/target at 20px for the main pin and ~14px for a minor pin
-     across k=0.5..2 (the visual pins therefore stay screen-constant too). */
+     size keeps the *screen* diameter/target at 20px across k=0.5..2 (the visual pins therefore
+     stay screen-constant too). */
   width: var(--jn-main-pin-size, 14px);
   height: var(--jn-main-pin-size, 14px);
   min-width: 0;
@@ -815,21 +815,7 @@
   --jn-pin-color: var(--jn-author-color, #8d8d97);
 }
 .jn-canvas .jn-world > .jn-board-pin-control { z-index: 5; }
-.jn-canvas .jn-pin-layer .jn-pin-minor {
-  width: var(--jn-minor-pin-size, 7px);
-  height: var(--jn-minor-pin-size, 7px);
-  --jn-pin-color: var(--jn-sc-pin-minor, #7d7466);
-}
-.jn-canvas .jn-pin-layer .jn-pin-minor::before,
-.jn-canvas .jn-pin-layer .jn-pin-minor[class*="jn-pin-style-"]::before {
-  transform: none;
-  border: 1px solid #31262d;
-  border-radius: 50%;
-  background: #a89bea;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, .55);
-}
-/* The visual head may be only ~9 screen px; the transparent pseudo-element keeps a ~14px screen
-   target at every zoom (main inherits its 20px head). */
+/* The transparent pseudo-element keeps a 20px screen target at every zoom. */
 .jn-canvas .jn-pin-layer .jn-pin::after,
 .jn-canvas .jn-board-pin-control::after {
   content: "";
@@ -882,14 +868,6 @@
     0 1px 3px rgba(0, 0, 0, .55),
     inset 0 1px 0 rgba(255, 255, 255, .35);
 }
-.jn-canvas .jn-pin-layer .jn-pin-minor.jn-pin-style-enamel::before,
-.jn-canvas .jn-pin-layer .jn-pin-minor.jn-pin-style-default::before {
-  border-width: 1.5px;
-  box-shadow:
-    0 1px 3px rgba(0, 0, 0, .5),
-    inset 0 0 0 1px rgba(255, 255, 255, .28);
-}
-
 /* Brass: warm polished metal. */
 .jn-canvas .jn-pin-layer .jn-pin-style-brass::before {
   background:
@@ -900,10 +878,6 @@
     0 2px 4px rgba(0, 0, 0, .45),
     inset 0 0 0 1px rgba(255, 241, 189, .42);
 }
-.jn-canvas .jn-pin-layer .jn-pin-minor.jn-pin-style-brass::before {
-  border-width: 1.5px;
-}
-
 /* Iron: a square tack rotated as a diamond. */
 .jn-canvas .jn-pin-layer .jn-pin-style-iron::before {
   border-radius: 2px;
@@ -916,10 +890,6 @@
     0 2px 4px rgba(0, 0, 0, .5),
     inset 0 0 0 1px rgba(255, 255, 255, .2);
 }
-.jn-canvas .jn-pin-layer .jn-pin-minor.jn-pin-style-iron::before {
-  border-width: 1.5px;
-}
-
 /* Wood: turned wooden head with a visible grain. */
 .jn-canvas .jn-pin-layer .jn-pin-style-wood::before {
   background:
@@ -930,10 +900,6 @@
     0 2px 4px rgba(0, 0, 0, .46),
     inset 0 0 0 1px rgba(255, 230, 196, .24);
 }
-.jn-canvas .jn-pin-layer .jn-pin-minor.jn-pin-style-wood::before {
-  border-width: 1.5px;
-}
-
 /* Decorative: stamped rosette / brass medal. */
 .jn-canvas .jn-pin-layer .jn-pin-style-decorative::before {
   background:
@@ -945,13 +911,6 @@
     inset 0 0 0 2px rgba(72, 49, 16, .78),
     inset 0 0 0 3px rgba(255, 240, 186, .36);
 }
-.jn-canvas .jn-pin-layer .jn-pin-minor.jn-pin-style-decorative::before {
-  border-width: 1.5px;
-  box-shadow:
-    0 1px 3px rgba(0, 0, 0, .5),
-    inset 0 0 0 1px rgba(72, 49, 16, .7);
-}
-
 /* Wax: an irregular sealing-wax blob, deliberately not a perfect circle. */
 .jn-canvas .jn-pin-layer .jn-pin-style-wax::before {
   border-radius: 48% 52% 56% 44% / 50% 44% 56% 50%;
@@ -965,15 +924,7 @@
     inset 0 0 0 1px rgba(255, 191, 170, .2);
 }
 
-/* Minor anchors are plain shared connection dots, regardless of the main pin's skin. */
 .jn-canvas .jn-thread-pin-attached { display: none; }
-.jn-canvas .jn-pin-layer .jn-pin-minor[class*="jn-pin-style-"]::before {
-  transform: none;
-  border: 1px solid #31262d;
-  border-radius: 50%;
-  background: #a89bea;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, .55);
-}
 
 /* Board route pins are a distinct control; 12px visual diameter, still zoom-compensated. */
 .jn-canvas .jn-links .jn-board-pin[data-pin-index] {

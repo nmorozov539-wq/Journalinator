@@ -593,7 +593,9 @@ export default class JournalCanvas {
       const style = styleKey === "default" ? "enamel" : styleKey;
       const pin = document.createElement("button");
       pin.type = "button";
-      pin.className = `jn-pin ${main ? "jn-pin-main" : "jn-pin-minor"} jn-pin-style-${style}`
+      // There is one pin type: every attachment pin uses the same main-pin visual, including
+      // anchors stored internally as `minor`. Anchor kind still drives behaviour, never styling.
+      pin.className = `jn-pin jn-pin-main jn-pin-style-${style}`
         + (styleKey === "default" ? " jn-pin-style-default" : "");
       pin.dataset.noteId = note._id;
       pin.dataset.anchorId = anchorId;
@@ -2557,7 +2559,6 @@ export default class JournalCanvas {
     const comp = 1 / k;
     this.root.style.setProperty("--jn-zoom-comp", String(comp));
     this.root.style.setProperty("--jn-main-pin-size", `${14 / k}px`);
-    this.root.style.setProperty("--jn-minor-pin-size", `${Math.max(5, Math.min(10, 7 * Math.sqrt(k))) / k}px`);
     this.root.style.setProperty("--jn-pin-hit-size", `${20 / k}px`);
   }
 

@@ -11,7 +11,7 @@ import { noteFilterKey, noteMatchesQuery, notePresentationLabelKey, noteSearchLa
 import { computeJournalStats, deriveSessions, selectLiveSharedNotes } from "../stats.mjs";
 import { CARD_STYLES, cardStyleKey } from "../styles/registry.mjs";
 import { defaultControlTarget } from "./scene-control.mjs";
-import { applyTheme, getTheme, listThemes } from "../styles/themes.mjs";
+import { BOARD_BACKGROUND_IDS, applyTheme, getTheme, listThemes } from "../styles/themes.mjs";
 import { SCENE_THEME_ID, clearSceneThemeCache, sceneTheme } from "../scene-palette.mjs";
 import { canUseGmTier } from "../secrets/access.mjs";
 import { vaultStore } from "../secrets/vault-store.mjs";
@@ -1178,13 +1178,15 @@ export default class JournalApp extends ApplicationV2 {
       theme: theme.id,
       themeObj: theme,
       themeChoice,
-      themeList: [
-        ...listThemes().map(item => ({
+      // The picker is a board *background* chooser: the original procedural cork plus the photo
+      // boards. Older saved choices (classic, scene, ...) still render, they just aren't offered.
+      themeList: BOARD_BACKGROUND_IDS
+        .map(id => listThemes().find(item => item.id === id))
+        .filter(Boolean)
+        .map(item => ({
           id: item.id,
           label: item.nameKey ? t(item.nameKey) : (item.name || item.id)
         })),
-        { id: SCENE_THEME_ID, label: t("JN.Theme.Scene") }
-      ],
       authors,
       query: q,
       // Toolbar badges only report recoverable notes; they float inside the button and never
@@ -1215,13 +1217,16 @@ export default class JournalApp extends ApplicationV2 {
       `<label class="jn-menu-option"><input type="checkbox" data-kind="${kind}" value="${escape(id)}"
         ${selected.has(id) ? "checked" : ""}>${color ? `<span class="jn-dot" style="background:${escape(String(color))}"></span>` : ""}
         <span>${escape(label)}</span></label>`).join("");
-    // The theme selector stays in place for layout/API compatibility but is deliberately inert:
-    // no palette popup, no click handlers, and every choice is rendered disabled.
-    const themePicker = `<details class="jn-toolbar-dropdown journalinator-theme" aria-disabled="true"
-        aria-label="${t("JN.Theme.PickerInactive")}">
-      <summary class="jn-toolbar-icon" aria-disabled="true" inert ${tooltipAttrs(t("JN.Theme.PickerInactive"))}><i class="fa-solid fa-palette" aria-hidden="true"></i></summary>
-      <div class="jn-toolbar-panel" aria-hidden="true" inert>
-        ${context.themeList.map(item => `<button type="button" disabled aria-pressed="${context.themeChoice === item.id}">${escape(item.label)}</button>`).join("")}
+    // Board background picker. A saved choice that is not offered (an old theme id) is shown as
+    // the original cork, because that is what it renders with.
+    const backgroundLabel = t("JN.Theme.Picker");
+    const activeBackground = context.themeList.some(item => item.id === context.themeChoice)
+      ? context.themeChoice : "stylized";
+    const themePicker = `<details class="jn-toolbar-dropdown journalinator-theme" aria-label="${escape(backgroundLabel)}">
+      <summary class="jn-toolbar-icon" ${tooltipAttrs(backgroundLabel)}><i class="fa-solid fa-palette" aria-hidden="true"></i></summary>
+      <div class="jn-toolbar-panel">
+        ${context.themeList.map(item => `<button type="button" class="jn-theme-option${activeBackground === item.id ? " on" : ""}"
+          data-theme-id="${escape(item.id)}" aria-pressed="${activeBackground === item.id}">${escape(item.label)}</button>`).join("")}
       </div>
     </details>`;
     const sharedToolbar = `
@@ -1464,13 +1469,16 @@ export default class JournalApp extends ApplicationV2 {
         dropdown.querySelector("summary").focus();
       });
     }
-    // The theme dropdown is permanently inactive in this presentation. `inert` blocks it in
-    // modern browsers; this guard also keeps it closed where `inert` is not implemented.
-    const lockedTheme = root.querySelector(".journalinator-theme");
-    lockedTheme?.querySelector("summary")?.addEventListener("click", event => {
-      event.preventDefault();
-      event.stopPropagation();
-      lockedTheme.open = false;
+    // Board background picker: store the choice per client and re-render with the new theme.
+    root.querySelectorAll(".journalinator-theme [data-theme-id]").forEach(option => {
+      option.addEventListener("click", async () => {
+        const id = option.dataset.themeId;
+        option.closest("details")?.removeAttribute("open");
+        if (!BOARD_BACKGROUND_IDS.includes(id)) return;
+        if (game.settings.get("fvtt-journalinator", "boardTheme") === id) return;
+        await game.settings.set("fvtt-journalinator", "boardTheme", id);
+        this.render();
+      });
     });
     const search = root.querySelector(".journalinator-search");
     search?.addEventListener("input", ev => {

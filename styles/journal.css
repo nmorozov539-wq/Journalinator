@@ -519,14 +519,8 @@
 .jn-transfer-empty { margin: 4px 0; color: var(--jn-muted); font-size: 12px; }
 .jn-private-stats-excluded { color: var(--jn-muted); font-size: 12px; }
 .jn-stats-trash { color: var(--jn-muted); font-size: 12px; }
-/* The fixed theme selector stays visible but reads as inactive; `inert` still blocks it. */
-.journalinator-theme[aria-disabled="true"] {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-.journalinator-theme[aria-disabled="true"] summary {
-  cursor: not-allowed;
-}
+/* Board background picker: the current choice reads like the active view option. */
+.jn-toolbar-panel .jn-theme-option.on { color: var(--jn-acc); }
 .journalinator-root:has([data-placing-link]) .journalinator-add-link {
   border-color: var(--jn-acc);
   color: var(--jn-acc);

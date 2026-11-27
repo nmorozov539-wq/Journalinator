@@ -208,6 +208,7 @@ function normalizeMaterials(raw) {
   const board = {
     cork: colorRef(rawBoard.cork, base.board.cork),
     corkTile: imagePath(rawBoard.corkTile) ?? base.board.corkTile,
+    grainTile: imagePath(rawBoard.grainTile) ?? base.board.grainTile,
     size: num(rawBoard.size, 64, 640, base.board.size),
     border: colorRef(rawBoard.border, base.board.border),
     radius: num(rawBoard.radius, 0, 24, base.board.radius),
@@ -302,6 +303,9 @@ export const STYLIZED_MATERIALS = Object.freeze({
     // Module-prefixed so `foundry.utils.getRoute` produces a working module URL. Custom themes
     // still pass through `imagePath` and remain safe relative data paths (no module rewrite).
     corkTile: "modules/fvtt-journalinator/assets/stylized/cork.svg",
+    // Paper grain multiplied over every note. A board background may bring its own so the paper
+    // never shares the board's texture.
+    grainTile: STYLIZED_GRAIN_TILE,
     size: 320,
     border: "#5a402d",
     radius: 8,
@@ -463,6 +467,40 @@ export const STYLIZED_THEME = Object.freeze({
   type: {},
   materials: STYLIZED_MATERIALS,
   styles: {}
+});
+
+/** Fine, neutral paper fibre used by the photo-based boards (the cork SVG noise stays on the original). */
+export const PAPER_FINE_GRAIN_TILE = "modules/fvtt-journalinator/assets/stylized/paper-fine.svg";
+
+/**
+ * Board backgrounds. Only the board surface differs; paper, pins, threads and fonts stay the
+ * shared Stylized materials, so a background is a pure picker choice.
+ */
+function boardBackground(id, nameKey, board) {
+  return Object.freeze({
+    ...STYLIZED_THEME,
+    id,
+    nameKey,
+    materials: { ...STYLIZED_MATERIALS, board: { ...STYLIZED_MATERIALS.board, ...board } }
+  });
+}
+
+export const CORK_PHOTO_THEME = boardBackground("cork-photo", "JN.Theme.CorkPhoto", {
+  cork: "#6f4d33",
+  corkTile: "modules/fvtt-journalinator/assets/boards/cork-photo.webp",
+  grainTile: PAPER_FINE_GRAIN_TILE,
+  size: 480,
+  border: "#4a3322"
+});
+
+export const GREY_PAPER_THEME = boardBackground("grey-paper", "JN.Theme.GreyPaper", {
+  cork: "#69635a",
+  corkTile: "modules/fvtt-journalinator/assets/boards/grey-paper.webp",
+  grainTile: PAPER_FINE_GRAIN_TILE,
+  size: 400,
+  border: "#3f3b35",
+  lightOpacity: 0.06,
+  vignetteColor: "rgba(10, 8, 6, 0.5)"
 });
 
 /**
@@ -651,7 +689,7 @@ export function themeToVars(theme) {
   vars["--jn-sc-board-vignette"] = resolveColor(materialBoard.vignetteColor, colors);
   vars["--jn-sc-board-vignette-start"] = `${materialBoard.vignetteStart}%`;
   vars["--jn-sc-board-vignette-end"] = `${materialBoard.vignetteEnd}%`;
-  vars["--jn-sc-grain"] = cssUrl(STYLIZED_GRAIN_TILE);
+  vars["--jn-sc-grain"] = cssUrl(materialBoard.grainTile);
 
   vars["--jn-sc-paper-compact"] = resolveColor(materialPaper.compact, colors);
   vars["--jn-sc-paper-memo"] = resolveColor(materialPaper.memo, colors);
@@ -747,7 +785,9 @@ export function applyTheme(root, theme) {
 const registry = new Map();
 const customSources = new Map();
 const REGISTERED_ORDER = [];
-export const BUILTIN_THEME_IDS = Object.freeze(["stylized", "classic", "fantasy", "parchment"]);
+export const BUILTIN_THEME_IDS = Object.freeze(["stylized", "cork-photo", "grey-paper", "classic", "fantasy", "parchment"]);
+/** What the toolbar picker offers: the original procedural cork, then the two photo boards. */
+export const BOARD_BACKGROUND_IDS = Object.freeze(["stylized", "cork-photo", "grey-paper"]);
 
 /**
  * Registers (or replaces) a theme. Used by the built-ins at load time and by other modules
@@ -791,6 +831,8 @@ export function savedThemes() {
 }
 
 registerTheme("stylized", STYLIZED_THEME);
+registerTheme("cork-photo", CORK_PHOTO_THEME);
+registerTheme("grey-paper", GREY_PAPER_THEME);
 registerTheme("classic", CLASSIC_THEME);
 registerTheme("fantasy", WARM_THEME);
 registerTheme("parchment", PARCHMENT_THEME);

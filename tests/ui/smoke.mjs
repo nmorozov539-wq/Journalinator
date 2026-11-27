@@ -759,57 +759,56 @@ test("toolbar dropdowns filter cards and keep the theme selector inert", async (
     style.click();
     assert.ok(!tavern.classList.contains("jn-dimmed"));
 
-    // The theme selector stays in place but is visibly inactive: no palette popup, no write,
-    // no appearance change. Theme token/API coverage lives in tests/theme.test.mjs.
+    // The theme selector is the board background picker: three choices, the current one marked,
+    // and clicking one stores it per client and repaints the board.
     const theme = host.querySelector(".journalinator-theme");
-    assert.ok(theme, "the theme selector is still rendered");
+    assert.ok(theme, "the background picker is rendered");
     assert.equal(filters.nextElementSibling, theme);
     assert.equal(theme.closest(".jn-toolbar-group").nextElementSibling.querySelector(".journalinator-trash") !== null, true);
-    assert.notEqual(theme.hidden, true, "the selector stays visible");
-    const control = theme.matches("button, summary") ? theme : theme.querySelector("button, summary");
-    const inactive = [theme, control].filter(Boolean).some(node =>
-      node.disabled === true
-      || node.hasAttribute("disabled")
-      || node.getAttribute("aria-disabled") === "true"
-      || node.hasAttribute("inert")
-      || node.dataset.disabled === "true"
-      || node.dataset.inactive === "true");
-    assert.ok(inactive, "the theme selector is disabled or inert");
-    const inactiveLabel = game.i18n.localize("JN.Theme.PickerInactive");
-    assert.equal(theme.getAttribute("aria-label"), inactiveLabel, "the inert details has an accessible name");
-    assert.equal(control?.getAttribute("aria-label"), inactiveLabel, "the summary has an accessible name");
-    assert.equal(theme.open, false, "the disabled details starts closed");
-    const panel = theme.querySelector(".jn-toolbar-panel");
-    assert.equal(panel.getAttribute("aria-hidden"), "true", "the panel is hidden from assistive tech");
-    assert.equal(panel.hasAttribute("inert"), true, "the panel is inert");
-    const choices = [...panel.querySelectorAll("button")];
-    assert.ok(choices.length >= 2, "the theme list is still rendered");
-    assert.ok(choices.every(button => button.disabled), "every theme choice is disabled");
-    const board = host.querySelector(".journalinator-root");
-    const themeBefore = board.dataset.theme;
-    control?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
-    control?.click();
-    await settle();
-    assert.equal(theme.open, false, "trying to open the inert details is refused");
-    assert.equal(game.settings.get("fvtt-journalinator", "boardTheme"), initialTheme,
-      "clicking the inert selector never changes the saved theme");
-    assert.equal(board.dataset.theme, themeBefore, "the applied theme never changes");
+    assert.equal(theme.getAttribute("aria-label"), game.i18n.localize("JN.Theme.Picker"));
+    assert.equal(theme.querySelector("summary").hasAttribute("inert"), false, "the picker is interactive");
+    const choices = [...theme.querySelectorAll("[data-theme-id]")];
+    assert.deepEqual(choices.map(button => button.dataset.themeId), ["stylized", "cork-photo", "grey-paper"]);
+    assert.ok(choices.every(button => !button.disabled), "no choice is disabled");
+    assert.equal(choices.filter(button => button.getAttribute("aria-pressed") === "true").length, 1,
+      "exactly one background is marked as current");
 
-    // The disabled look is CSS-only; the selector never becomes hidden.
     const journalCss = readFileSync(new URL("../../styles/journal.css", import.meta.url), "utf8");
-    assert.match(journalCss,
-      /\.journalinator-theme\[aria-disabled="true"\]\s*\{[^}]*opacity:\s*0?\.55;[^}]*cursor:\s*not-allowed;/,
-      "the inert theme selector has a disabled opacity and cursor");
-    assert.match(journalCss,
-      /\.journalinator-theme\[aria-disabled="true"\]\s+summary\s*\{[^}]*cursor:\s*not-allowed;/,
-      "the inert summary has a disabled cursor");
-    const canvas = board.querySelector(".jn-canvas");
+    assert.doesNotMatch(journalCss, /\.journalinator-theme\[aria-disabled="true"\]/, "no disabled styling remains");
+
+    await game.settings.set("fvtt-journalinator", "boardTheme", "stylized");
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+    let board = host.querySelector(".journalinator-root");
+    let canvas = board.querySelector(".jn-canvas");
+    assert.match(board.style.getPropertyValue("--jn-sc-cork-tile"), /stylized\/cork\.svg/);
     assert.ok(["none", "stylized"].includes(canvas.dataset.boardPattern),
       `the board uses the stylized material, not "${canvas.dataset.boardPattern}"`);
-    assert.notEqual(canvas.dataset.boardPattern, "dots");
-    assert.notEqual(canvas.dataset.boardPattern, "grid");
     assert.equal(canvas.style.getPropertyValue("--jn-board-cork-size"), "320px",
-      "the applied theme uses the 320px cork material, not the retired pattern size");
+      "the original cork keeps its 320px scale");
+
+    // Picking a background writes the client setting and the next render paints that board.
+    let renders = 0;
+    app.render = () => { renders += 1; };
+    const photo = host.querySelector('[data-theme-id="cork-photo"]');
+    photo.click();
+    await settle();
+    assert.equal(game.settings.get("fvtt-journalinator", "boardTheme"), "cork-photo");
+    assert.equal(renders, 1, "choosing a background re-renders the app");
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+    board = host.querySelector(".journalinator-root");
+    assert.match(board.style.getPropertyValue("--jn-sc-cork-tile"), /boards\/cork-photo\.webp/);
+    assert.match(board.style.getPropertyValue("--jn-sc-grain"), /paper-fine\.svg/);
+    assert.equal(host.querySelector('[data-theme-id="cork-photo"]').getAttribute("aria-pressed"), "true");
+
+    // Re-choosing the current background is a no-op; an old saved theme shows as the original.
+    host.querySelector('[data-theme-id="cork-photo"]').click();
+    await settle();
+    assert.equal(renders, 1, "choosing the current background does nothing");
+    await game.settings.set("fvtt-journalinator", "boardTheme", "classic");
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    assert.equal(host.querySelector('[data-theme-id="stylized"]').getAttribute("aria-pressed"), "true");
   } finally {
     await game.settings.set("fvtt-journalinator", "boardTheme", initialTheme);
     app._onClose();
@@ -3462,10 +3461,10 @@ test("attachment pins render author colour, all candidate styles, and transform 
       "the main pin uses the creator/author colour");
     assert.equal(main.style.left, "100px");
     assert.equal(main.style.top, "0px");
-    assert.ok(minor, "minor anchors render their own pin");
-    assert.ok(minor.classList.contains("jn-pin-minor"), "minor anchors use the minor pin class");
-    assert.equal(minor.classList.contains("jn-pin-main"), false);
-    assert.ok(minor.classList.contains("jn-pin-style-brass"), "minor pins keep the note's style tokens");
+    assert.ok(minor, "secondary anchors render their own pin");
+    assert.ok(minor.classList.contains("jn-pin-main"), "all pins use the single main-pin class");
+    assert.equal(minor.classList.contains("jn-pin-minor"), false, "there is no separate minor pin look");
+    assert.ok(minor.classList.contains("jn-pin-style-brass"), "secondary pins keep the note's style tokens");
     assert.equal(minor.style.left, "40px", "legacy interior anchors keep their local position");
     assert.equal(minor.style.top, "30px");
     assert.equal(main.closest(".jn-card-main"), null, "pins live outside the clipped paper wrapper");

@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 import {
-  applyTheme, BUILTIN_THEME_IDS, getTheme, listThemes, loadSavedThemes, MATERIAL_FONT_KEYS,
+  applyTheme, BOARD_BACKGROUND_IDS, BUILTIN_THEME_IDS, getTheme, listThemes, loadSavedThemes, MATERIAL_FONT_KEYS,
   MATERIAL_FONT_STACKS, normalizeTheme, registerTheme, savedThemes, STYLIZED_GRAIN_TILE,
   STYLIZED_MATERIALS, themeToVars
 } from "../scripts/styles/themes.mjs";
@@ -177,10 +177,41 @@ test("old and custom theme inputs normalize to the material defaults", () => {
   }
 });
 
-test("every built-in theme renders the 320px cork material scale", () => {
-  for (const id of BUILTIN_THEME_IDS) {
+test("legacy built-in themes render the 320px cork material scale", () => {
+  for (const id of BUILTIN_THEME_IDS.filter(id => !BOARD_BACKGROUND_IDS.includes(id) || id === "stylized")) {
     assert.equal(getTheme(id).board.patternSize, 320, `${id} cork scale`);
     assert.equal(themeToVars(getTheme(id))["--jn-sc-cork-size"], "320px", `${id} token`);
+  }
+});
+
+test("the picker offers the original cork first, then the two photo boards", () => {
+  assert.deepEqual([...BOARD_BACKGROUND_IDS], ["stylized", "cork-photo", "grey-paper"]);
+  for (const id of BOARD_BACKGROUND_IDS) assert.equal(getTheme(id).id, id);
+  const original = themeToVars(getTheme("stylized"));
+  const photo = themeToVars(getTheme("cork-photo"));
+  const grey = themeToVars(getTheme("grey-paper"));
+  assert.match(original["--jn-sc-cork-tile"], /stylized\/cork\.svg/);
+  assert.match(original["--jn-sc-grain"], /stylized\/grain\.svg/, "the original keeps its paper grain");
+  assert.match(photo["--jn-sc-cork-tile"], /boards\/cork-photo\.webp/);
+  assert.match(grey["--jn-sc-cork-tile"], /boards\/grey-paper\.webp/);
+  for (const vars of [photo, grey]) {
+    assert.match(vars["--jn-sc-grain"], /stylized\/paper-fine\.svg/, "photo boards use their own paper grain");
+    assert.notEqual(vars["--jn-sc-grain"], original["--jn-sc-grain"]);
+  }
+  // Only the board changes: paper, pins and threads stay the shared materials.
+  for (const id of ["cork-photo", "grey-paper"]) {
+    const { board, ...rest } = getTheme(id).materials;
+    const { board: _ignored, ...base } = STYLIZED_MATERIALS;
+    assert.deepEqual(rest, base, `${id} keeps the shared paper/pin/thread materials`);
+  }
+});
+
+test("every bundled board image exists on disk", () => {
+  for (const id of BOARD_BACKGROUND_IDS) {
+    for (const key of ["corkTile", "grainTile"]) {
+      const path = getTheme(id).materials.board[key];
+      assert.ok(existsSync(new URL(`../${path.replace("modules/fvtt-journalinator/", "")}`, import.meta.url)), `${id}.${key}: ${path}`);
+    }
   }
 });
 
@@ -494,8 +525,7 @@ test("pin heads and hit targets keep a stable screen size through zoom", () => {
   const css = readFileSync(new URL("../styles/stylized.css", import.meta.url), "utf8");
   assert.match(css,
     /\.jn-canvas \.jn-pin-layer \.jn-pin,[\s\S]*?\.jn-canvas \.jn-board-pin-control \{[^}]*width:\s*var\(--jn-main-pin-size, 14px\);[^}]*height:\s*var\(--jn-main-pin-size, 14px\);/);
-  assert.match(css,
-    /\.jn-canvas \.jn-pin-layer \.jn-pin-minor \{[\s\S]*?width:\s*var\(--jn-minor-pin-size, 7px\);/);
+  assert.doesNotMatch(css, /\.jn-pin-minor\b/, "there is no separate minor-pin visual");
   assert.match(css,
     /\.jn-canvas \.jn-pin-layer \.jn-pin::after,[\s\S]*?\.jn-canvas \.jn-board-pin-control::after \{[^}]*width:\s*max\(var\(--jn-pin-hit-size, 20px\), 100%\);/);
 
