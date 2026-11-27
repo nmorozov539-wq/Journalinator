@@ -60,6 +60,7 @@
 
 .journalinator-topbar {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
   padding: 8px 10px;
@@ -213,13 +214,15 @@
 }
 
 .journalinator-search-wrap {
-  flex: 1;
+  flex: 1 1 170px;
   position: relative;
   min-width: 0;
   max-width: 480px;
 }
 .jn-toolbar-tools {
   display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   margin-left: auto;
@@ -1648,14 +1651,7 @@ input.jn-task-checkbox:disabled { cursor: default; }
 }
 
 .journalinator-editor {
-  width: 44px;
-  box-sizing: border-box;
-  padding: 6px;
-  position: absolute;
-  top: 0;
-  right: 0;
-  z-index: 7;
-  overflow-wrap: anywhere;
+  display: none;
 }
 .journalinator-editor:has(.journalinator-editor-inner:empty) { display: none; }
 .journalinator-editor .jn-readonly .jn-note-tool-panel button,
@@ -1729,7 +1725,7 @@ input.jn-task-checkbox:disabled { cursor: default; }
 }
 .jn-note-tool-panel {
   position: absolute;
-  z-index: 5;
+  z-index: 13;
   top: 0;
   right: calc(100% + 10px);
   box-sizing: border-box;
@@ -2123,12 +2119,15 @@ input.jn-task-checkbox:disabled { cursor: default; }
   gap: 5px;
   align-items: center;
   padding: 5px;
-  z-index: 6;
+  z-index: 11;
   background: var(--jn-panel);
   border: 1px solid var(--jn-line);
   border-radius: 10px;
   box-shadow: 0 8px 20px color-mix(in srgb, var(--jn-shadow) 44%, transparent);
-  transform: translate(-50%, -135%);
+  flex-direction: column;
+  max-width: min(340px, calc(100% - 12px));
+  max-height: calc(100% - 12px);
+  overflow: auto;
 }
 .jn-link-toolbar input {
   width: 100px;

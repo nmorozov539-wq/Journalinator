@@ -22,6 +22,19 @@ export function isMainAnchor(anchor) {
   return anchor?.kind === "main";
 }
 
+/** Keep a minor attachment on the closest physical card edge, including legacy interior pins. */
+export function minorOnEdge(anchor, box = {}) {
+  if (anchor?.kind !== "minor") return anchor;
+  const x = Math.min(1, Math.max(0, anchor.x));
+  const y = Math.min(1, Math.max(0, anchor.y));
+  const w = Number.isFinite(box.w) && box.w > 0 ? box.w : 190;
+  const h = Number.isFinite(box.h) && box.h > 0 ? box.h : 90;
+  const distances = [y * h, (1 - x) * w, (1 - y) * h, x * w];
+  const side = distances.indexOf(Math.min(...distances));
+  return { ...anchor, x: side === 3 ? 0 : side === 1 ? 1 : x,
+    y: side === 0 ? 0 : side === 2 ? 1 : y };
+}
+
 /** Nearest card side for a normalized anchor, matching `anchorWorld`'s outward normal choice. */
 export function anchorSide(anchor, box) {
   if (!anchor) return undefined;
@@ -38,6 +51,7 @@ export function anchorSide(anchor, box) {
 /** World point and outward normal for one normalized anchor. */
 export function anchorWorld(box, anchor) {
   if (!anchor || !validLinkPoint(anchor)) return null;
+  anchor = minorOnEdge(anchor, box);
   const point = cardPointAnchor(box, anchor);
   const distances = [
     { side: "top", value: anchor.y * box.h },

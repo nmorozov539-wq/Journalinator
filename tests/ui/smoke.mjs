@@ -1284,9 +1284,9 @@ test("Alt-click connects edges through saved board pins and the toolbar can repl
     assert.ok(Math.abs(point.y - y) < 1e-8);
   };
   try {
-    click(a, 0.5, 0.5, true);
+    click(a, 0, 0.5, true);
     assert.equal(host.querySelector(".jn-canvas").dataset.placingLink, "true");
-    assert.ok(host.querySelector(".jn-link-preview"), "an interior click starts a new minor-pin source");
+    assert.ok(host.querySelector(".jn-link-preview"), "an edge click starts a provisional minor-pin source");
     click(a, 0.32, 0.96);
     assert.ok(host.querySelector(".jn-link-preview"));
     assert.equal(host.querySelector(".jn-card-text-input"), null);
@@ -1672,7 +1672,7 @@ test("floating toolbar sits on the screen-space right edge and only appears with
     assert.equal(canvas.root.querySelector(".jn-floating-toolbar").parentElement, canvas.root);
 
     const groups = [...toolbar.querySelectorAll(".jn-ft-btn")].map(button => button.dataset.group);
-    assert.deepEqual(groups, ["style", "force", "font", "picture", "torn", "pin", "dimensions"]);
+    assert.deepEqual(groups, ["type", "font", "effects", "connections"]);
     for (const button of toolbar.querySelectorAll(".jn-ft-btn")) {
       assert.ok(button.getAttribute("aria-label"), "each button has an accessible name");
       assert.ok(button.getAttribute("title"), "each button has a tooltip");
@@ -1689,8 +1689,8 @@ test("floating toolbar sits on the screen-space right edge and only appears with
       "hover/focus expands the label leftward");
     assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.jn-ft-label\s*\{\s*transition:\s*none;/,
       "label expansion respects reduced motion");
-    assert.match(css, /\.jn-floating-toolbar[\s\S]*?background:\s*#1b1611/,
-      "toolbar paints a dark application surface, not parchment");
+    assert.match(css, /\.jn-ft-btn \{[\s\S]*?background:\s*#1b1611/,
+      "individual buttons paint their own surface");
 
     canvas.readOnly = true;
     canvas.update(notes, layout);
@@ -1721,15 +1721,15 @@ test("floating note popover closes on outside/Escape/selection change and return
     const popover = canvas.floatingPopover;
     const button = group => toolbar.querySelector(`.jn-ft-btn[data-group="${group}"]`);
 
-    button("style").click();
+    button("type").click();
     assert.equal(popover.hidden, false);
-    assert.equal(popover.dataset.group, "style");
-    assert.equal(button("style").getAttribute("aria-expanded"), "true");
+    assert.equal(popover.dataset.group, "type");
+    assert.equal(button("type").getAttribute("aria-expanded"), "true");
     assert.ok(popover.contains(document.activeElement), "focus moves into the popover");
 
     button("font").click();
     assert.equal(popover.dataset.group, "font", "only one popover is open");
-    assert.equal(button("style").getAttribute("aria-expanded"), "false");
+    assert.equal(button("type").getAttribute("aria-expanded"), "false");
     assert.equal(button("font").getAttribute("aria-expanded"), "true");
 
     document.activeElement.dispatchEvent(new KeyboardEvent("keydown", {
@@ -1752,131 +1752,49 @@ test("floating note popover closes on outside/Escape/selection change and return
   }
 });
 
-test("note popovers apply cosmetic fields; multi-selection shows Mixed and hides single-only controls", () => {
-  const presentationCalls = [];
-  const attachmentCalls = [];
-  const resizeCalls = [];
-  const resetCalls = [];
+test("note rail offers Type, conditional Target Layout, Font, Effects and Connections", () => {
+  const calls = [];
   const canvas = new JournalCanvas({
     onSelectNote() {},
-    onSetPresentation: (ids, fields) => presentationCalls.push([ids, fields]),
-    onSetAttachment: (ids, fields) => attachmentCalls.push([ids, fields]),
-    onResizeCard: (...args) => resizeCalls.push(args),
-    onResetCardSize: (...args) => resetCalls.push(args)
+    onSetPresentation: (ids, fields) => calls.push([ids, fields])
   });
   document.body.appendChild(canvas.root);
   const notes = [
-    {
-      _id: "a", name: "A",
-      system: {
-        style: "sticky", blocks: [],
-        presentation: { extendedStyle: "memo", forceExtended: false, font: "default", pictureLayout: "above", torn: false },
-        attachment: { pinStyle: "default" }
-      }
-    },
-    {
-      _id: "b", name: "B",
-      system: {
-        style: "sticky", blocks: [],
-        presentation: { extendedStyle: "document", forceExtended: true, font: "hand", pictureLayout: "right", torn: true },
-        attachment: { pinStyle: "brass" }
-      }
-    }
+    { _id: "a", name: "A", system: { style: "sticky", blocks: [], links: [],
+      presentation: { extendedStyle: "memo", forceExtended: false, font: "default", torn: false } } },
+    { _id: "b", name: "B", system: { style: "wanted", blocks: [], links: [],
+      presentation: { extendedStyle: "target", forceExtended: true, font: "hand", torn: true } } }
   ];
-  const layout = {
-    cards: { a: { x: 0, y: 0, width: 200, height: 120 }, b: { x: 300, y: 0, width: 250, height: 140 } },
-    labels: {}
-  };
+  const layout = { cards: { a: { x: 0, y: 0 }, b: { x: 300, y: 0 } }, labels: {} };
   try {
     canvas.update(notes, layout);
     clickCanvasCard(canvas, "a");
-    const toolbar = canvas.floatingToolbar;
-    const popover = canvas.floatingPopover;
-    const button = group => toolbar.querySelector(`.jn-ft-btn[data-group="${group}"]`);
+    const groups = () => [...canvas.floatingToolbar.querySelectorAll(".jn-ft-btn")].map(el => el.dataset.group);
+    assert.deepEqual(groups(), ["type", "font", "effects", "connections"]);
     const open = group => {
-      const trigger = button(group);
-      trigger.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
-      trigger.click();
-      assert.equal(popover.dataset.group, group);
+      canvas.floatingToolbar.querySelector(`[data-group="${group}"]`).click();
+      return canvas.floatingPopover;
     };
-    const choose = (selector, value) => {
-      const field = popover.querySelector(selector);
-      field.value = value;
-      field.dispatchEvent(new Event("change", { bubbles: true }));
-    };
-
-    open("style");
-    choose(".jn-ft-style", "document");
-    assert.deepEqual(presentationCalls.at(-1), [["a"], { extendedStyle: "document" }],
-      "style changes only the renderer");
-
-    open("force");
-    const force = popover.querySelector(".jn-ft-force");
-    force.checked = true;
-    force.dispatchEvent(new Event("change", { bubbles: true }));
-    assert.deepEqual(presentationCalls.at(-1), [["a"], { forceExtended: true }]);
-
-    open("font");
-    choose(".jn-ft-font", "hand");
-    assert.deepEqual(presentationCalls.at(-1), [["a"], { font: "hand" }]);
-
-    open("picture");
-    choose(".jn-ft-picture", "left");
-    assert.deepEqual(presentationCalls.at(-1), [["a"], { pictureLayout: "left" }]);
-
-    open("torn");
-    choose(".jn-ft-torn", "on");
-    assert.deepEqual(presentationCalls.at(-1), [["a"], { torn: true }]);
-
-    open("pin");
-    choose(".jn-ft-pin", "brass");
-    assert.deepEqual(attachmentCalls.at(-1), [["a"], { pinStyle: "brass" }],
-      "pin appearance goes through the attachment callback");
-
-    open("dimensions");
-    assert.equal(popover.querySelector(".jn-ft-width").value, "200");
-    assert.equal(popover.querySelector(".jn-ft-height").value, "120");
-    choose(".jn-ft-width", "260");
-    assert.deepEqual(resizeCalls.at(-1), ["a", 260, 120], "dimensions commit on change");
-    popover.querySelector(".jn-ft-auto").click();
-    assert.deepEqual(resetCalls.at(-1), ["a"], "auto reset uses the existing size callback");
-    assert.equal(popover.hidden, true, "auto reset closes the popover");
-
-    clickCanvasCard(canvas, "b", { ctrlKey: true });
-    assert.deepEqual([...toolbar.querySelectorAll(".jn-ft-btn")].map(item => item.dataset.group),
-      ["style", "font", "picture", "torn", "pin"],
-      "multi-selection shows only the cosmetic intersection");
-
-    open("style");
-    const styleSelect = popover.querySelector(".jn-ft-style");
-    assert.equal(styleSelect.value, "", "mixed values select the Mixed option");
-    assert.ok([...styleSelect.options].some(option => option.textContent === game.i18n.localize("JN.Toolbar.Mixed")));
-    choose(".jn-ft-style", "target");
-    assert.deepEqual(presentationCalls.at(-1), [["a", "b"], { extendedStyle: "target" }]);
-
-    open("font");
-    assert.equal(popover.querySelector(".jn-ft-font").value, "");
-    choose(".jn-ft-font", "serif");
-    assert.deepEqual(presentationCalls.at(-1), [["a", "b"], { font: "serif" }]);
-
-    open("torn");
-    assert.equal(popover.querySelector(".jn-ft-torn").value, "");
-    choose(".jn-ft-torn", "off");
-    assert.deepEqual(presentationCalls.at(-1), [["a", "b"], { torn: false }]);
-
-    open("pin");
-    choose(".jn-ft-pin", "iron");
-    assert.deepEqual(attachmentCalls.at(-1), [["a", "b"], { pinStyle: "iron" }],
-      "pin appearance is the only bulk attachment field");
-
-    const allowedPresentation = new Set(["extendedStyle", "font", "pictureLayout", "torn", "forceExtended"]);
-    for (const [, fields] of presentationCalls) {
-      assert.ok(Object.keys(fields).every(key => allowedPresentation.has(key)),
-        "bulk presentation never touches content, label, image or permissions");
-    }
-    for (const [, fields] of attachmentCalls) {
-      assert.deepEqual(Object.keys(fields), ["pinStyle"], "bulk attachment only changes pin appearance");
-    }
+    let popover = open("type");
+    const type = popover.querySelector(".jn-ft-style");
+    assert.equal(type.value, "auto");
+    type.value = "document";
+    type.dispatchEvent(new Event("change", { bubbles: true }));
+    assert.deepEqual(calls.at(-1), [["a"], { extendedStyle: "document", forceExtended: true }]);
+    popover = open("font");
+    const font = popover.querySelector(".jn-ft-font");
+    font.value = "hand";
+    font.dispatchEvent(new Event("change", { bubbles: true }));
+    assert.deepEqual(calls.at(-1), [["a"], { font: "hand" }]);
+    popover = open("effects");
+    const torn = popover.querySelector(".jn-ft-torn");
+    torn.value = "on";
+    torn.dispatchEvent(new Event("change", { bubbles: true }));
+    assert.deepEqual(calls.at(-1), [["a"], { torn: true }]);
+    clickCanvasCard(canvas, "b");
+    assert.deepEqual(groups(), ["type", "layout", "font", "effects", "connections"]);
+    clickCanvasCard(canvas, "a", { ctrlKey: true });
+    assert.deepEqual(groups(), ["type", "font", "effects"], "bulk controls omit single-note actions");
   } finally {
     canvas.disconnectGeometry();
     canvas.root.remove();
@@ -2112,7 +2030,7 @@ test("floating popover clamps its real border-box inside narrow/wide canvases an
     const rootRect = () => fakeRect(0, 0, rootWidth, 700);
     canvas.root.getBoundingClientRect = rootRect;
     clickCanvasCard(canvas, "a");
-    const trigger = canvas.floatingToolbar.querySelector('[data-group="style"]');
+    const trigger = canvas.floatingToolbar.querySelector('[data-group="type"]');
     const popover = canvas.floatingPopover;
     trigger.getBoundingClientRect = () => fakeRect(rootWidth - 45, 100, 32, 30);
     popover.getBoundingClientRect = () => {
@@ -2204,7 +2122,7 @@ test("changing a popover value keeps focus inside the popover across the write r
     await redraw();
     const canvasRoot = host.querySelector(".jn-canvas");
     clickCanvasCard({ root: canvasRoot }, note.id);
-    const trigger = canvasRoot.querySelector('.jn-floating-toolbar .jn-ft-btn[data-group="style"]');
+    const trigger = canvasRoot.querySelector('.jn-floating-toolbar .jn-ft-btn[data-group="type"]');
     trigger.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
     trigger.click();
     const popover = canvasRoot.querySelector(".jn-floating-popover");
@@ -2324,7 +2242,7 @@ test("client cosmetic batches abort with localized warnings on stale, mixed or m
     // A stale/trashed id aborts before any subset is written.
     clickCanvasCard({ root: canvasRoot }, one.id);
     const staleStyle = one.system.presentation?.extendedStyle;
-    let popover = openPopover("style");
+    let popover = openPopover("type");
     let select = popover.querySelector(".jn-ft-style");
     one.system.deleted = Date.now();
     env.notifications.length = 0;
@@ -2340,7 +2258,7 @@ test("client cosmetic batches abort with localized warnings on stale, mixed or m
     // A popover opened for two shared notes is refused if the selection later becomes mixed.
     clickCanvasCard({ root: canvasRoot }, two.id, { ctrlKey: true });
     const mixedStyle = sharedByName("Batch Guard One").system.presentation?.extendedStyle;
-    popover = openPopover("style");
+    popover = openPopover("type");
     select = popover.querySelector(".jn-ft-style");
     fakeSecret(two.id);
     env.notifications.length = 0;
@@ -2354,7 +2272,7 @@ test("client cosmetic batches abort with localized warnings on stale, mixed or m
     delete vaultStore.data.notes[two.id];
 
     // Several GM-only notes cannot be bulk-edited either.
-    popover = openPopover("style");
+    popover = openPopover("type");
     select = popover.querySelector(".jn-ft-style");
     fakeSecret(one.id);
     fakeSecret(two.id);
@@ -2367,20 +2285,6 @@ test("client cosmetic batches abort with localized warnings on stale, mixed or m
     delete vaultStore.data.notes[one.id];
     delete vaultStore.data.notes[two.id];
 
-    // The attachment batch resolves stale ids first too; no pin write reaches either note.
-    clickCanvasCard({ root: canvasRoot }, one.id);
-    const pinBefore = one.system.attachment?.pinStyle ?? "";
-    popover = openPopover("pin");
-    select = popover.querySelector(".jn-ft-pin");
-    one.system.deleted = Date.now();
-    env.notifications.length = 0;
-    select.value = "brass";
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-    await settle();
-    assert.equal(one.system.attachment?.pinStyle ?? "", pinBefore,
-      "a stale attachment batch leaves pin appearance untouched");
-    assert.ok(env.notifications.some(([, text]) => text === game.i18n.localize("JN.Toolbar.BatchStale")));
-    one.system.deleted = null;
   } finally {
     delete vaultStore.data.notes[one.id];
     delete vaultStore.data.notes[two.id];
@@ -2760,7 +2664,7 @@ test("JournalApp floating toolbar writes bulk cosmetics through the shared batch
     const toolbar = canvasRoot.querySelector(".jn-floating-toolbar");
     assert.equal(toolbar.hidden, false);
     assert.deepEqual([...toolbar.querySelectorAll(".jn-ft-btn")].map(item => item.dataset.group),
-      ["style", "font", "picture", "torn", "pin"]);
+      ["type", "font", "effects"]);
 
     const open = group => {
       const trigger = toolbar.querySelector(`.jn-ft-btn[data-group="${group}"]`);
@@ -2768,7 +2672,7 @@ test("JournalApp floating toolbar writes bulk cosmetics through the shared batch
       trigger.click();
       return canvasRoot.querySelector(".jn-floating-popover");
     };
-    const popover = open("style");
+    const popover = open("type");
     const style = popover.querySelector(".jn-ft-style");
     style.value = "document";
     style.dispatchEvent(new Event("change", { bubbles: true }));
@@ -2776,13 +2680,8 @@ test("JournalApp floating toolbar writes bulk cosmetics through the shared batch
     assert.equal(sharedByName("App Bulk One").system.presentation.extendedStyle, "document");
     assert.equal(sharedByName("App Bulk Two").system.presentation.extendedStyle, "document");
 
-    const pinPopover = open("pin");
-    const pin = pinPopover.querySelector(".jn-ft-pin");
-    pin.value = "iron";
-    pin.dispatchEvent(new Event("change", { bubbles: true }));
-    await settle();
-    assert.equal(sharedByName("App Bulk One").system.attachment.pinStyle, "iron");
-    assert.equal(sharedByName("App Bulk Two").system.attachment.pinStyle, "iron");
+    assert.equal(toolbar.querySelector('[data-group="pin"]'), null,
+      "pin skins have no picker in the note rail");
     assert.equal(sharedByName("App Bulk One").system.attachment.mainPinEnabled, true);
   } finally {
     app._onClose();
@@ -2864,32 +2763,17 @@ test("canvas cards render Markdown and forward task checkboxes", () => {
   }
 });
 
-test("actor status renders as a card marker without replacing the seal", () => {
+test("stored experimental actor references do not add a badge or control", () => {
   const canvas = new JournalCanvas({});
   document.body.appendChild(canvas.root);
-  const note = {
-    _id: "statuscard000001",
-    name: "Dead NPC",
-    system: { style: "sticky", blocks: [], links: [], actorRef: { actorId: "Actor00000000001", sceneId: null } }
-  };
-  const layout = {
-    cards: { [note._id]: { x: 0, y: 0, rotation: 0 } },
-    labels: { seal000000000001: { stamp: "paw", noteId: note._id, corner: "bottom-right" } }
-  };
+  const note = { _id: "statuscard000001", name: "Legacy NPC", system: {
+    style: "sticky", blocks: [], links: [], actorRef: { actorId: "Actor00000000001" }
+  } };
   try {
-    canvas.statusFor = () => ({ state: "dead", actorId: "Actor00000000001", sceneId: null, tokenId: null });
-    canvas.update([note], layout);
+    canvas.update([note], { cards: { [note._id]: { x: 0, y: 0 } }, labels: {} });
     const card = canvas.root.querySelector(`.jn-card[data-id="${note._id}"]`);
-    assert.ok(card.classList.contains("jn-has-status"));
-    assert.equal(card.querySelector(".jn-card-status img").getAttribute("src"),
-      "modules/fvtt-journalinator/assets/stamps/skull.png");
-    assert.ok(card.querySelector(".jn-card-stamps .jn-stamp"), "the decorative seal is still rendered");
-
-    canvas.statusFor = () => null;
-    canvas.update([note], layout);
-    assert.ok(!card.classList.contains("jn-has-status"));
-    assert.equal(card.querySelector(".jn-card-status").hidden, true);
-    assert.equal(card.querySelector(".jn-card-status").children.length, 0);
+    assert.equal(card.querySelector(".jn-card-status"), null);
+    assert.equal(canvas.root.querySelector('[data-action="link-actor"]'), null);
   } finally {
     canvas.disconnectGeometry();
     canvas.root.remove();
@@ -3234,6 +3118,17 @@ test("private anchors are capped, strictly named, reference-safe and main-pin gu
     assert.equal(await workspace.removeCardAnchor(targetId, "constructor"), false,
       "prototype ids are rejected");
 
+    const otherId = await workspace.createNoteAt({ title: "Private Shared Dot", x: 800, y: 100 });
+    await workspace.createLink(otherId, targetId, { targetAnchorId: anchorId });
+    const otherLink = workspace.workspace.notes[otherId].links[0];
+    assert.equal(otherLink.targetAnchorId, anchorId, "another link reuses the same minor dot");
+    await workspace.deleteLink(sourceId, link.id);
+    assert.ok(workspace.workspace.layout.cards[targetId].anchors[anchorId],
+      "the shared dot survives while another connection uses it");
+    await workspace.deleteLink(otherId, otherLink.id);
+    assert.equal(workspace.workspace.layout.cards[targetId].anchors[anchorId], undefined,
+      "the last connection removes the dot");
+
     // Fill the registry to the shared 256 cap through the normal save/normalize path.
     const card = workspace.workspace.layout.cards[targetId];
     for (let i = 0; i < 300; i++) card.anchors[`m${i}`] = { kind: "minor", x: 0.5, y: 0.5 };
@@ -3429,12 +3324,14 @@ test("attachment pins render author colour, all candidate styles, and transform 
     assert.equal(main.style.left, "50%");
     assert.equal(main.style.top, "0%");
     assert.ok(minor, "minor anchors render their own pin");
-    assert.equal(minor.style.left, "20%");
-    assert.equal(minor.style.top, "30%");
+    assert.equal(minor.style.left, "20%", "legacy interior anchors retain their edge position");
+    assert.equal(minor.style.top, "0%");
     assert.equal(main.closest(".jn-card-main"), null, "pins live outside the clipped paper wrapper");
 
     const group = canvas.svg.querySelector('g[data-id="pinlink"]');
     let endpoints = [...group.querySelectorAll(".jn-thread-pin:not(.jn-board-pin)")];
+    assert.ok(endpoints.every(pin => pin.classList.contains("jn-thread-pin-attached")),
+      "an attached endpoint uses the existing DOM pin instead of drawing a second dot");
     const sourceWorld = anchorWorld({ x: 0, y: 0, w: 200, h: 100, rotation: 0 },
       { kind: "main", x: 0.5, y: 0 });
     const targetWorld = anchorWorld({ x: 400, y: 0, w: 200, h: 100, rotation: 0 },
@@ -3453,14 +3350,14 @@ test("attachment pins render author colour, all candidate styles, and transform 
     }
     const css = readFileSync(new URL("../../styles/stylized.css", import.meta.url), "utf8");
     assert.match(css,
-      /\.jn-canvas \.jn-card \.jn-pin \{[^}]*width:\s*calc\(20px \* var\(--jn-zoom-comp, 1\)\);/,
-      "main pins are a screen-constant 20px via --jn-zoom-comp");
+      /\.jn-canvas \.jn-card \.jn-pin \{[^}]*width:\s*var\(--jn-main-pin-size, 14px\);/,
+      "main pin heads use the zoom-scaled size");
     assert.match(css,
-      /\.jn-canvas \.jn-card \.jn-pin-minor \{[^}]*width:\s*calc\(9px \* var\(--jn-zoom-comp, 1\)\);/,
-      "minor pins are a screen-constant 9px visual");
+      /\.jn-canvas \.jn-card \.jn-pin-minor \{[^}]*width:\s*var\(--jn-minor-pin-size, 7px\);/,
+      "minor pin heads use the zoom-scaled size");
     assert.match(css,
-      /\.jn-canvas \.jn-card \.jn-pin::after \{[^}]*width:\s*max\(calc\(14px \* var\(--jn-zoom-comp, 1\)\), 100%\);/,
-      "small pins keep a ~14px screen-space hit target via a zoom-compensated pseudo-element");
+      /\.jn-canvas \.jn-card \.jn-pin::after \{[^}]*width:\s*max\(var\(--jn-pin-hit-size, 20px\), 100%\);/,
+      "small pins keep a 20px screen-space hit target");
     for (const style of ["enamel", "brass", "iron", "wood", "decorative", "wax"]) {
       assert.ok(css.includes(`.jn-pin-style-${style}::before`), `${style} has a pin visual rule`);
     }
@@ -3485,6 +3382,8 @@ test("attachment pins render author colour, all candidate styles, and transform 
     endpoints = [...canvas.svg.querySelectorAll('g[data-id="pinlink"] .jn-thread-pin:not(.jn-board-pin)')];
     assert.equal(Number(endpoints[0].getAttribute("cx")), rotatedWorld.x,
       "an existing anchor-linked path still resolves its pin position while pins are hidden");
+    assert.ok(endpoints.every(pin => !pin.classList.contains("jn-thread-pin-attached")),
+      "the fallback endpoint dots remain visible when pins are disabled");
 
     canvas.pinsEnabled = true;
     a.system.attachment = { mainPinEnabled: false, mainSnapRadius: 24, minorSnapRadius: 6, pinStyle: "brass" };
@@ -3548,7 +3447,7 @@ test("main-pin drag moves the note, minor pins move alone and report normalized 
     canvas.root.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, button: 0, clientX: 80, clientY: 60 }));
     canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 80, clientY: 60 }));
     assert.ok(calls.some(([name, id, anchorId, x, y]) => name === "onMoveCardAnchor"
-      && id === aId && anchorId === "m1" && Math.abs(x - 0.4) < 1e-9 && Math.abs(y - 0.6) < 1e-9),
+      && id === aId && anchorId === "m1" && Math.abs(x - 0.4) < 1e-9 && Math.abs(y - 1) < 1e-9),
       "a minor pin reports its new normalized position");
     assert.equal(calls.some(([name]) => name === "onMoveCard"), false,
       "a minor pin never starts a card drag");
@@ -3572,15 +3471,8 @@ test("main-pin drag moves the note, minor pins move alone and report normalized 
     card(aId).dispatchEvent(new MouseEvent("contextmenu", {
       bubbles: true, button: 2, clientX: 60, clientY: 50
     }));
-    const addMinor = canvas.root.querySelector('.jn-context-menu [data-action="add-minor-pin"]');
-    assert.ok(addMinor, "the note menu offers an add-minor-pin action");
-    addMinor.click();
-    const added = calls.find(([name]) => name === "onAddCardAnchor");
-    assert.ok(added, "the menu requests a new minor anchor");
-    assert.equal(added[1], aId);
-    assert.equal(added[2].kind, "minor");
-    assert.ok(Math.abs(added[2].x - 0.3) < 1e-9 && Math.abs(added[2].y - 0.5) < 1e-9,
-      "the anchor lands at the right-clicked normalized point");
+    assert.equal(canvas.root.querySelector('.jn-context-menu [data-action="add-minor-pin"]'), null,
+      "minor anchors are created by completed edge links only");
   } finally {
     canvas.disconnectGeometry();
     canvas.root.remove();
@@ -3618,7 +3510,7 @@ test("a rejected minor-pin write clears the optimistic drag and restores the pin
     pin.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 40, clientY: 30 }));
     canvas.root.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, button: 0, clientX: 100, clientY: 70 }));
     canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 100, clientY: 70 }));
-    assert.equal(canvas.anchorDrag, null, "the drag override is cleared as soon as the write is sent");
+    assert.ok(canvas.anchorDrag, "the pin remains at the dropped position while the write is pending");
     await settle();
     const restored = canvas.root.querySelector('.jn-pin[data-anchor-id="m1"]');
     assert.equal(restored.style.left, "20%", "a rejected write snaps the pin back to the stored point");
@@ -3629,7 +3521,7 @@ test("a rejected minor-pin write clears the optimistic drag and restores the pin
   }
 });
 
-test("link tool reuses nearby pins, creates minor specs on interior clicks, and shares anchors", () => {
+test("link tool projects interior hits to edges and reuses main and minor pins", () => {
   const calls = [];
   const canvas = new JournalCanvas(new Proxy({}, {
     get: (_, name) => (...args) => calls.push([name, ...args])
@@ -3679,16 +3571,25 @@ test("link tool reuses nearby pins, creates minor specs on interior clicks, and 
       "hovering a pin under the link tool shows a magnet preview");
     assert.ok(targetPreview.classList.contains("jn-pin-target-main"));
     clickCard(ids[0], 100, 0);
-    clickCard(ids[1], 480, 50);
+    clickCard(ids[1], 400, 50);
     let created = linkCalls().at(-1);
     assert.equal(created[3].sourceAnchorId, "main");
     assert.equal(created[3].targetAnchorId, "");
-    assert.deepEqual(created[3].targetAnchor, { kind: "minor", x: 0.4, y: 0.5 });
-    assert.deepEqual(created[3].targetPoint, { x: 0.4, y: 0.5 });
+    assert.deepEqual(created[3].targetAnchor, { kind: "minor", x: 0, y: 0.5 });
+    assert.deepEqual(created[3].targetPoint, { x: 0, y: 0.5 });
+
+    canvas.toggleLinkTool();
+    clickCard(ids[0], 101, 50);
+    clickCard(ids[1], 501, 50);
+    created = linkCalls().at(-1);
+    assert.deepEqual(created[3].sourceAnchor, { kind: "minor", x: 1, y: 0.5 },
+      "a hit just right of the centre starts at the right edge");
+    assert.deepEqual(created[3].targetAnchor, { kind: "minor", x: 1, y: 0.5 },
+      "an interior target projects to the indicated edge");
 
     canvas.toggleLinkTool();
     clickCard(ids[0], 100, 0);
-    clickCard(ids[1], 540, 20);
+    clickCard(ids[1], 540, 0);
     created = linkCalls().at(-1);
     assert.equal(created[3].targetAnchorId, "m1",
       "clicking near a rendered minor pin reuses its anchor id");
@@ -3701,6 +3602,21 @@ test("link tool reuses nearby pins, creates minor specs on interior clicks, and 
     assert.equal(created[3].targetAnchorId, "main");
     const shares = linkCalls().filter(([, , , ports]) => ports.sourceAnchorId === "main");
     assert.equal(shares.length, 3, "any number of links can reuse the same main anchor");
+
+    canvas.toggleLinkTool();
+    canvas.root.querySelector(`.jn-card[data-id="${ids[0]}"] .jn-pin-main`).dispatchEvent(
+      new MouseEvent("click", { bubbles: true, button: 0, clientX: 180, clientY: 45 }));
+    canvas.root.querySelector(`.jn-card[data-id="${ids[1]}"] .jn-pin-main`).dispatchEvent(
+      new MouseEvent("click", { bubbles: true, button: 0, clientX: 480, clientY: 45 }));
+    created = linkCalls().at(-1);
+    assert.equal(created[3].sourceAnchorId, "main", "a direct pin click uses its anchor despite cursor geometry");
+    assert.equal(created[3].targetAnchorId, "main");
+
+    canvas.linksById.set("selected-thread", { id: "selected-thread", sourceId: ids[0] });
+    canvas.selectedLinkId = "selected-thread";
+    canvas.root.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Delete" }));
+    assert.deepEqual(calls.at(-1), ["onDeleteLink", ids[0], "selected-thread"],
+      "Delete removes a selected link without requiring the tiny menu control");
   } finally {
     canvas.disconnectGeometry();
     canvas.root.remove();
@@ -3835,7 +3751,7 @@ test("secret/hidden links never receive anchor ids or specs", async () => {
       bubbles: true, button: 0, clientX: secretData.x + 100, clientY: secretData.y
     }));
     sharedCard.dispatchEvent(new MouseEvent("click", {
-      bubbles: true, button: 0, clientX: sharedData.x + 80, clientY: sharedData.y + 50
+      bubbles: true, button: 0, clientX: sharedData.x, clientY: sharedData.y + 50
     }));
     const created = calls.find(([name]) => name === "onCreateLink");
     assert.ok(created, "the hidden/secret link gesture still creates a link");
@@ -5079,10 +4995,9 @@ test("shared multi-delete asks first, deletes only after confirmation, and repor
     await redraw();
     const trash = host.querySelector(".journalinator-trash");
     const count = notesStore.getTrashedNotes().length;
-    assert.equal(trash.querySelector(".jn-toolbar-badge").textContent, String(count),
-      "the shared Trash button shows the recoverable note count");
-    assert.match(trash.getAttribute("aria-label"), new RegExp(`\\(${count}\\)`),
-      "the badge count is also in the accessible label");
+    assert.ok(count > 0);
+    assert.equal(trash.querySelector(".jn-toolbar-badge"), null,
+      "the shared Trash button has no notification badge");
 
     trash.click();
     await settle();
@@ -5140,8 +5055,8 @@ test("private multi-delete confirms, then badges and dates the private trash", a
     "the private multi-delete notice explains recovery");
 
     const trash = host.querySelector(".journalinator-trash");
-    assert.equal(trash.querySelector(".jn-toolbar-badge").textContent, "2",
-      "the private Trash button shows its recoverable count");
+    assert.equal(trash.querySelector(".jn-toolbar-badge"), null,
+      "the private Trash button has no notification badge");
     trash.click();
     await settle();
     const content = dialogWaits.at(-1)?.content ?? "";

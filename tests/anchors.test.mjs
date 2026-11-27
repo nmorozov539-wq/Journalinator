@@ -82,9 +82,9 @@ test("projectToEdge picks the nearest rotated-card boundary point", () => {
 test("redistributionAnchor reuses a nearby minor then falls back to the edge", () => {
   const anchors = {
     main: { kind: "main", x: 0.5, y: 0 },
-    side: { kind: "minor", x: 0.5, y: 0.5 }
+    side: { kind: "minor", x: 0.5, y: 0 }
   };
-  const reuse = redistributionAnchor(box(), anchors, { x: 51, y: 25 }, { snap: 12 });
+  const reuse = redistributionAnchor(box(), anchors, { x: 51, y: 1 }, { snap: 12 });
   assert.equal(reuse.anchorId, "side");
   assert.deepEqual(reuse.anchor, anchors.side);
 

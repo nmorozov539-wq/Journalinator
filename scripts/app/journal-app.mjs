@@ -20,7 +20,6 @@ import * as secrets from "../secrets/secret-actions.mjs";
 import { t } from "../i18n.mjs";
 import { stripSecretPrefix } from "../secrets/model.mjs";
 import { NOTE_FONT_KEYS, PICTURE_LAYOUTS, PIN_STYLES, PRESENTATION_STYLES, resolvePresentation } from "../presentation.mjs";
-import { resolveActorStatus } from "../actor-status.mjs";
 
 /** Runs a GM vault action and surfaces failures (e.g. the vault was locked meanwhile). */
 function gm(job) {
@@ -232,9 +231,19 @@ export default class JournalApp extends ApplicationV2 {
       if (text.trim() === "") requestWrite({ type: "removeLabel", labelId });
       else requestWrite({ type: "updateLabel", labelId, text });
     },
-    onCreateLink: (sourceId, targetId, ports) => (notesStore.isSecretNote(sourceId) || notesStore.isSecretNote(targetId))
-      ? gm(() => secrets.addHiddenLink(sourceId, targetId, ports))
-      : requestWrite({ type: "createLink", sourceId, targetId, ...ports }),
+    onCreateLink: async (sourceId, targetId, ports) => {
+      if (notesStore.isSecretNote(sourceId) || notesStore.isSecretNote(targetId)) {
+        await gm(() => secrets.addHiddenLink(sourceId, targetId, ports));
+      } else {
+        await requestWrite({ type: "createLink", sourceId, targetId, ...ports });
+      }
+      // A new dot writes the layout and then the note link. Foundry can coalesce those document
+      // hooks into a render between writes. Refresh the retained canvas from the final documents.
+      if (game.users.activeGM?.id === game.user.id && this.#view === "shared"
+          && this.#canvas.root.isConnected) {
+        this.#canvas.update(notesStore.getAllNotes(), notesStore.getLayout());
+      }
+    },
     onUpdateLink: (noteId, linkId, fields) => notesStore.isHiddenLink(noteId, linkId)
       ? gm(() => secrets.updateHiddenLink(noteId, linkId, fields))
       : requestWrite({ type: "updateLink", noteId, linkId, fields }),
@@ -259,10 +268,6 @@ export default class JournalApp extends ApplicationV2 {
     onHideLink: (noteId, linkId) => gm(() => secrets.hideSharedLink(noteId, linkId)),
     onRevealLink: (noteId, linkId) => gm(() => secrets.revealLink(noteId, linkId)),
     onToggleLinkHint: (noteId, linkId, hint) => requestWrite({ type: "gmSetLinkHint", noteId, linkId, hint }),
-    // Actor links are a GM-side read: players still see the derived badge, but cannot choose
-    // which actor a shared note watches.
-    onLinkActor: noteId => this.#linkActor(noteId),
-    onUnlinkActor: noteId => requestWrite({ type: "linkActor", noteId, actorRef: null })
   });
 
   #private = new PrivateWorkspace({
@@ -412,95 +417,6 @@ export default class JournalApp extends ApplicationV2 {
     return requestWrite({ type: "removeCardAnchor", noteId, anchorId });
   }
 
-  /** True when any visible note watches this base actor (synthetic token actors included). */
-  #actorIsLinked(value) {
-    const actorId = typeof value === "string"
-      ? value
-      : (value?.token?.actorId ?? value?.actorId ?? value?.id);
-    if (!actorId) return false;
-    return notesStore.getAllNotes().some(note => note.system?.actorRef?.actorId === actorId);
-  }
-
-  #sceneIsLinked(sceneId) {
-    if (!sceneId) return false;
-    return notesStore.getAllNotes().some(note => note.system?.actorRef?.sceneId === sceneId);
-  }
-
-  #hasActorLinks() {
-    return notesStore.getAllNotes().some(note => note.system?.actorRef?.actorId);
-  }
-
-  async #linkActor(noteId) {
-    if (!game.user?.isGM) return;
-    const note = notesStore.getNote(noteId);
-    if (!note || note.secret) return;
-    const actors = [...(game.actors ?? [])].sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
-    if (!actors.length) {
-      ui.notifications?.warn(t("JN.Actor.NoActors"));
-      return;
-    }
-    const scenes = [...(game.scenes ?? [])].sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
-    const current = note.system?.actorRef ?? null;
-    const esc = foundry.utils.escapeHTML;
-    const tokenCount = (scene, actorId) => {
-      if (!scene?.tokens) return 0;
-      let count = 0;
-      for (const token of scene.tokens) if (token.actorId === actorId) count++;
-      return count;
-    };
-    const sceneOptions = actorId => [
-      `<option value="">${t("JN.Actor.AnyScene")}</option>`,
-      ...scenes
-        .filter(scene => tokenCount(scene, actorId) > 0)
-        .map(scene => `<option value="${esc(scene.id)}">${esc(t("JN.Actor.SceneOption", { scene: scene.name }))}</option>`)
-    ].join("");
-
-    const result = await foundry.applications.api.DialogV2.wait({
-      window: { title: t("JN.Actor.DialogTitle") },
-      position: { width: 480 },
-      content: `
-        <div class="form-group">
-          <label for="jn-actor-link">${t("JN.Actor.Actor")}</label>
-          <div class="form-fields"><select id="jn-actor-link" name="actor">
-            ${actors.map(actor => `<option value="${esc(actor.id)}" ${current?.actorId === actor.id ? "selected" : ""}>${esc(actor.name)}</option>`).join("")}
-          </select></div>
-        </div>
-        <div class="form-group">
-          <label for="jn-actor-scene">${t("JN.Actor.Scope")}</label>
-          <div class="form-fields"><select id="jn-actor-scene" name="scene"></select></div>
-        </div>
-        <p class="journalinator-meta">${t("JN.Actor.Hint")}</p>`,
-      render: (_event, dialog) => {
-        const actorSelect = dialog.element.querySelector('select[name="actor"]');
-        const sceneSelect = dialog.element.querySelector('select[name="scene"]');
-        const syncScenes = () => {
-          sceneSelect.innerHTML = sceneOptions(actorSelect.value);
-          if (current?.actorId === actorSelect.value && current.sceneId
-              && [...sceneSelect.options].some(option => option.value === current.sceneId)) {
-            sceneSelect.value = current.sceneId;
-          }
-        };
-        actorSelect.addEventListener("change", syncScenes);
-        syncScenes();
-      },
-      buttons: [
-        {
-          action: "ok",
-          label: t("JN.Common.OK"),
-          default: true,
-          callback: (_event, button) => ({
-            actorId: button.form.elements.actor.value,
-            sceneId: button.form.elements.scene.value || null
-          })
-        },
-        { action: "cancel", label: t("JN.Common.Cancel"), callback: () => null }
-      ],
-      rejectClose: false
-    });
-    if (!result?.actorId) return;
-    await requestWrite({ type: "linkActor", noteId, actorRef: result });
-  }
-
   async #createNoteAt({
     x, y, secret = false, kind = "note", style, initialTitle, immediate = false, presentation, label = ""
   }) {
@@ -646,36 +562,6 @@ export default class JournalApp extends ApplicationV2 {
         || "levels" in changes || "initialLevel" in changes) rerenderForScene();
     })]);
 
-    // Actor badges are derived, so they only need a re-render when a linked actor, its token, or
-    // a status effect changes. Token movement is deliberately ignored: updateToken fires on
-    // every step, and a badge does not depend on coordinates.
-    const rerenderForActor = actor => {
-      if (this.#actorIsLinked(actor)) this.render();
-    };
-    this.#hookIds.push(["updateActor", Hooks.on("updateActor", rerenderForActor)]);
-    this.#hookIds.push(["createToken", Hooks.on("createToken", token => rerenderForActor(token))]);
-    this.#hookIds.push(["deleteToken", Hooks.on("deleteToken", token => rerenderForActor(token))]);
-    this.#hookIds.push(["updateToken", Hooks.on("updateToken", (token, changes) => {
-      const touchesDelta = Object.keys(changes ?? {}).some(key => key === "delta" || key.startsWith("delta."));
-      if (touchesDelta) rerenderForActor(token);
-    })]);
-    this.#hookIds.push(["deleteActor", Hooks.on("deleteActor", actor => rerenderForActor(actor))]);
-    this.#hookIds.push(["deleteScene", Hooks.on("deleteScene", scene => {
-      if (this.#sceneIsLinked(scene?.id)) this.render();
-    })]);
-    const rerenderForEffect = effect => {
-      const parent = effect?.parent;
-      if (!parent) return;
-      const actor = parent.documentName === "Actor" || parent.isToken ? parent : (parent.actor ?? parent.parent);
-      if (actor) rerenderForActor(actor);
-    };
-    for (const hook of ["createActiveEffect", "updateActiveEffect", "deleteActiveEffect"]) {
-      this.#hookIds.push([hook, Hooks.on(hook, rerenderForEffect)]);
-    }
-    this.#hookIds.push(["canvasReady", Hooks.on("canvasReady", () => {
-      if (this.#hasActorLinks()) this.render();
-    })]);
-
     this.#onGlobalKeydown = ev => {
       // The patch-notes dialog is a read-only overlay: do not let canvas shortcuts (copy,
       // paste, Backspace, undo) fire while it has focus.
@@ -718,7 +604,9 @@ export default class JournalApp extends ApplicationV2 {
         if ((ev.key === "Backspace" || ev.key === "Delete")
             && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey) {
           consume();
-          if (!ev.repeat) this.#private.deleteSelected();
+          if (!ev.repeat) {
+            if (!this.#private.canvas.deleteSelectedLink()) this.#private.deleteSelected();
+          }
           return;
         }
         if ((ev.ctrlKey || ev.metaKey) && !ev.shiftKey && !ev.altKey
@@ -735,6 +623,7 @@ export default class JournalApp extends ApplicationV2 {
           && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey) {
         consume();
         if (ev.repeat) return;
+        if (this.#canvas.deleteSelectedLink()) return;
         const labelIds = this.#canvas.getSelectedLabelIds();
         const selected = this.#canvas.getSelectedNoteIds();
         const shared = selected.filter(id => {
@@ -1189,8 +1078,7 @@ export default class JournalApp extends ApplicationV2 {
     const offline = !context.gmOnline;
     const privatePage = context.privatePage;
     const incomingCount = privateView ? this.#pendingIncoming().length : 0;
-    const trashCount = context.trashCount ?? 0;
-    const trashLabel = t(trashCount > 0 ? "JN.TopBar.TrashCount" : "JN.TopBar.Trash", { count: trashCount });
+    const trashLabel = t("JN.TopBar.Trash");
     const filters = (items, selected, kind) => items.map(([id, label, color]) =>
       `<label class="jn-menu-option"><input type="checkbox" data-kind="${kind}" value="${escape(id)}"
         ${selected.has(id) ? "checked" : ""}>${color ? `<span class="jn-dot" style="background:${escape(String(color))}"></span>` : ""}
@@ -1223,7 +1111,7 @@ export default class JournalApp extends ApplicationV2 {
         ${themePicker}
       </div>
       <div class="jn-toolbar-group">
-        ${toolbarButton("journalinator-trash", "fa-trash", trashLabel, false, trashCount)}
+        ${toolbarButton("journalinator-trash", "fa-trash", trashLabel)}
         ${toolbarButton("journalinator-stats", "fa-chart-column", t("JN.TopBar.Stats"))}
         ${toolbarButton("journalinator-fit", "fa-expand", t("JN.TopBar.FitAll"))}
       </div>`;
@@ -1252,7 +1140,7 @@ export default class JournalApp extends ApplicationV2 {
       </div>
       <div class="jn-toolbar-group">
         ${privatePage ? toolbarButton("journalinator-private-stats", "fa-chart-column", t("JN.TopBar.Stats")) : ""}
-        ${privatePage ? toolbarButton("journalinator-trash", "fa-trash", trashLabel, false, trashCount) : ""}
+        ${privatePage ? toolbarButton("journalinator-trash", "fa-trash", trashLabel) : ""}
         ${privatePage ? toolbarButton("journalinator-private-fit", "fa-expand", t("JN.TopBar.FitAll")) : ""}
         ${toolbarButton("journalinator-private-send", "fa-paper-plane",
           offline ? t("JN.Private.NeedGM") : t("JN.Transfer.SendTo"), true)}
@@ -1329,7 +1217,6 @@ export default class JournalApp extends ApplicationV2 {
     this.#canvas.mount(root.querySelector(".journalinator-canvas-slot"));
     this.#canvas.selectedNoteId = this.#selectedNoteId;
     this.#canvas.gmMode = context.merged;
-    this.#canvas.statusFor = note => resolveActorStatus(note.system?.actorRef);
     this.#canvas.update(context.allNotes, context.layout, {
       deferGeometry: true,
       dimMatch: note => this.#matchesQuery(note, context.query) && this.#matchesFilters(note)

@@ -825,8 +825,12 @@
   /* The card lives inside the zoom-scaled world. --jn-zoom-comp = 1/k, so multiplying the DOM
      size keeps the *screen* diameter/target at 20px for the main pin and ~14px for a minor pin
      across k=0.5..2 (the visual pins therefore stay screen-constant too). */
-  width: calc(20px * var(--jn-zoom-comp, 1));
-  height: calc(20px * var(--jn-zoom-comp, 1));
+  width: var(--jn-main-pin-size, 14px);
+  height: var(--jn-main-pin-size, 14px);
+  min-width: 0;
+  min-height: 0;
+  max-width: none;
+  max-height: none;
   margin: 0;
   padding: 0;
   border: 0;
@@ -844,9 +848,17 @@
   --jn-pin-color: var(--jn-author-color, #8d8d97);
 }
 .jn-canvas .jn-card .jn-pin-minor {
-  width: calc(9px * var(--jn-zoom-comp, 1));
-  height: calc(9px * var(--jn-zoom-comp, 1));
+  width: var(--jn-minor-pin-size, 7px);
+  height: var(--jn-minor-pin-size, 7px);
   --jn-pin-color: var(--jn-sc-pin-minor, #7d7466);
+}
+.jn-canvas .jn-card .jn-pin-minor::before,
+.jn-canvas .jn-card .jn-pin-minor[class*="jn-pin-style-"]::before {
+  transform: none;
+  border: 1px solid #31262d;
+  border-radius: 50%;
+  background: #a89bea;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .55);
 }
 /* The visual head may be only ~9 screen px; the transparent pseudo-element keeps a ~14px screen
    target at every zoom (main inherits its 20px head). */
@@ -855,8 +867,8 @@
   position: absolute;
   left: 50%;
   top: 50%;
-  width: max(calc(14px * var(--jn-zoom-comp, 1)), 100%);
-  height: max(calc(14px * var(--jn-zoom-comp, 1)), 100%);
+  width: max(var(--jn-pin-hit-size, 20px), 100%);
+  height: max(var(--jn-pin-hit-size, 20px), 100%);
   transform: translate(-50%, -50%);
   border-radius: 50%;
 }
@@ -885,16 +897,11 @@
 /* Enamel is the default look: author-coloured head with a dark, legible metal rim. */
 .jn-canvas .jn-card .jn-pin-style-enamel::before,
 .jn-canvas .jn-card .jn-pin-style-default::before {
-  background:
-    radial-gradient(circle at 32% 26%, rgba(255, 255, 255, .82), transparent 34%),
-    radial-gradient(circle at 50% 52%,
-      color-mix(in srgb, var(--jn-pin-color) 86%, #fff 10%),
-      color-mix(in srgb, var(--jn-pin-color) 64%, #120b06) 78%);
-  border: 2px solid color-mix(in srgb, var(--jn-pin-color) 28%, #18110b);
+  background: var(--jn-pin-color);
+  border: 2px solid #322820;
   box-shadow:
-    0 2px 4px rgba(0, 0, 0, .48),
-    inset 0 0 0 1px rgba(255, 255, 255, .38),
-    inset 0 -2px 3px rgba(0, 0, 0, .3);
+    0 1px 3px rgba(0, 0, 0, .55),
+    inset 0 1px 0 rgba(255, 255, 255, .35);
 }
 .jn-canvas .jn-card .jn-pin-minor.jn-pin-style-enamel::before,
 .jn-canvas .jn-card .jn-pin-minor.jn-pin-style-default::before {
@@ -977,6 +984,16 @@
   box-shadow:
     0 2px 4px rgba(0, 0, 0, .46),
     inset 0 0 0 1px rgba(255, 191, 170, .2);
+}
+
+/* Minor anchors are plain shared connection dots, regardless of the main pin's skin. */
+.jn-canvas .jn-thread-pin-attached { display: none; }
+.jn-canvas .jn-card .jn-pin-minor[class*="jn-pin-style-"]::before {
+  transform: none;
+  border: 1px solid #31262d;
+  border-radius: 50%;
+  background: #a89bea;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .55);
 }
 
 /* Board route pins are a distinct control; 12px visual diameter, still zoom-compensated. */
@@ -1150,15 +1167,12 @@
   z-index: 5;
   display: flex;
   flex-direction: column;
-  align-items: stretch;
+  align-items: flex-end;
   gap: 3px;
-  max-width: calc(100% - 26px);
-  padding: 4px;
-  border: 1px solid #4a3b2c;
-  border-radius: 10px;
-  background: #1b1611;
-  background: color-mix(in srgb, #1b1611 94%, transparent);
-  box-shadow: 0 10px 26px rgba(0, 0, 0, .42);
+  width: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: #ece0cc;
   font: 12px/1.25 system-ui, -apple-system, "Segoe UI", sans-serif;
 }
@@ -1168,17 +1182,20 @@
 }
 
 .jn-ft-btn {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 0;
   min-width: 32px;
+  width: 32px;
   height: 30px;
   padding: 0 7px;
-  overflow: hidden;
-  border: 1px solid transparent;
+  overflow: visible;
+  border: 1px solid #4a3b2c;
   border-radius: 7px;
-  background: transparent;
+  background: #1b1611;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, .35);
   color: inherit;
   cursor: pointer;
   transition: background-color .14s ease, border-color .14s ease, gap .16s ease;
@@ -1210,6 +1227,17 @@
   opacity: 0;
 }
 .jn-ft-label {
+  position: absolute;
+  right: calc(100% + 5px);
+  top: -1px;
+  box-sizing: border-box;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  padding: 0;
+  border: 0 solid #5a472f;
+  border-radius: 7px;
+  background: #1b1611;
   max-width: 0;
   overflow: hidden;
   opacity: 0;
@@ -1219,7 +1247,19 @@
 .jn-ft-btn:hover .jn-ft-label,
 .jn-ft-btn:focus-visible .jn-ft-label {
   max-width: 220px;
+  padding: 0 9px;
+  border-width: 1px;
   opacity: 1;
+}
+.jn-ft-connections { display: grid; gap: 4px; }
+.jn-ft-connections button {
+  padding: 6px 8px;
+  border: 1px solid #55432f;
+  border-radius: 6px;
+  background: #241d16;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 .jn-ft-btn > i {
   flex: 0 0 16px;
@@ -1230,7 +1270,7 @@
 
 .jn-floating-popover {
   position: absolute;
-  z-index: 5;
+  z-index: 14;
   box-sizing: border-box;
   width: min(250px, calc(100% - 76px));
   max-height: calc(100% - 30px);

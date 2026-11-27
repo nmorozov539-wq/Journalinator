@@ -3,7 +3,7 @@ import PrivateNoteEditor from "./private-editor.mjs";
 import { privateStore, MAX_TITLE_LENGTH } from "../store/private-store.mjs";
 import { CARD_STYLES } from "../styles/registry.mjs";
 import { linkAnchors, moveThreadPin } from "../card-ports.mjs";
-import { anchorSide, validAnchorId } from "../anchors.mjs";
+import { anchorSide, minorOnEdge, pruneAnchorRegistry, validAnchorId } from "../anchors.mjs";
 import { isLinkColor, normalizeLinkColor } from "../link-colors.mjs";
 import {
   LINK_ENDS, LINK_MATERIALS, LINK_PATTERNS, LINK_SLACK, LINK_THICKNESS, MAX_CARD_ANCHORS,
@@ -489,10 +489,11 @@ export default class PrivateWorkspace {
     const anchors = { ...(card.anchors ?? {}) };
     if (Object.keys(anchors).length >= MAX_CARD_ANCHORS) return "";
     const id = `minor-${foundry.utils.randomID()}`;
+    const point = minorOnEdge(spec, { w: card.width ?? 190, h: card.height ?? 90 });
     anchors[id] = {
       kind: "minor",
-      x: this.#anchorPoint(spec.x),
-      y: this.#anchorPoint(spec.y),
+      x: point.x,
+      y: point.y,
       createdBy: this.page ? privateStore.ownerId(this.page) || "" : ""
     };
     card.anchors = anchors;
@@ -534,10 +535,11 @@ export default class PrivateWorkspace {
       if (!target) return;
       const anchors = { ...(target.anchors ?? {}) };
       if (Object.keys(anchors).length >= MAX_CARD_ANCHORS) return;
+      const point = minorOnEdge(anchor, { w: target.width ?? 190, h: target.height ?? 90 });
       anchors[id] = {
         kind: "minor",
-        x: this.#anchorPoint(anchor.x),
-        y: this.#anchorPoint(anchor.y),
+        x: point.x,
+        y: point.y,
         createdBy: this.page ? privateStore.ownerId(this.page) || "" : ""
       };
       target.anchors = anchors;
@@ -551,7 +553,7 @@ export default class PrivateWorkspace {
       const card = data.layout.cards[noteId];
       const anchor = this.#cardAnchor(card, anchorId);
       if (!anchor || anchor.kind === "main") return;
-      const moved = { ...anchor, x: this.#anchorPoint(x), y: this.#anchorPoint(y) };
+      const moved = minorOnEdge({ ...anchor, x, y }, { w: card.width ?? 190, h: card.height ?? 90 });
       const anchors = { ...(card.anchors ?? {}) };
       anchors[anchorId] = moved;
       card.anchors = anchors;
@@ -672,6 +674,11 @@ export default class PrivateWorkspace {
     return this.#save(data => {
       const note = data.notes[noteId];
       if (note) note.links = note.links.filter(link => link.id !== linkId);
+      const owners = [...Object.values(data.notes ?? {}),
+        ...(data.trash ?? []).map(entry => entry?.note).filter(Boolean)];
+      for (const { noteId: id, anchors } of pruneAnchorRegistry(data.layout.cards, owners)) {
+        data.layout.cards[id].anchors = anchors;
+      }
     });
   }
 

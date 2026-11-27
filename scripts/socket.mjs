@@ -6,7 +6,7 @@ import {
 } from "./card-ports.mjs";
 import {
   MAIN_ANCHOR_ID, anchorSide, anchorWorld, canonicalizeMainAnchors, collectAnchorRefs,
-  defaultMainAnchor, pruneAnchorRegistry, projectToEdge, redistributionAnchor, validAnchorId
+  defaultMainAnchor, minorOnEdge, pruneAnchorRegistry, projectToEdge, redistributionAnchor, validAnchorId
 } from "./anchors.mjs";
 import { isLinkColor, normalizeLinkColor } from "./link-colors.mjs";
 import { noteImagePath } from "./image-url.mjs";
@@ -20,7 +20,6 @@ import {
 import { t } from "./i18n.mjs";
 import { MAX_TRANSFER_NOTES, buildPrivateTransfer } from "./private-transfer.mjs";
 import { attachedStampIds, DEFAULT_STAMP_CORNER, isStampCorner, stampUrl } from "./stamps.mjs";
-import { normalizeActorRef } from "./actor-status.mjs";
 import {
   LINK_ENDS, LINK_MATERIALS, LINK_PATTERNS, LINK_SLACK, LINK_THICKNESS,
   MAIN_PIN, MAX_CARD_ANCHORS, NOTE_FONT_KEYS, PICTURE_LAYOUTS, PIN_STYLES, PRESENTATION_STYLES,
@@ -475,6 +474,7 @@ function cleanMinorAnchorSpec(spec) {
   if (spec.kind !== undefined && spec.kind !== "minor") return null;
   if (!Number.isFinite(spec.x) || !Number.isFinite(spec.y)) return null;
   if (spec.x < 0 || spec.x > 1 || spec.y < 0 || spec.y > 1) return null;
+  if (spec.x !== 0 && spec.x !== 1 && spec.y !== 0 && spec.y !== 1) return null;
   return { kind: "minor", x: spec.x, y: spec.y };
 }
 
@@ -742,9 +742,12 @@ function clearMissingEndpointAnchor(link, prefix, card) {
  * collection uses *all* shared notes (including trashed ones) because restoring a note brings its
  * links back; only the layout is updated.
  */
-async function pruneSharedAnchors(shared, layout = layoutPage(shared)) {
+async function pruneSharedAnchors(shared, layout = layoutPage(shared), linkOverride = null) {
   if (!layout) return;
-  const notes = allSharedNoteList(shared);
+  // A Foundry page update can resolve before the collection exposes its new links. Use the
+  // exact array we just wrote when pruning after a link edit or deletion.
+  const notes = allSharedNoteList(shared).map(page => page.id === linkOverride?.noteId
+    ? { _id: page.id, system: { links: linkOverride.links } } : page);
   // Fold any legacy non-canonical main first and move its links to the canonical id. Otherwise
   // pruning would remove the referenced main and leave the link dangling on an unknown anchor.
   const canonical = canonicalizeMainAnchors(layout.system.cards ?? {}, notes);
@@ -752,13 +755,23 @@ async function pruneSharedAnchors(shared, layout = layoutPage(shared)) {
     const page = shared.pages.get(noteId);
     if (page?.type === `${MODULE_ID}.note`) await page.update({ "system.links": links });
   }
-  const changed = pruneAnchorRegistry(canonical.cards, allSharedNoteList(shared));
+  const changed = pruneAnchorRegistry(canonical.cards, notes);
   const updates = {};
-  for (const { noteId, anchors } of canonical.changed) {
+  const setRegistry = (noteId, anchors) => {
     updates[`system.cards.${noteId}.anchors`] = anchors;
+    // Foundry merges object fields on update. A replacement registry alone leaves removed
+    // anchor keys behind; explicit deletion markers make the last-link cleanup persistent.
+    for (const anchorId of Object.keys(layout.system.cards?.[noteId]?.anchors ?? {})) {
+      if (validAnchorId(anchorId) && !Object.hasOwn(anchors, anchorId)) {
+        updates[`system.cards.${noteId}.anchors.-=${anchorId}`] = null;
+      }
+    }
+  };
+  for (const { noteId, anchors } of canonical.changed) {
+    setRegistry(noteId, anchors);
   }
   for (const { noteId, anchors } of changed) {
-    updates[`system.cards.${noteId}.anchors`] = anchors;
+    setRegistry(noteId, anchors);
   }
   if (Object.keys(updates).length) await layout.update(updates);
 }
@@ -1511,33 +1524,6 @@ async function handleMessage(message, senderUserId) {
       return;
     }
 
-    case "linkActor": {
-      // Actor status is GM-facing information; players never get to choose which actor a shared
-      // note observes. The badge itself is still derived per client, so this only stores the ref.
-      if (!senderIsGM(senderUserId)) return;
-      const page = shared.pages.get(message.noteId);
-      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
-      if (message.actorRef === null) {
-        await page.update({ "system.actorRef": null });
-        return;
-      }
-      const ref = normalizeActorRef(message.actorRef);
-      if (!ref || !DOCUMENT_ID_RE.test(ref.actorId)) return;
-      if (ref.sceneId && !DOCUMENT_ID_RE.test(ref.sceneId)) return;
-      if (ref.tokenId && !DOCUMENT_ID_RE.test(ref.tokenId)) return;
-      if (!game.actors?.get?.(ref.actorId)) return;
-      if (ref.sceneId) {
-        const scene = game.scenes?.get?.(ref.sceneId);
-        if (!scene) return;
-        if (ref.tokenId) {
-          const token = scene.tokens?.get?.(ref.tokenId);
-          if (!token || token.actorId !== ref.actorId) return;
-        }
-      }
-      await page.update({ "system.actorRef": ref });
-      return;
-    }
-
     case "moveCard": {
       const note = shared.pages.get(message.noteId);
       if (!note || note.type !== `${MODULE_ID}.note` || note.system.deleted) return;
@@ -1684,7 +1670,8 @@ async function handleMessage(message, senderUserId) {
       const anchors = { ...(card.anchors ?? {}) };
       if (Object.keys(anchors).length >= MAX_CARD_ANCHORS) return;
       const anchorId = freshAnchorId(anchors);
-      anchors[anchorId] = { kind: "minor", x: message.x, y: message.y, createdBy: senderUserId };
+      const point = minorOnEdge({ kind: "minor", x: message.x, y: message.y }, cardBox(page, card));
+      anchors[anchorId] = { ...point, createdBy: senderUserId };
       await layout.update({ [`system.cards.${page.id}.anchors`]: anchors });
       return;
     }
@@ -1701,7 +1688,7 @@ async function handleMessage(message, senderUserId) {
       if (!anchor || anchor.kind !== "minor") return; // main pins move the note, not an anchor
       // Clone the registry and rewrite it whole. A client id never becomes a dotted update path
       // (which could otherwise reach `__proto__`/`constructor` or unrelated keys).
-      const moved = { ...anchor, x: message.x, y: message.y };
+      const moved = minorOnEdge({ ...anchor, x: message.x, y: message.y }, cardBox(page, card));
       const anchors = { ...(card.anchors ?? {}), [message.anchorId]: moved };
       const box = cardBox(page, card);
       const side = anchorSide(moved, box);
@@ -1746,9 +1733,7 @@ async function handleMessage(message, senderUserId) {
       // restore brings their links back) before deleting a shared pin.
       const refs = collectAnchorRefs(allSharedNoteList(shared));
       if (refs.get(page.id)?.has(message.anchorId)) return;
-      const anchors = { ...(card.anchors ?? {}) };
-      delete anchors[message.anchorId];
-      await layout.update({ [`system.cards.${page.id}.anchors`]: anchors });
+      await layout.update({ [`system.cards.${page.id}.anchors.-=${message.anchorId}`]: null });
       return;
     }
 
@@ -2350,6 +2335,7 @@ async function handleMessage(message, senderUserId) {
         console.error("Journalinator: link anchor write failed", err);
         return;
       }
+      if (existing !== -1) await pruneSharedAnchors(shared, layout, { noteId: page.id, links });
       if (addedNewLink) await recordActivity(senderUserId, { links: 1 });
       return;
     }
@@ -2403,7 +2389,7 @@ async function handleMessage(message, senderUserId) {
       if (!isLiveSharedNotePage(page)) return;
       const links = (page.system.links ?? []).filter(link => link.id !== message.linkId);
       await page.update({ "system.links": links });
-      await pruneSharedAnchors(shared);
+      await pruneSharedAnchors(shared, layoutPage(shared), { noteId: page.id, links });
       return;
     }
 

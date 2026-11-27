@@ -28,6 +28,14 @@ function firstTool(control) {
   return list.find(tool => typeof tool?.name === "string" && tool.name)?.name ?? null;
 }
 
+function hasTool(tools, name) {
+  return tools instanceof Map ? tools.has(name) : Object.hasOwn(tools, name);
+}
+
+function hasTools(tools) {
+  return tools instanceof Map ? tools.size > 0 : Object.keys(tools).length > 0;
+}
+
 /**
  * Resolve the activation target used when Journalinator closes. Tokens/select is the normal
  * target; if that control is unavailable (or a module removed it) use the first usable control
@@ -37,7 +45,7 @@ export function defaultControlTarget(controls, preferred = { control: "tokens", 
   const usable = controlList(controls).filter(control =>
     control && typeof control.name === "string" && control.name
     && control.tools && typeof control.tools === "object"
-    && Object.keys(control.tools).length > 0);
+    && hasTools(control.tools));
   if (!usable.length) return null;
 
   const preferredControl = preferred?.control
@@ -46,10 +54,10 @@ export function defaultControlTarget(controls, preferred = { control: "tokens", 
   const control = preferredControl ?? usable[0];
 
   const preferredTool = control === preferredControl && preferred?.tool
-    && Object.hasOwn(control.tools, preferred.tool)
+    && hasTool(control.tools, preferred.tool)
     ? preferred.tool : null;
   const tool = preferredTool
-    ?? (typeof control.activeTool === "string" && Object.hasOwn(control.tools, control.activeTool)
+    ?? (typeof control.activeTool === "string" && hasTool(control.tools, control.activeTool)
       ? control.activeTool : null)
     ?? firstTool(control);
 

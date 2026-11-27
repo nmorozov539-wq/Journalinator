@@ -490,24 +490,19 @@ test("applyTheme writes data attributes and custom properties for the stylized p
   assert.equal(root.style.values["--jn-sc-paper-memo"], "#ead9b4");
 });
 
-test("pin DOM sizes compensate zoom so screen hit targets stay ~20/14px", () => {
+test("pin heads scale gently while hit targets stay usable", () => {
   const css = readFileSync(new URL("../styles/stylized.css", import.meta.url), "utf8");
   assert.match(css,
-    /\.jn-canvas \.jn-card \.jn-pin \{[\s\S]*?width:\s*calc\(20px \* var\(--jn-zoom-comp, 1\)\);[\s\S]*?height:\s*calc\(20px \* var\(--jn-zoom-comp, 1\)\);/,
-    "main pin width and height are zoom-compensated");
+    /\.jn-canvas \.jn-card \.jn-pin \{[\s\S]*?width:\s*var\(--jn-main-pin-size, 14px\);[\s\S]*?height:\s*var\(--jn-main-pin-size, 14px\);/);
   assert.match(css,
-    /\.jn-canvas \.jn-card \.jn-pin-minor \{[\s\S]*?width:\s*calc\(9px \* var\(--jn-zoom-comp, 1\)\);/,
-    "minor pin visual is zoom-compensated");
+    /\.jn-canvas \.jn-card \.jn-pin-minor \{[\s\S]*?width:\s*var\(--jn-minor-pin-size, 7px\);/);
   assert.match(css,
-    /\.jn-canvas \.jn-card \.jn-pin::after \{[\s\S]*?width:\s*max\(calc\(14px \* var\(--jn-zoom-comp, 1\)\), 100%\);/,
-    "the pseudo hit area is zoom-compensated");
+    /\.jn-canvas \.jn-card \.jn-pin::after \{[\s\S]*?width:\s*max\(var\(--jn-pin-hit-size, 20px\), 100%\);/);
 
-  const comp = k => Math.min(2, Math.max(0.5, 1 / k));
-  for (const k of [0.5, 1, 2]) {
-    assert.ok(Math.abs(20 * comp(k) * k - 20) < 1e-9, `main pin stays 20px at k=${k}`);
-    assert.ok(Math.abs(9 * comp(k) * k - 9) < 1e-9, `minor visual stays 9px at k=${k}`);
-    assert.ok(Math.abs(Math.max(14 * comp(k), 9 * comp(k)) * k - 14) < 1e-9,
-      `minor hit target stays 14px at k=${k}`);
+  for (const k of [0.25, 1, 4]) {
+    const main = Math.max(8, Math.min(22, 14 * Math.sqrt(k)));
+    assert.ok(main >= 8 && main <= 22);
+    assert.equal((20 / k) * k, 20, `hit target stays 20px at k=${k}`);
   }
 });
 

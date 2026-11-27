@@ -46,3 +46,11 @@ test("defaultControlTarget handles empty or malformed control records", () => {
   assert.deepEqual(defaultControlTarget(new Map([["tokens", control("tokens", { select: tool("select", 1) })]])),
     { control: "tokens", tool: "select" }, "Map-backed control records work too");
 });
+
+test("defaultControlTarget accepts Map-backed tool collections", () => {
+  const tools = new Map([["target", tool("target", 2)], ["select", tool("select", 1)]]);
+  assert.deepEqual(defaultControlTarget(new Map([["tokens", control("tokens", tools)]])),
+    { control: "tokens", tool: "select" });
+  assert.deepEqual(defaultControlTarget({ tokens: control("tokens", new Map([["move", tool("move", 1)]]),
+    { activeTool: "move" }) }), { control: "tokens", tool: "move" });
+});
