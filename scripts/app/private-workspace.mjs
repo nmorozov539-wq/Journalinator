@@ -4,6 +4,7 @@ import { privateStore, MAX_TITLE_LENGTH } from "../store/private-store.mjs";
 import { CARD_STYLES } from "../styles/registry.mjs";
 import { linkAnchors, moveThreadPin } from "../card-ports.mjs";
 import { anchorSide, minorOnEdge, pruneAnchorRegistry, validAnchorId } from "../anchors.mjs";
+import { boardPinRef, resolvePin, validPinPosition } from "../board-pins.mjs";
 import { isLinkColor, normalizeLinkColor } from "../link-colors.mjs";
 import {
   LINK_ENDS, LINK_MATERIALS, LINK_PATTERNS, LINK_SLACK, LINK_THICKNESS, MAX_CARD_ANCHORS,
@@ -21,9 +22,11 @@ const esc = text => foundry.utils.escapeHTML(String(text ?? ""));
 
 /** The private tab's canvas, editor, selection, trash, and clipboard actions. */
 export default class PrivateWorkspace {
-  constructor({ onChange, onSelectionChange } = {}) {
+  constructor({ onChange, onSelectionChange, onSend, onStamp } = {}) {
     this.onChange = onChange ?? (() => {});
     this.onSelectionChange = onSelectionChange ?? (() => {});
+    this.onSend = onSend ?? (() => {});
+    this.onStamp = onStamp ?? (() => {});
     this.page = null;
     this.workspace = null;
     this.selectedNoteId = null;
@@ -79,6 +82,7 @@ export default class PrivateWorkspace {
       onAddCardAnchor: (noteId, anchor) => this.addCardAnchor(noteId, anchor),
       onMoveCardAnchor: (noteId, anchorId, x, y) => this.moveCardAnchor(noteId, anchorId, x, y),
       onRemoveCardAnchor: (noteId, anchorId) => this.removeCardAnchor(noteId, anchorId),
+      onBoardPinAction: action => this.boardPinAction(action),
       onSetPresentation: (ids, fields) => this.setNotesPresentation(ids, fields),
       onSetAttachment: (ids, fields) => this.setNotesAttachment(ids, fields)
     });
@@ -92,7 +96,9 @@ export default class PrivateWorkspace {
       // Private main-pin disabling is shared-canvas-only: links cannot be redistributed locally,
       // so the toggle is qualified/disabled while any private link references this main pin.
       mainPinLocked: id => this.#mainPinReferenced(id),
-      setMainPinEnabled: (id, enabled) => this.setMainPinEnabled(id, enabled)
+      setMainPinEnabled: (id, enabled) => this.setMainPinEnabled(id, enabled),
+      onSend: id => this.onSend(id),
+      onStamp: (id, trigger) => this.onStamp(id, trigger)
     });
   }
 
@@ -521,6 +527,66 @@ export default class PrivateWorkspace {
         label: "", direction: "one", color: "", lineStyle: "solid",
         origin: "drawn", edited: false, createdBy: this.page ? privateStore.ownerId(this.page) || "" : ""
       });
+    });
+  }
+
+  async boardPinAction(action) {
+    if (!this.workspace || !["add", "move", "connect"].includes(action?.type)) return false;
+    return this.#save(data => {
+      const layout = data.layout;
+      layout.pins ??= {};
+      layout.pinLinks ??= {};
+      const boxes = new Map(Object.entries(layout.cards).map(([id, card]) => [id, {
+        ...card, w: card.width ?? 190, h: card.height ?? 90
+      }]));
+      if (action.type === "add") {
+        if (action.noteId && !layout.cards[action.noteId]) return;
+        if (!validPinPosition(action.noteId, action.x, action.y)) return;
+        const id = foundry.utils.randomID();
+        layout.pins[id] = { noteId: action.noteId ?? "", x: action.x, y: action.y,
+          isDefault: false };
+        return;
+      }
+      if (action.type === "connect") {
+        if (action.source === action.target || !resolvePin(action.source, layout, boxes)
+            || !resolvePin(action.target, layout, boxes)) return;
+        if (Object.values(layout.pinLinks).some(link => link.source === action.source
+            && link.target === action.target || link.source === action.target
+            && link.target === action.source)) return;
+        layout.pinLinks[foundry.utils.randomID()] = {
+          source: action.source, target: action.target
+        };
+        return;
+      }
+      if (action.noteId && !layout.cards[action.noteId]) return;
+      if (!validPinPosition(action.noteId, action.x, action.y)) return;
+      const ref = action.ref;
+      let id = ref?.startsWith("p:") ? ref.slice(2) : "";
+      if (!id && ref?.startsWith("n:")) {
+        const split = ref.indexOf(":", 2);
+        const oldNoteId = ref.slice(2, split), anchorId = ref.slice(split + 1);
+        const card = layout.cards[oldNoteId], anchor = card?.anchors?.[anchorId];
+        if (!anchor || anchor.kind !== "minor") return;
+        id = foundry.utils.randomID();
+        delete card.anchors[anchorId];
+        const newRef = boardPinRef(id);
+        for (const note of Object.values(data.notes)) for (const link of note.links ?? []) {
+          if (note.id === oldNoteId && link.sourceAnchorId === anchorId) {
+            link.sourcePinRef = newRef;
+            link.sourceAnchorId = "";
+          }
+          if (link.targetId === oldNoteId && link.targetAnchorId === anchorId) {
+            link.targetPinRef = newRef;
+            link.targetAnchorId = "";
+          }
+        }
+        for (const link of Object.values(layout.pinLinks)) {
+          if (link.source === ref) link.source = newRef;
+          if (link.target === ref) link.target = newRef;
+        }
+      } else if (!layout.pins[id]) return;
+      layout.pins[id] = { noteId: action.noteId ?? "", x: action.x, y: action.y,
+        isDefault: false };
     });
   }
 

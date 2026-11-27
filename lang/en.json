@@ -356,6 +356,7 @@
   "JN.Settings.PinsEnabledHint": "Allow main and minor attachment pins on the shared canvas. Turning this off keeps existing links, anchors and pin positions; no new pins can be created.",
 
   "JN.Pin.Main": "Main pin",
+  "JN.Pin.Tool": "Pin tool",
   "JN.Pin.Minor": "Minor pin",
   "JN.Pin.Add": "Add pin",
   "JN.Pin.AddMinor": "Add minor pin",

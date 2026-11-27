@@ -103,7 +103,8 @@ class NotesStore {
     }
     const labels = { ...(shared?.labels ?? {}) };
     for (const [id, label] of Object.entries(vault.labels)) labels[id] = { ...label, hidden: true };
-    return { cards, labels, viewport: shared?.viewport ?? null };
+    return { cards, labels, pins: shared?.pins ?? {}, pinLinks: shared?.pinLinks ?? {},
+      viewport: shared?.viewport ?? null };
   }
 
   getStats() {

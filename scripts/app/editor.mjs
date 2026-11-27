@@ -425,7 +425,6 @@ export default class NoteEditor {
       </label>`;
     const gmTools = note.secret ? `
       <div class="jn-gm-banner">
-        <button type="button" class="journalinator-declassify">${t("JN.Editor.Declassify")}</button>
         <button type="button" class="journalinator-delete" title="${t("JN.Editor.DeletePermanentTitle")}">&#128465;</button>
       </div>` : `
       <div class="journalinator-row jn-gm-row">
@@ -451,6 +450,11 @@ export default class NoteEditor {
         ${gmView || note.secret ? tool("fa-lock", t("JN.Editor.GMOnly"), gmTools + (this.callbacks.boardOnly ? note.system.blocks.map((block, index) =>
           `<div class="jn-note-block-tools" data-block-id="${esc(block.blockId)}"><span>${index + 1}</span>
             ${this.#gmBlockActions(note, block, !block.hidden && !!getLock(note._id, block.blockId))}</div>`).join("") : "")) : ""}
+      </div>
+      <div class="jn-editor-note-actions">
+        ${note.secret ? `<button type="button" class="journalinator-declassify">${t("JN.Transfer.SendTo")}</button>` : ""}
+        <button type="button" class="jn-edit-background">${t("JN.Editor.ChangeBackground")}</button>
+        <button type="button" class="jn-edit-stamp">${t("JN.Stamp.Add")}</button>
       </div>
       <div class="jn-doc" ${this.callbacks.boardOnly ? "hidden" : ""}>
         ${note.system.blocks.filter(block => !this.callbacks.boardOnly || block.blockId === this.editingBlockId)
@@ -554,6 +558,9 @@ export default class NoteEditor {
     });
 
     this.root.querySelector(".journalinator-declassify")?.addEventListener("click", () => this.#declassifyNote(note));
+    this.root.querySelector(".jn-edit-background")?.addEventListener("click", () => this.editNoteImage(note._id, true));
+    this.root.querySelector(".jn-edit-stamp")?.addEventListener("click", event =>
+      this.callbacks.onStamp?.(note._id, event.currentTarget));
     this.root.querySelector(".journalinator-hint-toggle")?.addEventListener("click", () => {
       requestWrite({ type: "gmSetHint", noteId, hint: !note.system.hint });
     });

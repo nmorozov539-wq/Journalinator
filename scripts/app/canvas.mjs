@@ -2,6 +2,7 @@ import {
   CARD_SIDES, MAX_THREAD_PINS, THREAD_PIN_RADIUS, cardEdgeAt, cardPointAnchor, moveThreadPin, threadAttachment, validThreadPin
 } from "../card-ports.mjs";
 import { MAIN_ANCHOR_ID, anchorWorld, cardNormalizedPoint, isMainAnchor, minorOnEdge, nearestAnchor, validAnchorId } from "../anchors.mjs";
+import { boardPinRef, pinRef, resolvePin } from "../board-pins.mjs";
 import { looseTails, pinnedThreadPath, threadLayerSpecs, ThreadMotion, THREAD_PRESETS } from "../link-thread.mjs";
 import { LINK_COLOR_SLOTS, normalizeLinkColor } from "../link-colors.mjs";
 import PatchNotesPanel from "./patch-notes.mjs";
@@ -157,6 +158,10 @@ export default class JournalCanvas {
     this.maskShapeEls = new Map();
     this.toolbarDismiss = null;
     this.pinDrag = null;
+    this.pinTool = false;
+    this.pinInteraction = null;
+    this.pinOverride = null;
+    this.pendingPinDrop = null;
     // Note attachment pins are DOM elements on the card, not SVG route pins. `anchorDrag` keeps
     // a live minor-pin position between pointer frames without writing to the persisted layout.
     this.anchorDrag = null;
@@ -210,6 +215,7 @@ export default class JournalCanvas {
       <div class="jn-world">
         <svg class="jn-link-hits" aria-hidden="true"></svg>
         <svg class="jn-links"></svg>
+        <svg class="jn-pin-links" aria-hidden="true"></svg>
       </div>
       <div class="jn-selection-box"></div>
       <div class="jn-context-menu"></div>
@@ -220,6 +226,7 @@ export default class JournalCanvas {
     `;
     this.world = this.root.querySelector(".jn-world");
     this.svg = this.root.querySelector(".jn-links");
+    this.pinLinksSvg = this.root.querySelector(".jn-pin-links");
     this.linkHits = this.root.querySelector(".jn-link-hits");
     this.selectionBox = this.root.querySelector(".jn-selection-box");
     this.contextMenu = this.root.querySelector(".jn-context-menu");
@@ -246,6 +253,19 @@ export default class JournalCanvas {
     this.notes = notes;
     this.notesById = new Map(notes.map(note => [note._id, note]));
     this.layout = layout ?? { cards: {}, labels: {} };
+    const pending = this.pendingPinDrop;
+    if (pending) {
+      const id = pending.ref.startsWith("p:") ? pending.ref.slice(2) : "";
+      const savedPin = id && this.layout.pins?.[id];
+      const legacyGone = pending.ref.startsWith("n:") && (() => {
+        const split = pending.ref.indexOf(":", 2);
+        return split >= 0 && !this.layout.cards?.[pending.ref.slice(2, split)]
+          ?.anchors?.[pending.ref.slice(split + 1)];
+      })();
+      if (legacyGone || savedPin && savedPin.noteId === pending.noteId
+          && Math.abs(savedPin.x - pending.x) < 1e-9
+          && Math.abs(savedPin.y - pending.y) < 1e-9) this.#clearPendingPinDrop();
+    }
     // Unrelated document updates can arrive while a pin is being dragged or its write is
     // pending. Keep the local endpoint until this exact anchor reaches the requested position.
     const moving = this.anchorDrag;
@@ -286,6 +306,7 @@ export default class JournalCanvas {
         this.cardSizes.delete(id);
       }
     }
+    this.#renderBoardPins();
 
     for (const [id, el] of [...this.labelEls]) {
       if (!seenLabels.has(id)) { el.remove(); this.labelEls.delete(id); }
@@ -382,6 +403,8 @@ export default class JournalCanvas {
     this.zoomFrame = null;
     this.threads.clear();
     this.pinDrag = null;
+    this.#cancelPinInteraction();
+    this.#clearPendingPinDrop();
     this.anchorDrag = null;
     this.pinTarget = null;
     this.snappedPinEl = null;
@@ -562,15 +585,19 @@ export default class JournalCanvas {
       const main = isMainAnchor(anchor);
       if (main && !attachment.mainPinEnabled) continue;
       const box = !main ? this.#cardBox(note._id) : null;
-      if (!main && attachment.mainPinEnabled && this.#overlapsMain(anchor, box, anchors)) continue;
       const styleKey = attachment.pinStyle || "default";
       const style = styleKey === "default" ? "enamel" : styleKey;
       const pin = document.createElement("button");
       pin.type = "button";
-      pin.className = `jn-pin ${main ? "jn-pin-main" : "jn-pin-minor"} jn-pin-style-${style}`
+      pin.className = `jn-pin jn-pin-main jn-pin-style-${style}`
         + (styleKey === "default" ? " jn-pin-style-default" : "");
       pin.dataset.noteId = note._id;
       pin.dataset.anchorId = anchorId;
+      pin.dataset.pinRef = pinRef(note._id, anchorId);
+      if (this.pinInteraction?.mode === "move" && this.pinInteraction.sourceRef === pin.dataset.pinRef
+          || this.pendingPinDrop?.ref === pin.dataset.pinRef) {
+        pin.style.visibility = "hidden";
+      }
       pin.dataset.anchorKind = main ? "main" : "minor";
       pin.dataset.pinStyle = style;
       pin.dataset.pinStyleKey = styleKey;
@@ -594,10 +621,52 @@ export default class JournalCanvas {
     container.replaceChildren(...pins);
   }
 
-  #overlapsMain(anchor, box, anchors) {
-    if (!isMainAnchor(anchors?.[MAIN_ANCHOR_ID]) || anchor?.kind !== "minor") return false;
-    const point = minorOnEdge(anchor, box);
-    return Math.hypot((point.x - 0.5) * box.w, point.y * box.h) <= 14;
+  #renderBoardPins() {
+    for (const pin of this.world.querySelectorAll(".jn-board-pin-control:not(.jn-moving-pin)")) pin.remove();
+    for (const [id, data] of Object.entries(this.layout.pins ?? {})) {
+      const owner = data.noteId ? this.cardEls.get(data.noteId) : null;
+      if (data.noteId && !owner) continue;
+      const pin = document.createElement("button");
+      pin.type = "button";
+      pin.className = "jn-pin jn-pin-main jn-pin-style-enamel jn-board-pin-control";
+      pin.dataset.pinRef = boardPinRef(id);
+      if (this.pinInteraction?.mode === "move" && this.pinInteraction.sourceRef === pin.dataset.pinRef
+          || this.pendingPinDrop?.ref === pin.dataset.pinRef) {
+        pin.style.visibility = "hidden";
+      }
+      pin.dataset.noteId = data.noteId ?? "";
+      pin.setAttribute("aria-label", t("JN.Pin.Minor"));
+      if (owner) {
+        owner.querySelector(".jn-card-pins")?.append(pin);
+        pin.style.left = `${data.x * 100}%`;
+        pin.style.top = `${data.y * 100}%`;
+      } else {
+        this.world.append(pin);
+        pin.style.left = `${data.x}px`;
+        pin.style.top = `${data.y}px`;
+      }
+    }
+  }
+
+  #pinPoint(ref) {
+    if (this.pinOverride?.ref === ref) return this.pinOverride.point;
+    return resolvePin(ref, this.layout, new Map([...this.cardEls.keys()].map(id => [id, this.#cardBox(id)])));
+  }
+
+  #drawPinLinks() {
+    const pieces = [];
+    for (const [id, link] of Object.entries(this.layout.pinLinks ?? {})) {
+      const start = this.#pinPoint(link.source), end = this.#pinPoint(link.target);
+      if (!start || !end) continue;
+      const d = pinnedThreadPath({ ...start, nx: 0, ny: 0 }, { ...end, nx: 0, ny: 0 }, []).path;
+      const safeId = foundry.utils.escapeHTML(id);
+      pieces.push(`<g data-pin-link="${safeId}" class="jn-link-color-default jn-link-material-linen jn-link-pattern-continuous"
+        style="--jn-thread-k:0.765;--jn-thread-width:2.6"><g class="jn-link-strokes">
+        ${threadLayerSpecs("linen", 2.6).layers.map(layer => `<path class="jn-thread-layer jn-thread-${layer.role}"
+          style="--jn-layer-width:${layer.widthFactor};--jn-layer-opacity:${layer.opacity};--jn-layer-dx:${layer.dx};--jn-layer-dy:${layer.dy}"
+          d="${d}"/>`).join("")}</g></g>`);
+    }
+    this.pinLinksSvg.innerHTML = pieces.join("");
   }
 
   /** Persisted anchor plus an in-progress minor-pin drag override. */
@@ -610,21 +679,14 @@ export default class JournalCanvas {
     if (drag && drag.noteId === noteId && drag.anchorId === anchorId) {
       return minorOnEdge({ ...anchor, x: drag.x, y: drag.y }, this.#cardBox(noteId));
     }
-    const box = this.#cardBox(noteId);
-    const main = anchors?.[MAIN_ANCHOR_ID];
-    if (this.#overlapsMain(anchor, box, anchors) && main) return main;
-    return minorOnEdge(anchor, box);
+    return minorOnEdge(anchor, this.#cardBox(noteId));
   }
 
   /** World attachment at an anchor's center with its outward normal, matching thread layout. */
   #anchorWorldAttachment(box, anchor) {
     const world = anchorWorld(box, anchor);
     if (!world) return null;
-    return {
-      ...world,
-      x: world.x + world.nx * THREAD_PIN_RADIUS,
-      y: world.y + world.ny * THREAD_PIN_RADIUS
-    };
+    return { ...world, nx: 0, ny: 0 };
   }
 
   #anchorAttachment(noteId, box, anchorId) {
@@ -873,13 +935,13 @@ export default class JournalCanvas {
       const k = Math.round(specs.k * 10000) / 10000;
       body += `<g data-id="${linkId}" class="${linkClasses}"
           style="--jn-thread-k:${k};--jn-thread-width:${specs.thickness}">
-        <g class="jn-link-strokes" mask="url(#${this.threadMaskId})">
+        <g class="jn-link-strokes">
           <g class="jn-link-stack jn-link-stack-primary">${layerPaths()}</g>
           ${accentStack}
           ${tails}
         </g>
-        ${endpoint(start, this.#visibleEndpointPin(note._id, link.sourceAnchorId))}
-        ${endpoint(end, this.#visibleEndpointPin(link.targetId, link.targetAnchorId))}
+        ${endpoint(start, !!link.sourcePinRef || this.#visibleEndpointPin(note._id, link.sourceAnchorId))}
+        ${endpoint(end, !!link.targetPinRef || this.#visibleEndpointPin(link.targetId, link.targetAnchorId))}
         ${pins.map((pin, index) => `<circle class="jn-thread-pin jn-board-pin" data-pin-index="${index}" cx="${pin.x}" cy="${pin.y}"/>`).join("")}
         ${link.label || link.hint ? `<text class="jn-link-label" x="${mx}" y="${my + 4}">${link.hint ? "&#10022; " : ""}${foundry.utils.escapeHTML(link.label ?? "")}</text>` : ""}
       </g>`;
@@ -926,6 +988,12 @@ export default class JournalCanvas {
       ?? threadAttachment(sourceBox, link.sourcePoint, sourceSide);
     const r = this.#anchorAttachment(link.targetId, targetBox, link.targetAnchorId)
       ?? threadAttachment(targetBox, link.targetPoint, targetSide);
+    const sourcePin = link.sourcePinRef && this.#pinPoint(link.sourcePinRef)
+      || this.pinOverride?.ref === pinRef(note._id, link.sourceAnchorId) && this.pinOverride.point;
+    const targetPin = link.targetPinRef && this.#pinPoint(link.targetPinRef)
+      || this.pinOverride?.ref === pinRef(link.targetId, link.targetAnchorId) && this.pinOverride.point;
+    if (sourcePin) Object.assign(p, sourcePin, { nx: 0, ny: 0 });
+    if (targetPin) Object.assign(r, targetPin, { nx: 0, ny: 0 });
     const cosmetics = resolveLinkCosmetics(link);
     const motion = this.threads.get(link.id)?.motion ?? new ThreadMotion(p, r, cosmetics.slack);
     motion.retarget(p, r, animate, cosmetics.slack);
@@ -1242,6 +1310,7 @@ export default class JournalCanvas {
         cosmetics.ends, link.hidden ? 1 : 0, link.hint ? 1 : 0, link.label ?? "",
         savedPins.length, link.id === this.selectedLinkId ? 1 : 0, dimmed ? 1 : 0,
         sourceSide, targetSide, link.sourceAnchorId ?? "", link.targetAnchorId ?? "",
+        link.sourcePinRef ?? "", link.targetPinRef ?? "",
         (link.routeAnchors ?? []).map(entry => `${entry?.noteId ?? ""}:${entry?.anchorId ?? ""}`).join(",")
       ].join("\u0001");
     });
@@ -1293,9 +1362,9 @@ export default class JournalCanvas {
         const anchor = index === 0 ? start : end;
         pin.setAttribute("cx", anchor.x - anchor.nx * THREAD_PIN_RADIUS);
         pin.setAttribute("cy", anchor.y - anchor.ny * THREAD_PIN_RADIUS);
-        pin.classList.toggle("jn-thread-pin-attached", this.#visibleEndpointPin(
-          index === 0 ? note._id : link.targetId,
-          index === 0 ? link.sourceAnchorId : link.targetAnchorId));
+        pin.classList.toggle("jn-thread-pin-attached", index === 0 ?
+          !!link.sourcePinRef || this.#visibleEndpointPin(note._id, link.sourceAnchorId) :
+          !!link.targetPinRef || this.#visibleEndpointPin(link.targetId, link.targetAnchorId));
       });
       thread.markers.forEach((marker, index) => {
         const pin = pins[index];
@@ -1481,6 +1550,7 @@ export default class JournalCanvas {
     if (this.linkDrawTimer !== null) this.linkDrawCancel?.(this.linkDrawTimer);
     this.linkDrawTimer = null;
     this.#drawLinks();
+    this.#drawPinLinks();
     this.#syncLinkToolbar();
     this.#syncFloatingToolbar();
   }
@@ -2422,6 +2492,114 @@ export default class JournalCanvas {
     this.contextMenu.innerHTML = "";
   }
 
+  togglePinTool() {
+    if (this.readOnly) return this.#warnReadOnly();
+    this.pinTool = !this.pinTool;
+    this.root.classList.toggle("jn-placing-pin", this.pinTool);
+    if (!this.pinTool) this.#cancelPinInteraction();
+  }
+
+  #hitCanvas(ev) {
+    const layers = this.root.ownerDocument.elementsFromPoint?.(ev.clientX, ev.clientY) ?? [ev.target];
+    const elements = [...layers, ev.target].filter(element => this.root.contains(element));
+    const pin = elements.find(element => element.closest?.("[data-pin-ref]"))?.closest("[data-pin-ref]");
+    if (pin) return { ref: pin.dataset.pinRef, noteId: pin.dataset.noteId ?? "", directPin: true };
+    const card = elements.find(element => element.closest?.(".jn-card"))?.closest(".jn-card");
+    return { ref: card ? pinRef(card.dataset.id) : null, noteId: card?.dataset.id ?? "", directPin: false };
+  }
+
+  #clearPendingPinDrop() {
+    if (!this.pendingPinDrop) return;
+    this.pendingPinDrop.ghost?.remove();
+    this.pendingPinDrop = null;
+    this.pinOverride = null;
+    for (const pin of this.root.querySelectorAll("[data-pin-ref]")) pin.style.visibility = "";
+  }
+
+  #cancelPinInteraction({ pending = false } = {}) {
+    if (!this.pinInteraction) return;
+    const ghost = this.pinInteraction.ghost;
+    this.pinInteraction = null;
+    if (!pending) this.pinOverride = null;
+    this.#endLinkPreview();
+    if (!pending) {
+      ghost?.remove();
+      for (const pin of this.root.querySelectorAll("[data-pin-ref]")) pin.style.visibility = "";
+    }
+    this.#flushLinkDraw();
+  }
+
+  #updatePinInteraction(ev) {
+    const state = this.pinInteraction;
+    if (!state) return;
+    const point = this.#toWorld(ev.clientX, ev.clientY);
+    if (state.mode === "thread") {
+      const start = this.#pinPoint(state.sourceRef);
+      if (start && this.previewPath) this.previewPath.setAttribute("d", pinnedThreadPath(
+        { ...start, nx: 0, ny: 0 }, { ...point, nx: 0, ny: 0 }, []
+      ).path);
+    } else {
+      this.pinOverride = { ref: state.sourceRef, point: { ...point, nx: 0, ny: 0, movable: true } };
+      for (const pin of this.root.querySelectorAll("[data-pin-ref]")) {
+        if (pin.dataset.pinRef === state.sourceRef) pin.style.visibility = "hidden";
+      }
+      if (!state.ghost) {
+        const ghost = document.createElement("button");
+        ghost.type = "button";
+        ghost.className = "jn-pin jn-pin-main jn-pin-style-enamel jn-board-pin-control jn-moving-pin";
+        ghost.style.pointerEvents = "none";
+        this.world.append(ghost);
+        state.ghost = ghost;
+      }
+      state.ghost.style.left = `${point.x}px`;
+      state.ghost.style.top = `${point.y}px`;
+      this.#flushLinkDraw();
+    }
+  }
+
+  #finishPinConnection(ev) {
+    const state = this.pinInteraction;
+    if (!state || state.mode !== "thread") return;
+    const target = this.#hitCanvas(ev).ref;
+    if (target && target !== state.sourceRef && this.#pinPoint(target)) {
+      this.callbacks.onBoardPinAction?.({ type: "connect", source: state.sourceRef, target });
+    }
+    this.#cancelPinInteraction();
+  }
+
+  #finishPinMove(ev) {
+    const state = this.pinInteraction;
+    if (!state || state.mode !== "move") return;
+    const point = this.#toWorld(ev.clientX, ev.clientY);
+    const noteId = this.#hitCanvas(ev).noteId;
+    const box = noteId ? this.#cardBox(noteId) : null;
+    const local = box ? cardNormalizedPoint(box, point) : point;
+    if (!local) return this.#cancelPinInteraction();
+    const write = this.callbacks.onBoardPinAction?.({ type: "move", ref: state.sourceRef,
+      noteId, x: local.x, y: local.y });
+    const pending = { ref: state.sourceRef, noteId, x: local.x, y: local.y,
+      ghost: state.ghost };
+    this.pendingPinDrop = pending;
+    this.#cancelPinInteraction({ pending: true });
+    Promise.resolve(write).then(result => {
+      if (result === false && this.pendingPinDrop === pending) {
+        this.#clearPendingPinDrop();
+        this.#flushLinkDraw();
+      }
+    }).catch(() => {
+      if (this.pendingPinDrop === pending) {
+        this.#clearPendingPinDrop();
+        this.#flushLinkDraw();
+      }
+    });
+    setTimeout(() => {
+      if (this.pendingPinDrop === pending) {
+        this.#clearPendingPinDrop();
+        this.#flushLinkDraw();
+      }
+    }, 2000);
+  }
+
   toggleLinkTool() {
     if (this.readOnly) return this.#warnReadOnly();
     if (this.linkPlacement) return this.cancelLinkTool();
@@ -2497,7 +2675,6 @@ export default class JournalCanvas {
       if (!anchor || !Number.isFinite(anchor.x) || !Number.isFinite(anchor.y)) continue;
       // A disabled main pin is not rendered, so it must not secretly magnetize the cursor.
       if (isMainAnchor(anchor) && !attachment.mainPinEnabled) continue;
-      if (this.#overlapsMain(anchor, box, this.layout.cards?.[id]?.anchors)) continue;
       anchors[anchorId] = minorOnEdge(anchor, box);
     }
     if (!Object.keys(anchors).length) return null;
@@ -2655,6 +2832,12 @@ export default class JournalCanvas {
     return Object.values(STAMP_COLORS).includes(color) ? color : STAMP_COLORS.red;
   }
 
+  openStampPicker(noteId, trigger) {
+    if (!noteId || !trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    this.#openContextMenu(rect.left, rect.bottom, { noteId, editStamp: true });
+  }
+
   #openContextMenu(clientX, clientY, { noteId, labelId, editStamp = false } = {}) {
     if (this.readOnly) return this.#warnReadOnly();
     const point = this.#toWorld(clientX, clientY);
@@ -2776,6 +2959,7 @@ export default class JournalCanvas {
     let lastLabelClick = null;
     let lastCardClick = null;
     let lastBoardClick = null;
+    let lastBoardCreatedAt = 0;
 
     // Hover/editing fade is pure class toggling on the existing mask shapes. No path or DOM
     // rebuild happens here, so a busy board stays responsive.
@@ -2819,7 +3003,6 @@ export default class JournalCanvas {
         return;
       }
       if (ev.button !== 0 || ev.target.closest(`.jn-context-menu, .jn-link-toolbar, .jn-floating-toolbar, .jn-floating-popover, .jn-route-chooser, ${PATCH_NOTES_SELECTOR}, input, textarea`)) return;
-      if (ev.altKey && !this.linkPlacement) this.toggleLinkTool();
       if (!this.linkPlacement) return;
       ev.preventDefault();
       ev.stopPropagation();
@@ -2870,10 +3053,13 @@ export default class JournalCanvas {
         this.root.focus({ preventScroll: true });
         return;
       }
-      if (ev.isComposing || !["Enter", " "].includes(ev.key)) return;
-      if (!ev.target.matches("[data-card-text]")) return;
-      ev.preventDefault();
-      this.#editCardText(ev.target.closest(".jn-card").dataset.id, ev.target);
+      if (ev.key === "Escape" && this.pinInteraction) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.#cancelPinInteraction();
+        return;
+      }
+      // Inline card text is opened by a deliberate double click below.
     });
 
     this.root.addEventListener("wheel", ev => {
@@ -2887,13 +3073,63 @@ export default class JournalCanvas {
     }, { passive: false });
 
     this.root.addEventListener("pointerdown", ev => {
+      // Camera control owns the secondary button before card, pin, text and
+      // toolbar hit testing. The browser menu is suppressed on this surface.
+      if (ev.button === 2) {
+        ev.preventDefault();
+        this.#cancelPinInteraction();
+        this.#closeContextMenu();
+        lastBoardClick = null;
+        try { this.root.setPointerCapture(ev.pointerId); } catch { /* synthetic pointer */ }
+        drag = { type: "pan", sx: ev.clientX, sy: ev.clientY,
+          vx: this.view.x, vy: this.view.y, moved: 0 };
+        return;
+      }
+      if (ev.button === 0 && !ev.target.closest(".jn-floating-toolbar, .jn-floating-popover, .jn-route-chooser")) {
+        const hit = this.#hitCanvas(ev);
+        if (this.pinInteraction) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const state = this.pinInteraction;
+          const same = hit.directPin && hit.ref === state.sourceRef;
+          if (state.mode === "thread" && same && state.movable
+              && Date.now() - state.firstAt <= 450) {
+            state.mode = "move";
+            this.#endLinkPreview();
+          }
+          state.press = { sx: ev.clientX, sy: ev.clientY, moved: 0,
+            finish: state.mode === "thread" || state.mode === "move" && !same };
+          try { this.root.setPointerCapture(ev.pointerId); } catch { /* synthetic pointer */ }
+          return;
+        }
+        if (hit.directPin && !this.readOnly) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          lastBoardClick = null;
+          this.pinInteraction = { mode: "thread", sourceRef: hit.ref,
+            movable: !!this.#pinPoint(hit.ref)?.movable, firstAt: Date.now(),
+            press: { sx: ev.clientX, sy: ev.clientY, moved: 0 } };
+          this.#startLinkPreview();
+          this.#updatePinInteraction(ev);
+          try { this.root.setPointerCapture(ev.pointerId); } catch { /* synthetic pointer */ }
+          return;
+        }
+        if (this.pinTool && !this.readOnly) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          drag = { type: "place-pin", sx: ev.clientX, sy: ev.clientY, moved: 0,
+            noteId: hit.noteId };
+          try { this.root.setPointerCapture(ev.pointerId); } catch { /* synthetic pointer */ }
+          return;
+        }
+      }
       if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
       if (ev.target.closest(".jn-route-chooser")) return;
       if (ev.target.closest(".jn-floating-toolbar, .jn-floating-popover")) return;
       if (ev.target.closest(".jn-card-image-button")) return;
       if (!this.linkPlacement && !ev.altKey
           && ev.target.closest(".jn-card-block a[href], .jn-card-block input[type=\"checkbox\"]")) return;
-      if ((this.linkPlacement || ev.altKey) && ev.button === 0 && !ev.target.closest(".jn-context-menu, .jn-link-toolbar, input, textarea")) {
+      if (this.linkPlacement && ev.button === 0 && !ev.target.closest(".jn-context-menu, .jn-link-toolbar, input, textarea")) {
         ev.preventDefault();
         lastBoardClick = null;
         return;
@@ -2905,11 +3141,6 @@ export default class JournalCanvas {
       this.root.focus({ preventScroll: true });
       this.#closeContextMenu();
       this.#clearRouteDrop();
-      if (ev.button === 2) {
-        this.cancelLinkTool();
-        lastBoardClick = null;
-        return;
-      }
       try { this.root.setPointerCapture(ev.pointerId); } catch { /* no active pointer (e.g. synthetic event) */ }
       const cardEl = ev.target.closest(".jn-card");
       const resizeHandle = this.readOnly ? null : ev.target.closest(".jn-card-resize");
@@ -2917,7 +3148,7 @@ export default class JournalCanvas {
       const stampId = this.readOnly ? null : ev.target.closest("[data-stamp-label-id]")?.dataset.stampLabelId;
       const linkHit = ev.target.closest(".jn-link-hit");
       const pin = this.readOnly ? null : ev.target.closest("[data-pin-index]");
-      const notePin = ev.target.closest(".jn-pin-minor");
+      const notePin = ev.target.closest(".jn-pin");
       if (ev.button !== 0 || cardEl || labelEl || linkHit) lastBoardClick = null;
 
       // Middle mouse always pans, even when the pointer starts over a card, handle, or link.
@@ -2942,12 +3173,12 @@ export default class JournalCanvas {
         const el = this.cardEls.get(id);
         drag = { type: "resize", id, sx: ev.clientX, sy: ev.clientY, ow: el.offsetWidth, oh: el.offsetHeight, moved: 0 };
       } else if (notePin) {
-        // Minor pins move themselves; they never start a card drag. A main pin deliberately
-        // falls through to the card branch, so dragging it moves the whole note.
+        // Pins own their gestures even when they overlap note text or paper.
         const card = notePin.closest(".jn-card");
         drag = {
           type: "note-pin", id: card.dataset.id, anchorId: notePin.dataset.anchorId,
-          sx: ev.clientX, sy: ev.clientY, moved: 0, readOnly: this.readOnly
+          sx: ev.clientX, sy: ev.clientY, moved: 0,
+          readOnly: this.readOnly || notePin.dataset.anchorKind === "main"
         };
       } else if (cardEl) {
         const initialLabelIds = [...this.selectedLabelIds];
@@ -2989,6 +3220,13 @@ export default class JournalCanvas {
     });
 
     this.root.addEventListener("pointermove", ev => {
+      if (this.pinInteraction) {
+        const press = this.pinInteraction.press;
+        if (press) press.moved = Math.max(press.moved,
+          Math.abs(ev.clientX - press.sx) + Math.abs(ev.clientY - press.sy));
+        this.#updatePinInteraction(ev);
+        return;
+      }
       if (this.linkPlacement) {
         const world = this.#toWorld(ev.clientX, ev.clientY);
         const card = this.#linkCardAt(ev);
@@ -3089,11 +3327,31 @@ export default class JournalCanvas {
     });
 
     const finishDrag = ev => {
+      if (this.pinInteraction?.press) {
+        const state = this.pinInteraction;
+        const press = state.press;
+        state.press = null;
+        if (ev.type !== "pointerup") this.#cancelPinInteraction();
+        else if (state.mode === "move") {
+          if (press.moved > DRAG_THRESHOLD || press.finish) this.#finishPinMove(ev);
+          else this.#updatePinInteraction(ev);
+        } else if (press.moved > DRAG_THRESHOLD || press.finish) this.#finishPinConnection(ev);
+        else this.#updatePinInteraction(ev);
+        return;
+      }
       if (!drag) return;
       const wasClick = drag.moved <= DRAG_THRESHOLD;
       if ((drag.type === "card" || drag.type === "resize") && !wasClick) this.#flushLinkDraw();
 
-      if (drag.type === "note-pin") {
+      if (drag.type === "place-pin") {
+        if (wasClick && ev.type === "pointerup") {
+          const point = this.#toWorld(ev.clientX, ev.clientY);
+          const noteId = this.#hitCanvas(ev).noteId || drag.noteId;
+          const local = noteId ? cardNormalizedPoint(this.#cardBox(noteId), point) : point;
+          if (local) this.callbacks.onBoardPinAction?.({ type: "add", noteId,
+            x: local.x, y: local.y });
+        }
+      } else if (drag.type === "note-pin") {
         const move = this.anchorDrag;
         if (wasClick) {
           this.#setSelection([drag.id], drag.id);
@@ -3141,18 +3399,12 @@ export default class JournalCanvas {
             const next = [...ids];
             this.#setSelection(next, next.length === 1 && !drag.initialLabelIds.length ? next[0] : null, drag.initialLabelIds);
           } else {
-            if (drag.text && ev.type === "pointerup") {
-              this.#editCardText(drag.id, drag.text);
-              lastCardClick = null;
-              drag = null;
-              return;
-            }
             this.#setSelection([drag.id], drag.id);
             const now = Date.now();
             if (lastCardClick?.id === drag.id && now - lastCardClick.at < 450) {
-              this.callbacks.onEditNote?.(drag.id);
+              if (drag.text && lastCardClick.text) this.#editCardText(drag.id, drag.text);
               lastCardClick = null;
-            } else lastCardClick = { id: drag.id, at: now };
+            } else lastCardClick = { id: drag.id, at: now, text: !!drag.text };
           }
         } else {
           if (drag.readOnly) return;
@@ -3247,7 +3499,13 @@ export default class JournalCanvas {
           const now = Date.now();
           if (lastBoardClick && now - lastBoardClick.at < 450
               && Math.hypot(ev.clientX - lastBoardClick.x, ev.clientY - lastBoardClick.y) <= 8) {
-            this.#openContextMenu(ev.clientX, ev.clientY);
+            if (!this.readOnly) {
+              const point = this.#toWorld(ev.clientX, ev.clientY);
+              this.callbacks.onCreateNoteAt?.(point.x - CREATE_WIDTHS.note / 2, point.y - 30, {
+                kind: "note", presentation: { extendedStyle: "memo", forceExtended: false }
+              });
+              lastBoardCreatedAt = now;
+            }
             lastBoardClick = null;
           } else lastBoardClick = { at: now, x: ev.clientX, y: ev.clientY };
         } else lastBoardClick = null;
@@ -3266,14 +3524,8 @@ export default class JournalCanvas {
         ev.preventDefault();
         return;
       }
-      if (ev.target.closest(".jn-card input, .jn-card textarea")) return;
       ev.preventDefault();
       ev.stopPropagation();
-      if (ev.target.closest(".jn-context-menu")) return;
-      const labelId = ev.target.closest("[data-stamp-label-id]")?.dataset.stampLabelId
-        ?? ev.target.closest(".jn-label")?.dataset.id;
-      const noteId = ev.target.closest(".jn-card")?.dataset.id;
-      this.#openContextMenu(ev.clientX, ev.clientY, { noteId, labelId, editStamp: !!(noteId && labelId) });
     });
     this.root.addEventListener("auxclick", ev => {
       if (ev.button === 1) ev.preventDefault();
@@ -3282,6 +3534,7 @@ export default class JournalCanvas {
     this.root.addEventListener("dblclick", ev => {
       if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
       if (ev.target.closest(".jn-floating-toolbar, .jn-floating-popover")) return;
+      if (ev.target.closest("[data-pin-ref]")) return;
       if (ev.target.closest("[data-stamp-label-id], .jn-label")) return;
       if (ev.target.closest(".jn-card-resize")) {
         if (this.readOnly) return this.#warnReadOnly();
@@ -3294,6 +3547,19 @@ export default class JournalCanvas {
         this.callbacks.onResetCardSize(id);
         return;
       }
+      const text = ev.target.closest("[data-card-text]");
+      if (text && !this.readOnly) {
+        ev.preventDefault();
+        this.#editCardText(text.closest(".jn-card").dataset.id, text);
+        return;
+      }
+      if (ev.target.closest(".jn-card, .jn-link-hit, .jn-pin")) return;
+      if (Date.now() - lastBoardCreatedAt < 450 || this.readOnly || this.pinTool) return;
+      const point = this.#toWorld(ev.clientX, ev.clientY);
+      this.callbacks.onCreateNoteAt?.(point.x - CREATE_WIDTHS.note / 2, point.y - 30, {
+        kind: "note", presentation: { extendedStyle: "memo", forceExtended: false }
+      });
+      lastBoardCreatedAt = Date.now();
     });
   }
 

@@ -99,7 +99,6 @@ export function threadLayerSpecs(material, thickness) {
 }
 
 function aim(anchor, toward) {
-  if (anchor.nx || anchor.ny) return anchor;
   const dx = toward.x - anchor.x, dy = toward.y - anchor.y;
   const distance = Math.hypot(dx, dy) || 1;
   return { ...anchor, nx: dx / distance, ny: dy / distance };
@@ -175,8 +174,10 @@ export function threadPath(start, end, motion, slack) {
   const rest = slack === undefined
     ? (motion?.rest ?? restPoint(start, end, fallbackSlack))
     : restPoint(start, end, slack);
-  start = aim(start, rest);
-  end = aim(end, rest);
+  // A pin is a point, not an edge port. Aim each end toward the other end so a
+  // thread may cross a note to reach a pin on its far side.
+  start = aim(start, end);
+  end = aim(end, start);
   const span = Math.hypot(end.x - start.x, end.y - start.y);
   const lead = Math.min(22, span * 0.24);
   const reach = Math.min(74, span * 0.22);

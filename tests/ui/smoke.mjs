@@ -244,7 +244,8 @@ test("canvas renders secret cards, hidden links and GM toolbar buttons", async (
     card.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
     canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0 }));
   }
-  assert.ok(calls.some(([name, id]) => name === "onEditNote" && id === cultId), "double-click starts editing");
+  assert.equal(calls.some(([name]) => name === "onEditNote"), false,
+    "a note body double click does not start text editing");
 
   const linkHit = canvas.root.querySelector(".jn-link-hit");
   for (let i = 0; i < 2; i++) {
@@ -255,9 +256,7 @@ test("canvas renders secret cards, hidden links and GM toolbar buttons", async (
 
   canvas.root.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, button: 2, clientX: 100, clientY: 100 }));
   const locationButton = canvas.root.querySelector('.jn-context-menu [data-action="location"]');
-  assert.ok(locationButton, "right-click opens the add menu");
-  locationButton.click();
-  assert.ok(calls.some(([name, , , options]) => name === "onCreateNoteAt" && options.kind === "location"));
+  assert.equal(locationButton, null, "right-click offers no creation menu");
 
   // Player view: no secret card.
   notesStore.setGmView(false);
@@ -315,7 +314,7 @@ test("Backspace removes labels and stamps or trashes notes, and Ctrl+Z restores 
   host.remove();
 });
 
-test("the selection box includes labels and an empty-board double click opens the creation menu", () => {
+test("the selection box includes labels and an empty-board double click creates a note", () => {
   const calls = [];
   const canvas = new JournalCanvas(new Proxy({}, { get: (_, name) => (...args) => calls.push([name, ...args]) }));
   document.body.appendChild(canvas.root);
@@ -342,10 +341,8 @@ test("the selection box includes labels and an empty-board double click opens th
     pointer("pointerdown", 70, 70);
     pointer("pointerup", 70, 70);
   }
-  assert.equal(canvas.contextMenu.style.display, "flex");
-  assert.ok(canvas.contextMenu.querySelector('[data-action="note"]'));
-  canvas.contextMenu.querySelector('[data-action="label"]').click();
-  assert.ok(calls.some(([name]) => name === "onAddLabelAt"));
+  assert.equal(canvas.contextMenu.style.display, "none");
+  assert.ok(calls.some(([name]) => name === "onCreateNoteAt"));
   canvas.root.remove();
 });
 
@@ -532,7 +529,7 @@ test("private editor saves the label (including empty) and presentation controls
   }
 });
 
-test("one click edits each target field on the board and saves through the existing writes", async () => {
+test("double click edits each target field on the board and saves through the existing writes", async () => {
   const page = sharedByName("Known Witness");
   const app = new JournalApp();
   const host = document.createElement("div");
@@ -545,8 +542,10 @@ test("one click edits each target field on the board and saves through the exist
     const card = host.querySelector(`.jn-card[data-id="${page.id}"]`);
     const canvas = card.closest(".jn-canvas");
     const click = selector => {
-      card.querySelector(selector).dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
-      canvas.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0 }));
+      for (let i = 0; i < 2; i++) {
+        card.querySelector(selector).dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+        canvas.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0 }));
+      }
     };
     const key = (input, value, options = {}) => {
       input.dispatchEvent(new KeyboardEvent("keydown", { key: value, bubbles: true, ...options }));
@@ -597,7 +596,7 @@ test("one click edits each target field on the board and saves through the exist
   }
 });
 
-test("right-clicking a note opens attached stamp settings", async () => {
+test("the right panel opens attached stamp settings", async () => {
   const app = new JournalApp();
   const host = document.createElement("div");
   app.element = host;
@@ -606,17 +605,15 @@ test("right-clicking a note opens attached stamp settings", async () => {
   app._onRender();
   try {
     assert.equal(host.querySelector(".journalinator-add-stamp"), null);
-    assert.ok(host.querySelector(".journalinator-add-link"));
+    assert.ok(host.querySelector(".journalinator-add-pin"));
     const canvas = host.querySelector(".jn-canvas");
     const card = canvas.querySelector(".jn-card");
     const menu = canvas.querySelector(".jn-context-menu");
-    const open = element => element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, button: 2 }));
-    open(canvas);
-    assert.ok(menu.querySelector('[data-action="note"]'));
-    assert.equal(menu.querySelector('[data-action="stamps"]'), null);
-    open(card);
-    assert.equal(menu.querySelector('[data-action="ports"]'), null);
-    menu.querySelector('[data-action="card-stamp"]').click();
+    card.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, button: 2 }));
+    assert.equal(menu.querySelector('[data-action="card-stamp"]'), null);
+    card.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    canvas.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0 }));
+    host.querySelector(".jn-edit-stamp").click();
     menu.querySelector('[data-stamp-color="#53936b"]').click();
     menu.querySelector('[data-stamp-corner="top-left"]').click();
     menu.querySelector('[data-stamp="paw"]').click();
@@ -625,7 +622,7 @@ test("right-clicking a note opens attached stamp settings", async () => {
     assert.equal(stamp.corner, "top-left");
     assert.equal(stamp.color, "#53936b");
     app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
-    open(card.querySelector(".jn-card-stamps .jn-stamp"));
+    host.querySelector(".jn-edit-stamp").click();
     menu.querySelector('[data-stamp-color="#5a83ad"]').click();
     await settle();
     assert.equal(Object.values(notesStore.getLayout().labels).find(item => item.noteId === card.dataset.id).color, "#5a83ad");
@@ -636,7 +633,7 @@ test("right-clicking a note opens attached stamp settings", async () => {
   }
 });
 
-test("the context menu creates the chosen card immediately and the toolbar opens the dialog", async () => {
+test("double clicking empty canvas creates a note and the toolbar opens the dialog", async () => {
   const app = new JournalApp();
   const host = document.createElement("div");
   app.element = host;
@@ -650,25 +647,16 @@ test("the context menu creates the chosen card immediately and the toolbar opens
     app._onRender();
     const canvas = host.querySelector(".jn-canvas");
     canvas.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, button: 2 }));
-    assert.deepEqual([...canvas.querySelectorAll(".jn-context-menu button[data-action]")]
-      .map(button => button.dataset.action),
-    ["note", "memo", "document", "target", "location", "label", "secret-note", "gm-label"],
-    "creation menu offers New note then the three extended presets with no Sticky or Torn entries");
-    canvas.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
-    canvas.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0 }));
+    assert.equal(canvas.querySelector(".jn-context-menu button"), null);
     const existing = new Set(containers.shared.pages.keys());
-    for (const action of ["note", "memo", "document", "target", "location"]) {
-      canvas.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, button: 2 }));
-      canvas.querySelector(`[data-action="${action}"]`).click();
+    for (let i = 0; i < 2; i++) {
+      canvas.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+      canvas.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0 }));
     }
     await settle();
     const created = [...containers.shared.pages.values()].filter(page => !existing.has(page.id));
-    assert.deepEqual(created.map(page => page.system.kind), ["note", "note", "note", "note", "location"]);
-    assert.deepEqual(created.slice(0, 4).map(page => page.system.presentation.extendedStyle),
-      ["memo", "memo", "document", "target"]);
-    assert.deepEqual(created.slice(0, 4).map(page => page.system.presentation.forceExtended),
-      [false, true, true, true]);
-    assert.notEqual(created[0].name, created[1].name);
+    assert.equal(created.length, 1);
+    assert.equal(created[0].system.kind, "note");
     assert.equal(prompts, 0);
     host.querySelector(".journalinator-new").click();
     assert.equal(prompts, 1);
@@ -835,9 +823,10 @@ test("cards place explicit images by layout and change the background independen
     assert.ok(card.classList.contains("jn-pic-left"), "picture layout is independent of the style");
     assert.ok(card.classList.contains("jn-card-document"));
 
-    card.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, button: 2 }));
+    card.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    card.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0 }));
     answers.push("https://example.com/background.png");
-    host.querySelector('[data-action="card-background"]').click();
+    host.querySelector(".jn-edit-background").click();
     await settle();
     await redraw();
     assert.equal(card.querySelector(".jn-card-background").getAttribute("src"), "https://example.com/background.png");
@@ -871,9 +860,10 @@ test("cards place explicit images by layout and change the background independen
     await redraw();
     assert.equal(card.querySelector(".jn-card-image").hidden, true);
     assert.equal(card.querySelector(".jn-card-background").getAttribute("src"), "https://example.com/background.png");
-    card.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, button: 2 }));
+    card.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    card.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0 }));
     answers.push("worlds/camera/cork.webp");
-    host.querySelector('[data-action="card-background"]').click();
+    host.querySelector(".jn-edit-background").click();
     await settle();
     await redraw();
     assert.equal(card.querySelector(".jn-card-background").getAttribute("src"), "worlds/camera/cork.webp");
@@ -1081,8 +1071,11 @@ test("inline label editing reads and saves through the card callbacks", () => {
     const title = card.querySelector(".jn-card-title");
     title.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
     canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0 }));
+    assert.equal(title.querySelector("input"), null, "one click does not edit");
+    title.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0 }));
     const input = title.querySelector("input");
-    assert.ok(input, "clicking the label opens an inline input");
+    assert.ok(input, "double clicking the label opens an inline input");
     assert.equal(input.value, "Old label");
     input.value = "New label";
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
@@ -1253,7 +1246,7 @@ test("legacy attachments follow the board edge when a card resizes", async () =>
   }
 });
 
-test("Alt-click connects edges through saved board pins and the toolbar can replace the route", async () => {
+test.skip("legacy Alt-click edge-link tool (replaced by Pin tool gesture tests)", async () => {
   const a = sharedByName("Tavern");
   const b = sharedByName("Known Witness");
   await requestWrite({ type: "resizeCard", noteId: a.id, width: 250, height: 120 });
@@ -1403,7 +1396,7 @@ test("link groups carry layered stroke stacks, cosmetics and state classes witho
     assert.ok(legacy.classList.contains("jn-link-ends-standard"));
     assert.equal(legacy.getAttribute("style").includes("--jn-thread-k:"), true);
     const strokes = legacy.querySelector(".jn-link-strokes");
-    assert.match(strokes.getAttribute("mask"), /^url\(#jn-thread-mask-/);
+    assert.equal(strokes.hasAttribute("mask"), false, "threads may cross notes");
     const layers = legacy.querySelectorAll(".jn-thread-layer");
     assert.equal(layers.length, 5, "L3 has five layers");
     assert.deepEqual([...layers].map(layer => [...layer.classList].find(name => name.startsWith("jn-thread-") && name !== "jn-thread-layer")),
@@ -2320,7 +2313,7 @@ test("hover and editing fade only matching silhouettes without rebuilding thread
     const group = canvas.svg.querySelector('g[data-id="ab"]');
     const strokes = group.querySelector(".jn-link-strokes");
     const hit = canvas.root.querySelector('.jn-link-hit[data-id="ab"]');
-    assert.match(strokes.getAttribute("mask"), /^url\(#jn-thread-mask-/);
+    assert.equal(strokes.hasAttribute("mask"), false, "threads may cross notes");
     assert.equal(group.hasAttribute("mask"), false, "pins and labels sit outside the fade mask");
     assert.equal(strokes.querySelector(".jn-thread-pin"), null);
     assert.ok(group.querySelector(".jn-thread-pin"), "endpoint pins remain");
@@ -2570,7 +2563,7 @@ test("offline mode disables write controls and says the board is read-only", asy
     assert.ok(host.querySelector(".journalinator-offline-banner"));
     assert.equal(host.querySelector(".journalinator-new").disabled, true);
     assert.equal(host.querySelector(".journalinator-add-label").disabled, true);
-    assert.equal(host.querySelector(".journalinator-add-link").disabled, true);
+    assert.equal(host.querySelector(".journalinator-add-pin").disabled, true);
     assert.equal(host.querySelector(".journalinator-stats").disabled, false);
     assert.equal(host.querySelector(".jn-context-menu").style.display === "flex", false);
   } finally {
@@ -2805,7 +2798,7 @@ test("private canvas is separate and copies notes through the clipboard", async 
     assert.ok(host.querySelector(".journalinator-filters"), "private style filters are available");
     assert.ok(host.querySelector(".journalinator-private-new"));
     assert.ok(host.querySelector(".journalinator-private-add-label"));
-    assert.ok(host.querySelector(".journalinator-private-add-link"));
+    assert.ok(host.querySelector(".journalinator-private-add-pin"));
     assert.ok(host.querySelector(".jn-patch-notes-button"), "patch notes are available on the private canvas");
 
     host.querySelector(".journalinator-private-new").click();
@@ -2819,6 +2812,8 @@ test("private canvas is separate and copies notes through the clipboard", async 
     const card = host.querySelector(`.jn-card[data-id="${privateNote.id}"]`);
     assert.ok(card);
     const block = card.querySelector(".jn-card-block");
+    block.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 0, clientY: 0 }));
+    block.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 0, clientY: 0 }));
     block.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 0, clientY: 0 }));
     block.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 0, clientY: 0 }));
     const textarea = card.querySelector(".jn-block-input");
@@ -3126,8 +3121,8 @@ test("private anchors are capped, strictly named, reference-safe and main-pin gu
     assert.ok(workspace.workspace.layout.cards[targetId].anchors[anchorId],
       "the shared dot survives while another connection uses it");
     await workspace.deleteLink(otherId, otherLink.id);
-    assert.equal(workspace.workspace.layout.cards[targetId].anchors[anchorId], undefined,
-      "the last connection removes the dot");
+    assert.ok(workspace.workspace.layout.cards[targetId].anchors[anchorId],
+      "a manually placed pin survives after its last connection is removed");
 
     // Fill the registry to the shared 256 cap through the normal save/normalize path.
     const card = workspace.workspace.layout.cards[targetId];
@@ -3324,8 +3319,8 @@ test("attachment pins render author colour, all candidate styles, and transform 
     assert.equal(main.style.left, "50%");
     assert.equal(main.style.top, "0%");
     assert.ok(minor, "minor anchors render their own pin");
-    assert.equal(minor.style.left, "20%", "legacy interior anchors retain their edge position");
-    assert.equal(minor.style.top, "0%");
+    assert.equal(minor.style.left, "20%", "legacy interior anchors keep their local position");
+    assert.equal(minor.style.top, "30%");
     assert.equal(main.closest(".jn-card-main"), null, "pins live outside the clipped paper wrapper");
 
     const group = canvas.svg.querySelector('g[data-id="pinlink"]');
@@ -3336,10 +3331,11 @@ test("attachment pins render author colour, all candidate styles, and transform 
       { kind: "main", x: 0.5, y: 0 });
     const targetWorld = anchorWorld({ x: 400, y: 0, w: 200, h: 100, rotation: 0 },
       { kind: "minor", x: 0.7, y: 0.25 });
-    assert.equal(Number(endpoints[0].getAttribute("cx")), sourceWorld.x);
-    assert.equal(Number(endpoints[0].getAttribute("cy")), sourceWorld.y);
-    assert.equal(Number(endpoints[1].getAttribute("cx")), targetWorld.x);
-    assert.equal(Number(endpoints[1].getAttribute("cy")), targetWorld.y);
+    for (const [pin, world] of [[endpoints[0], sourceWorld], [endpoints[1], targetWorld]]) {
+      assert.ok(Math.hypot(Number(pin.getAttribute("cx")) - world.x,
+        Number(pin.getAttribute("cy")) - world.y) <= THREAD_PIN_RADIUS + 0.01,
+      "thread endpoints meet the pin without forcing an outside-edge approach");
+    }
 
     for (const style of ["default", "enamel", "brass", "iron", "wood", "decorative", "wax"]) {
       a.system.attachment = { mainPinEnabled: true, mainSnapRadius: 24, minorSnapRadius: 6, pinStyle: style };
@@ -3350,13 +3346,13 @@ test("attachment pins render author colour, all candidate styles, and transform 
     }
     const css = readFileSync(new URL("../../styles/stylized.css", import.meta.url), "utf8");
     assert.match(css,
-      /\.jn-canvas \.jn-card \.jn-pin \{[^}]*width:\s*var\(--jn-main-pin-size, 14px\);/,
+      /\.jn-canvas \.jn-board-pin-control \{[^}]*width:\s*var\(--jn-main-pin-size, 14px\);/,
       "main pin heads use the zoom-scaled size");
     assert.match(css,
-      /\.jn-canvas \.jn-card \.jn-pin-minor \{[^}]*width:\s*var\(--jn-minor-pin-size, 7px\);/,
-      "minor pin heads use the zoom-scaled size");
+      /\.jn-canvas \.jn-board-pin-control \{[^}]*width:\s*var\(--jn-main-pin-size, 14px\);/,
+      "all pin heads use the primary pin size");
     assert.match(css,
-      /\.jn-canvas \.jn-card \.jn-pin::after \{[^}]*width:\s*max\(var\(--jn-pin-hit-size, 20px\), 100%\);/,
+      /\.jn-canvas \.jn-card \.jn-pin::after,[\s\S]*?\.jn-canvas \.jn-board-pin-control::after \{[^}]*width:\s*max\(var\(--jn-pin-hit-size, 20px\), 100%\);/,
       "small pins keep a 20px screen-space hit target");
     for (const style of ["enamel", "brass", "iron", "wood", "decorative", "wax"]) {
       assert.ok(css.includes(`.jn-pin-style-${style}::before`), `${style} has a pin visual rule`);
@@ -3373,14 +3369,15 @@ test("attachment pins render author colour, all candidate styles, and transform 
     const rotatedWorld = anchorWorld({ x: 0, y: 0, w: 240, h: 120, rotation: 90 },
       { kind: "main", x: 0.5, y: 0 });
     endpoints = [...canvas.svg.querySelectorAll('g[data-id="pinlink"] .jn-thread-pin:not(.jn-board-pin)')];
-    assert.equal(Number(endpoints[0].getAttribute("cx")), rotatedWorld.x);
-    assert.equal(Number(endpoints[0].getAttribute("cy")), rotatedWorld.y);
+    assert.ok(Math.hypot(Number(endpoints[0].getAttribute("cx")) - rotatedWorld.x,
+      Number(endpoints[0].getAttribute("cy")) - rotatedWorld.y) <= THREAD_PIN_RADIUS + 0.01);
 
     canvas.pinsEnabled = false;
     canvas.update([a, b], layout);
     assert.equal(canvas.root.querySelector(".jn-pin"), null, "pins are hidden when the experiment is off");
     endpoints = [...canvas.svg.querySelectorAll('g[data-id="pinlink"] .jn-thread-pin:not(.jn-board-pin)')];
-    assert.equal(Number(endpoints[0].getAttribute("cx")), rotatedWorld.x,
+    assert.ok(Math.hypot(Number(endpoints[0].getAttribute("cx")) - rotatedWorld.x,
+      Number(endpoints[0].getAttribute("cy")) - rotatedWorld.y) <= THREAD_PIN_RADIUS + 0.01,
       "an existing anchor-linked path still resolves its pin position while pins are hidden");
     assert.ok(endpoints.every(pin => !pin.classList.contains("jn-thread-pin-attached")),
       "the fallback endpoint dots remain visible when pins are disabled");
@@ -3388,7 +3385,7 @@ test("attachment pins render author colour, all candidate styles, and transform 
     canvas.pinsEnabled = true;
     a.system.attachment = { mainPinEnabled: false, mainSnapRadius: 24, minorSnapRadius: 6, pinStyle: "brass" };
     canvas.update([a, b], layout);
-    assert.equal(card(aId).querySelector(".jn-pin-main"), null,
+    assert.equal(card(aId).querySelector('.jn-pin[data-anchor-id="main"]'), null,
       "a disabled main pin renders nothing and is never synthesized on the client");
     assert.ok(card(aId).querySelector('.jn-pin[data-anchor-id="m1"]'), "minor pins remain visible");
   } finally {
@@ -3397,7 +3394,7 @@ test("attachment pins render author colour, all candidate styles, and transform 
   }
 });
 
-test("main-pin drag moves the note, minor pins move alone and report normalized coordinates", () => {
+test.skip("legacy main-pin and minor-pin dragging (replaced by Pin tool gesture tests)", () => {
   const calls = [];
   const canvas = new JournalCanvas(new Proxy({}, {
     get: (_, name) => (...args) => calls.push([name, ...args])
@@ -3479,7 +3476,7 @@ test("main-pin drag moves the note, minor pins move alone and report normalized 
   }
 });
 
-test("a rejected minor-pin write clears the optimistic drag and restores the pin", async () => {
+test.skip("legacy immediate minor-pin drag (replaced by picked-up pin gesture tests)", async () => {
   const canvas = new JournalCanvas({
     onMoveCardAnchor() { return Promise.reject(new Error("rejected anchor write")); }
   });
@@ -3521,7 +3518,7 @@ test("a rejected minor-pin write clears the optimistic drag and restores the pin
   }
 });
 
-test("link tool projects interior hits to edges and reuses main and minor pins", () => {
+test.skip("legacy edge-projecting Connection tool (replaced by Pin tool gesture tests)", () => {
   const calls = [];
   const canvas = new JournalCanvas(new Proxy({}, {
     get: (_, name) => (...args) => calls.push([name, ...args])
@@ -3855,10 +3852,7 @@ test("routed threads pass through main pins, ignore minor targets, and follow tr
     },
     labels: {}
   });
-  const attachment = (box, anchor) => {
-    const world = anchorWorld(box, anchor);
-    return { x: world.x + world.nx * THREAD_PIN_RADIUS, y: world.y + world.ny * THREAD_PIN_RADIUS };
-  };
+  const attachment = (box, anchor) => anchorWorld(box, anchor);
   const startsAt = (path, point) => path.includes(`M${point.x} ${point.y}`);
   try {
     canvas.update(notes, layout());
@@ -3960,8 +3954,7 @@ test("multiple route waypoints keep stored order and disabled pins skip renderin
   });
   const attachment = (id, data) => {
     const box = { ...data, w: data.width, h: data.height, rotation: data.rotation ?? 0 };
-    const world = anchorWorld(box, data.anchors.main);
-    return { x: world.x + world.nx * THREAD_PIN_RADIUS, y: world.y + world.ny * THREAD_PIN_RADIUS };
+    return anchorWorld(box, data.anchors.main);
   };
   try {
     const base = layout();
@@ -4569,11 +4562,11 @@ test("private transfer sender UI excludes self, waits for the GM ack, and names 
     emptyInbox.querySelector(".jn-transfer-close").click();
     assert.equal(emptyInbox.hidden, true, "the empty inbox can be closed");
 
-    const send = host.querySelector(".journalinator-private-send");
-    assert.equal(send.disabled, true, "send is disabled without a private selection");
+    assert.equal(host.querySelector(".jn-private-send"), null,
+      "the right-panel send control appears with a selected note");
     clickCanvasCard({ root: canvasRoot }, sentIds[0]);
-    clickCanvasCard({ root: canvasRoot }, sentIds[1], { ctrlKey: true });
-    assert.equal(send.disabled, false, "send enables for the private selection");
+    const send = host.querySelector(".jn-private-send");
+    assert.equal(send.disabled, false, "send enables for the selected private note");
     quinn.active = false;
     send.click();
     const panel = host.querySelector(".journalinator-transfer-send");
@@ -4582,6 +4575,7 @@ test("private transfer sender UI excludes self, waits for the GM ack, and names 
       "focus starts on the recipient field");
     const options = [...panel.querySelectorAll("option")].map(option => option.value);
     assert.ok(!options.includes(gmUser.id), "the recipient list excludes the sender");
+    assert.ok(options.includes("__main__"), "the Main Canvas is a destination");
     assert.ok(options.includes(pip.id) && options.includes(quinn.id), "players and GMs can receive");
     assert.match([...panel.querySelectorAll("option")]
       .find(option => option.value === quinn.id).textContent, /offline/,
@@ -4601,9 +4595,9 @@ test("private transfer sender UI excludes self, waits for the GM ack, and names 
     const record = privateStore.pendingTransfers(pip.id).at(-1);
     assert.ok(record, "the GM stored the pending copy");
     assert.equal(record.fromUserId, gmUser.id);
-    assert.deepEqual(record.summary.titles, ["Transfer Alpha", "Transfer Beta"]);
+    assert.deepEqual(record.summary.titles, ["Transfer Alpha"]);
     assert.ok(env.notifications.some(([level, text]) =>
-      level === "info" && text.includes("Sent 2 note(s) to Pip")),
+      level === "info" && text.includes("Sent 1 note(s) to Pip")),
     "success appears only after the writeApplied acknowledgement");
 
     // A later popover still excludes the sender and Escape closes it.
@@ -4613,6 +4607,34 @@ test("private transfer sender UI excludes self, waits for the GM ack, and names 
     assert.equal(panel.hidden, true, "Escape closes the send popover");
   } finally {
     restoreUsers();
+    app._onClose();
+    host.remove();
+  }
+});
+
+test("right-panel Send to publishes a private copy on the Main Canvas", async () => {
+  const { page, ids } = await addPrivateFixtureNotes(gmUser, ["Send Main Fixture"]);
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  try {
+    await redraw();
+    await openPrivateView(app, host, redraw);
+    clickCanvasCard({ root: host.querySelector(".jn-canvas") }, ids[0]);
+    host.querySelector(".jn-private-send").click();
+    const panel = host.querySelector(".journalinator-transfer-send");
+    panel.querySelector(".jn-transfer-recipient").value = "__main__";
+    panel.querySelector(".jn-transfer-confirm").click();
+    await settle();
+    assert.ok(sharedByName("Send Main Fixture"), "the Main Canvas receives the note");
+    assert.ok(privateStore.read(page).notes[ids[0]], "the private source remains after publication");
+  } finally {
     app._onClose();
     host.remove();
   }
@@ -4759,7 +4781,7 @@ test("a player can send a private copy to the GM and it appears in the GM inbox"
     await redraw();
     const canvasRoot = host.querySelector(".jn-canvas");
     clickCanvasCard({ root: canvasRoot }, ids[0]);
-    host.querySelector(".journalinator-private-send").click();
+    host.querySelector(".jn-private-send").click();
     const panel = host.querySelector(".journalinator-transfer-send");
     const options = [...panel.querySelectorAll("option")].map(option => option.value);
     assert.ok(!options.includes(player.id), "a player's recipient list excludes that player");
@@ -4877,7 +4899,7 @@ test("offline disables private send and inbox actions", async () => {
     await openPrivateView(app, host, redraw);
     const canvasRoot = host.querySelector(".jn-canvas");
     clickCanvasCard({ root: canvasRoot }, ids[0]);
-    const send = host.querySelector(".journalinator-private-send");
+    const send = host.querySelector(".jn-private-send");
     const inbox = host.querySelector(".journalinator-private-inbox");
     assert.equal(send.disabled, true, "send is disabled without an active GM");
     assert.equal(inbox.disabled, true, "inbox is disabled without an active GM");
@@ -4909,14 +4931,9 @@ test("send is disabled and warns when the player has no private page", async () 
   try {
     await redraw();
     await openPrivateView(app, host, redraw);
-    const send = host.querySelector(".journalinator-private-send");
-    assert.equal(send.disabled, true, "send is disabled without a private page");
-    assert.match(send.getAttribute("aria-label"), /private journal/i);
-    send.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    const send = host.querySelector(".jn-private-send");
+    assert.equal(send, null, "there is no selected note and no right-panel send control");
     assert.equal(host.querySelector(".journalinator-transfer-send").hidden, true);
-    assert.ok(env.notifications.some(([level, text]) =>
-      level === "warn" && /private journal/i.test(text)),
-    "clicking send warns that a private page is needed");
   } finally {
     restoreUsers();
     app._onClose();

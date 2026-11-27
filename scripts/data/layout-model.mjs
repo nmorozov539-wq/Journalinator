@@ -35,6 +35,16 @@ export default class LayoutModel extends foundry.abstract.TypeDataModel {
         noteId: new fields.StringField({ required: false, blank: true, initial: "" }),
         corner: new fields.StringField({ required: false, choices: STAMP_CORNERS, initial: DEFAULT_STAMP_CORNER })
       })),
+      pins: new fields.TypedObjectField(new fields.SchemaField({
+        noteId: new fields.StringField({ required: false, blank: true, initial: "" }),
+        x: new fields.NumberField({ required: true }),
+        y: new fields.NumberField({ required: true }),
+        isDefault: new fields.BooleanField({ initial: false })
+      }), { required: false, initial: () => ({}) }),
+      pinLinks: new fields.TypedObjectField(new fields.SchemaField({
+        source: new fields.StringField({ required: true }),
+        target: new fields.StringField({ required: true })
+      }), { required: false, initial: () => ({}) }),
       viewport: new fields.SchemaField({
         x: new fields.NumberField({ required: true, initial: 0 }),
         y: new fields.NumberField({ required: true, initial: 0 }),

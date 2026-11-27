@@ -493,11 +493,11 @@ test("applyTheme writes data attributes and custom properties for the stylized p
 test("pin heads scale gently while hit targets stay usable", () => {
   const css = readFileSync(new URL("../styles/stylized.css", import.meta.url), "utf8");
   assert.match(css,
-    /\.jn-canvas \.jn-card \.jn-pin \{[\s\S]*?width:\s*var\(--jn-main-pin-size, 14px\);[\s\S]*?height:\s*var\(--jn-main-pin-size, 14px\);/);
+    /\.jn-canvas \.jn-card \.jn-pin,[\s\S]*?\.jn-canvas \.jn-board-pin-control \{[^}]*width:\s*var\(--jn-main-pin-size, 14px\);[^}]*height:\s*var\(--jn-main-pin-size, 14px\);/);
   assert.match(css,
     /\.jn-canvas \.jn-card \.jn-pin-minor \{[\s\S]*?width:\s*var\(--jn-minor-pin-size, 7px\);/);
   assert.match(css,
-    /\.jn-canvas \.jn-card \.jn-pin::after \{[\s\S]*?width:\s*max\(var\(--jn-pin-hit-size, 20px\), 100%\);/);
+    /\.jn-canvas \.jn-card \.jn-pin::after,[\s\S]*?\.jn-canvas \.jn-board-pin-control::after \{[^}]*width:\s*max\(var\(--jn-pin-hit-size, 20px\), 100%\);/);
 
   for (const k of [0.25, 1, 4]) {
     const main = Math.max(8, Math.min(22, 14 * Math.sqrt(k)));

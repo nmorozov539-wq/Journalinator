@@ -5,6 +5,7 @@ import {
 } from "../card-ports.mjs";
 import { normalizeLinkColor } from "../link-colors.mjs";
 import { validAnchorId } from "../anchors.mjs";
+import { resolvePin, validPinPosition } from "../board-pins.mjs";
 import { DEFAULT_STAMP_CORNER, STAMP_COLORS, isStampCorner, stampUrl } from "../stamps.mjs";
 import {
   resolveAttachment, resolveLinkCosmetics, resolvePresentation, sanitizeCardAnchorsWithMain
@@ -60,7 +61,7 @@ export function emptyWorkspace() {
   return {
     format: WORKSPACE_FORMAT,
     notes: {},
-    layout: { cards: {}, labels: {}, viewport: null },
+    layout: { cards: {}, labels: {}, pins: {}, pinLinks: {}, viewport: null },
     trash: []
   };
 }
@@ -114,6 +115,8 @@ function normalizeLink(link) {
     hint: false,
     sourceAnchorId: anchorId(link?.sourceAnchorId),
     targetAnchorId: anchorId(link?.targetAnchorId),
+    sourcePinRef: typeof link?.sourcePinRef === "string" ? link.sourcePinRef.slice(0, 200) : "",
+    targetPinRef: typeof link?.targetPinRef === "string" ? link.targetPinRef.slice(0, 200) : "",
     routeAnchors: normalizeRouteAnchors(link?.routeAnchors),
     material: cosmetics.material,
     thickness: cosmetics.thickness,
@@ -239,6 +242,25 @@ export function normalizeWorkspace(input) {
   for (const [id, label] of Object.entries(source.layout?.labels ?? {})) {
     labels[id] = normalizeLabel(label);
   }
+  const pins = {};
+  for (const [id, pin] of Object.entries(source.layout?.pins ?? {})) {
+    if (!validAnchorId(id) || typeof pin?.noteId !== "string"
+        || !validPinPosition(pin.noteId, pin.x, pin.y)
+        || (pin.noteId && !cards[pin.noteId])) continue;
+    pins[id] = { noteId: pin.noteId, x: pin.x, y: pin.y, isDefault: false };
+  }
+  const pinLinks = {};
+  const pinLayout = { cards, pins };
+  const boxes = new Map(Object.entries(cards).map(([id, card]) => [id, {
+    ...card, w: card.width ?? 190, h: card.height ?? 90
+  }]));
+  for (const [id, link] of Object.entries(source.layout?.pinLinks ?? {})) {
+    if (!validAnchorId(id) || typeof link?.source !== "string"
+        || typeof link?.target !== "string" || link.source === link.target) continue;
+    if (resolvePin(link.source, pinLayout, boxes) && resolvePin(link.target, pinLayout, boxes)) {
+      pinLinks[id] = { source: link.source, target: link.target };
+    }
+  }
   const trash = (Array.isArray(source.trash) ? source.trash : []).map(entry => {
     // A trash card without its note must not invent a main anchor: there is no attachment block
     // to tell us whether the note wanted one.
@@ -257,6 +279,8 @@ export function normalizeWorkspace(input) {
     layout: {
       cards,
       labels,
+      pins,
+      pinLinks,
       viewport: normalizeViewport(source.layout?.viewport)
     },
     trash

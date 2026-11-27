@@ -233,6 +233,8 @@ export function buildPrivateTransfer(workspace, noteIds, { fromUserId, toUserId 
     ? workspace.layout.cards : {};
   const labels = workspace?.layout?.labels && typeof workspace.layout.labels === "object"
     ? workspace.layout.labels : {};
+  const boardPins = workspace?.layout?.pins ?? {};
+  const boardLinks = workspace?.layout?.pinLinks ?? {};
 
   const selected = [];
   const seen = new Set();
@@ -271,9 +273,21 @@ export function buildPrivateTransfer(workspace, noteIds, { fromUserId, toUserId 
       note: clone(notes[noteId]),
       card: own(cards, noteId) && cards[noteId] && typeof cards[noteId] === "object"
         ? clone(cards[noteId]) : null,
-      labels: attached
+      labels: attached,
+      pins: Object.fromEntries(Object.entries(boardPins)
+        .filter(([, pin]) => pin?.noteId === noteId).map(([id, pin]) => [id, clone(pin)]))
     };
   });
+
+  const refOwner = ref => {
+    if (typeof ref !== "string") return "";
+    if (ref.startsWith("n:")) return ref.slice(2, ref.indexOf(":", 2));
+    if (ref.startsWith("p:")) return boardPins[ref.slice(2)]?.noteId ?? "";
+    return "";
+  };
+  const packedPinLinks = Object.fromEntries(Object.entries(boardLinks)
+    .filter(([, link]) => seen.has(refOwner(link?.source)) && seen.has(refOwner(link?.target)))
+    .map(([id, link]) => [id, clone(link)]));
 
   const drops = countDrops(notes, new Set(selected));
   return {
@@ -281,6 +295,7 @@ export function buildPrivateTransfer(workspace, noteIds, { fromUserId, toUserId 
     toUserId,
     createdAt: Date.now(),
     notes: packed,
+    pinLinks: packedPinLinks,
     summary: {
       count: packed.length,
       titles: packed.map(entry => String(entry.note?.title ?? "").slice(0, MAX_TITLE_LENGTH)),
@@ -304,7 +319,7 @@ function importBlocks(blocks) {
   });
 }
 
-function importLinks(links, { newId, noteIdMap, recipientId, usedLinkIds }) {
+function importLinks(links, { newId, noteIdMap, pinRefMap, recipientId, usedLinkIds }) {
   const imported = [];
   let dropped = 0;
   let droppedWaypoints = 0;
@@ -338,6 +353,8 @@ function importLinks(links, { newId, noteIdMap, recipientId, usedLinkIds }) {
       hint: false,
       sourceAnchorId: validAnchorId(link?.sourceAnchorId) ? link.sourceAnchorId : "",
       targetAnchorId: validAnchorId(link?.targetAnchorId) ? link.targetAnchorId : "",
+      sourcePinRef: pinRefMap(link?.sourcePinRef) ?? "",
+      targetPinRef: pinRefMap(link?.targetPinRef) ?? "",
       routeAnchors,
       ...cosmetics,
       ...linkAnchors(link)
@@ -424,6 +441,8 @@ export function importPrivateTransfer(workspace, transfer, recipientId) {
   if (!result.layout || typeof result.layout !== "object") result.layout = {};
   if (!result.layout.cards || typeof result.layout.cards !== "object") result.layout.cards = {};
   if (!result.layout.labels || typeof result.layout.labels !== "object") result.layout.labels = {};
+  if (!result.layout.pins || typeof result.layout.pins !== "object") result.layout.pins = {};
+  if (!result.layout.pinLinks || typeof result.layout.pinLinks !== "object") result.layout.pinLinks = {};
   if (!Array.isArray(result.trash)) result.trash = [];
 
   const noteIdMap = new Map();
@@ -435,6 +454,30 @@ export function importPrivateTransfer(workspace, transfer, recipientId) {
     }
     noteIdMap.set(oldId, freshId(usedNoteIds));
   }
+
+  const usedPinIds = new Set(Object.keys(result.layout.pins));
+  const pinIdMap = new Map();
+  for (const entry of transfer.notes) {
+    for (const oldId of Object.keys(entry?.pins ?? {})) {
+      if (!validAnchorId(oldId) || pinIdMap.has(oldId)) continue;
+      pinIdMap.set(oldId, freshId(usedPinIds));
+    }
+  }
+  const pinRefMap = ref => {
+    if (typeof ref !== "string") return null;
+    if (ref.startsWith("p:")) {
+      const id = pinIdMap.get(ref.slice(2));
+      return id ? `p:${id}` : null;
+    }
+    if (ref.startsWith("n:")) {
+      const split = ref.indexOf(":", 2);
+      if (split < 0) return null;
+      const noteId = noteIdMap.get(ref.slice(2, split));
+      const anchorId = ref.slice(split + 1);
+      return noteId && validAnchorId(anchorId) ? `n:${noteId}:${anchorId}` : null;
+    }
+    return null;
+  };
 
   const usedLinkIds = new Set();
   for (const note of Object.values(result.notes)) {
@@ -485,7 +528,7 @@ export function importPrivateTransfer(workspace, transfer, recipientId) {
     };
 
     const linkResult = importLinks(sourceNote.links, {
-      newId, noteIdMap, recipientId, usedLinkIds
+      newId, noteIdMap, pinRefMap, recipientId, usedLinkIds
     });
     note.links = linkResult.links;
     droppedLinks += linkResult.dropped;
@@ -494,10 +537,24 @@ export function importPrivateTransfer(workspace, transfer, recipientId) {
     const card = importCard(entry.card, note, newId, recipientId, result.layout.cards, result.notes);
     result.notes[newId] = note;
     result.layout.cards[newId] = card;
+    for (const [oldPinId, pin] of Object.entries(entry.pins ?? {})) {
+      const newPinId = pinIdMap.get(oldPinId);
+      if (!newPinId || !Number.isFinite(pin?.x) || !Number.isFinite(pin?.y)
+          || pin.x < 0 || pin.x > 1 || pin.y < 0 || pin.y > 1) continue;
+      result.layout.pins[newPinId] = { noteId: newId, x: pin.x, y: pin.y,
+        isDefault: false };
+    }
     Object.assign(result.layout.labels, importLabels(entry.labels, {
       oldNoteId: oldId, newNoteId: newId, usedLabelIds
     }));
     imported.push(newId);
+  }
+
+  const usedPinLinkIds = new Set(Object.keys(result.layout.pinLinks));
+  for (const link of Object.values(transfer.pinLinks ?? {})) {
+    const source = pinRefMap(link?.source), target = pinRefMap(link?.target);
+    if (!source || !target || source === target) continue;
+    result.layout.pinLinks[freshId(usedPinLinkIds)] = { source, target };
   }
 
   return { workspace: result, imported, droppedLinks, droppedWaypoints };

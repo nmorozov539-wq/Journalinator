@@ -1078,12 +1078,12 @@ test("minor anchors are added, moved and removed with bounds and reference check
   await fromPlayer({ type: "moveCardAnchor", noteId: note.id, anchorId, x: 0.4, y: 0.6 });
   let current = sharedCard(note.id).anchors[anchorId];
   assert.deepEqual([current.x, current.y, current.kind, current.createdBy],
-    [0.4, 1, "minor", player.id]);
+    [0.4, 0.6, "minor", player.id]);
   await fromPlayer({ type: "moveCardAnchor", noteId: note.id, anchorId: "main", x: 0.1, y: 0.1 });
   await fromPlayer({ type: "moveCardAnchor", noteId: note.id, anchorId, x: -0.1, y: 0.5 });
   await fromPlayer({ type: "moveCardAnchor", noteId: note.id, anchorId: "missing", x: 0.5, y: 0.5 });
   current = sharedCard(note.id).anchors[anchorId];
-  assert.deepEqual([current.x, current.y], [0.4, 1], "main and invalid moves are rejected");
+  assert.deepEqual([current.x, current.y], [0.4, 0.6], "main and invalid moves are rejected");
 
   await fromPlayer({
     type: "createLink", sourceId: note.id, targetId: target.id,
@@ -1095,13 +1095,13 @@ test("minor anchors are added, moved and removed with bounds and reference check
   assert.ok(sharedCard(note.id).anchors[anchorId], "a referenced minor anchor is not removed");
 
   await fromPlayer({ type: "deleteLink", noteId: note.id, linkId: link.id });
-  assert.equal(sharedCard(note.id).anchors[anchorId], undefined,
-    "the last reference removal prunes the minor anchor");
+  assert.ok(sharedCard(note.id).anchors[anchorId],
+    "a placed pin remains after its last connection is removed");
 
   await fromPlayer({ type: "addCardAnchor", noteId: note.id, kind: "minor", x: 0.6, y: 0.2 });
-  const orphanId = minorAnchors(note.id)[0][0];
+  const orphanId = minorAnchors(note.id).find(([, pin]) => pin.x === 0.6)[0];
   await fromPlayer({ type: "removeCardAnchor", noteId: note.id, anchorId: orphanId });
-  assert.equal(count(), 0, "an unreferenced minor anchor can be removed directly");
+  assert.equal(count(), 1, "an unreferenced minor anchor can be removed directly");
   assert.ok(sharedCard(note.id).anchors.main, "the main anchor is never removed");
 });
 
@@ -1223,7 +1223,7 @@ test("updateLink accepts only existing anchors on the correct cards", async () =
   });
   const cleared = sharedByName("Pin Update A").system.links.find(item => item.id === link.id);
   assert.equal(cleared.sourceAnchorId, "");
-  assert.equal(sharedCard(a.id).anchors[aAnchor], undefined, "the orphaned minor is pruned");
+  assert.ok(sharedCard(a.id).anchors[aAnchor], "the manually placed pin remains available");
   assert.ok(sharedCard(b.id).anchors[bAnchor], "the still-referenced target anchor survives");
 });
 
@@ -1252,17 +1252,17 @@ test("minor anchors survive while any live link or route references them", async
     type: "updateLink", noteId: a.id, linkId: ab.id,
     fields: { label: "prune now", sourceAnchorId: a1 }
   });
-  assert.equal(sharedCard(a.id).anchors[a2], undefined, "an unreferenced minor is pruned");
+  assert.ok(sharedCard(a.id).anchors[a2], "an unreferenced manually placed pin remains");
   assert.ok(sharedCard(a.id).anchors[a1], "an anchor shared by two links survives");
   assert.ok(sharedCard(b.id).anchors[b1]);
   assert.ok(sharedCard(a.id).anchors.main, "main is never pruned");
 
   await fromPlayer({ type: "deleteLink", noteId: a.id, linkId: ab.id });
-  assert.equal(sharedCard(b.id).anchors[b1], undefined, "the last reference to b1 was removed");
+  assert.ok(sharedCard(b.id).anchors[b1], "b1 remains after its last connection is removed");
   assert.ok(sharedCard(a.id).anchors[a1], "a1 is still referenced by a-c");
 
   await fromPlayer({ type: "deleteLink", noteId: a.id, linkId: ac.id });
-  assert.equal(sharedCard(a.id).anchors[a1], undefined, "a1 loses its last reference");
+  assert.ok(sharedCard(a.id).anchors[a1], "a1 remains after its last connection is removed");
   assert.ok(sharedCard(a.id).anchors.main);
 });
 
@@ -1592,9 +1592,9 @@ test("updateLink refreshes the endpoint point/side fallback when anchors change"
     fields: { sourceAnchorId: aAnchor, targetAnchorId: bAnchor }
   });
   let updated = sharedByName("Fallback Link A").system.links[0];
-  assert.deepEqual(updated.sourcePoint, { x: 0.8, y: 0 });
+  assert.deepEqual(updated.sourcePoint, { x: 0.8, y: 0.1 });
   assert.equal(updated.sourceSide, "top", "source side follows the new anchor");
-  assert.deepEqual(updated.targetPoint, { x: 0.2, y: 1 });
+  assert.deepEqual(updated.targetPoint, { x: 0.2, y: 0.9 });
   assert.equal(updated.targetSide, "bottom", "target side follows the new anchor");
 
   await fromPlayer({
@@ -1602,7 +1602,7 @@ test("updateLink refreshes the endpoint point/side fallback when anchors change"
   });
   updated = sharedByName("Fallback Link A").system.links[0];
   assert.equal(updated.sourceAnchorId, "");
-  assert.deepEqual(updated.sourcePoint, { x: 0.8, y: 0 },
+  assert.deepEqual(updated.sourcePoint, { x: 0.8, y: 0.1 },
     "clearing an anchor keeps the last released point as the hidden/legacy fallback");
   assert.equal(updated.sourceSide, "top");
 });
@@ -1858,20 +1858,20 @@ test("moving a minor anchor refreshes fallbacks used by hide and reveal", async 
 
   await fromPlayer({ type: "moveCardAnchor", noteId: a.id, anchorId, x: 0.85, y: 0.85 });
   let moved = sharedByName("Move Anchor A").system.links[0];
-  assert.deepEqual([moved.sourcePoint.x, moved.sourcePoint.y], [0.85, 1]);
+  assert.deepEqual([moved.sourcePoint.x, moved.sourcePoint.y], [0.85, 0.85]);
   assert.equal(moved.sourceSide, "bottom");
 
   assert.equal(await secrets.hideSharedLink(a.id, link.id), true);
   const hidden = vaultStore.data.hiddenLinks[a.id].find(item => item.targetId === b.id);
   assert.ok(hidden);
-  assert.deepEqual([hidden.sourcePoint.x, hidden.sourcePoint.y], [0.85, 1],
+  assert.deepEqual([hidden.sourcePoint.x, hidden.sourcePoint.y], [0.85, 0.85],
     "hiding stores the refreshed fallback");
   assert.equal(hidden.sourceSide, "bottom");
 
   assert.equal(await secrets.revealLink(a.id, hidden.id), true);
   const revealed = sharedByName("Move Anchor A").system.links.find(item => item.targetId === b.id);
   assert.equal(revealed.sourceAnchorId, "");
-  assert.deepEqual([revealed.sourcePoint.x, revealed.sourcePoint.y], [0.85, 1],
+  assert.deepEqual([revealed.sourcePoint.x, revealed.sourcePoint.y], [0.85, 0.85],
     "revealing keeps the new fallback position");
   assert.equal(revealed.sourceSide, "bottom");
 });

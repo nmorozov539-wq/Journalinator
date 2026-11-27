@@ -22,17 +22,11 @@ export function isMainAnchor(anchor) {
   return anchor?.kind === "main";
 }
 
-/** Keep a minor attachment on the closest physical card edge, including legacy interior pins. */
+/** Preserve a minor attachment's exact note-local position, including legacy interior pins. */
 export function minorOnEdge(anchor, box = {}) {
   if (anchor?.kind !== "minor") return anchor;
-  const x = Math.min(1, Math.max(0, anchor.x));
-  const y = Math.min(1, Math.max(0, anchor.y));
-  const w = Number.isFinite(box.w) && box.w > 0 ? box.w : 190;
-  const h = Number.isFinite(box.h) && box.h > 0 ? box.h : 90;
-  const distances = [y * h, (1 - x) * w, (1 - y) * h, x * w];
-  const side = distances.indexOf(Math.min(...distances));
-  return { ...anchor, x: side === 3 ? 0 : side === 1 ? 1 : x,
-    y: side === 0 ? 0 : side === 2 ? 1 : y };
+  return { ...anchor, x: Math.min(1, Math.max(0, anchor.x)),
+    y: Math.min(1, Math.max(0, anchor.y)) };
 }
 
 /** Nearest card side for a normalized anchor, matching `anchorWorld`'s outward normal choice. */
@@ -227,8 +221,9 @@ export function pruneAnchorRegistry(cards, notes) {
         if (id !== MAIN_ANCHOR_ID) removed = true;
         continue;
       }
-      if (keep.has(id)) anchors[id] = anchor;
-      else removed = true;
+      // A manually placed pin is a persistent canvas object even with no links.
+      // Legacy cleanup must not erase it merely because no endpoint refers to it.
+      anchors[id] = anchor;
     }
     if (main) {
       anchors.main = main;

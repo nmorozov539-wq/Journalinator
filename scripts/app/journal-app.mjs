@@ -162,7 +162,8 @@ export default class JournalApp extends ApplicationV2 {
     },
     onFocusNote: id => this.#canvas.focusNote(id),
     onSelectNote: id => { this.#selectedNoteId = id; this.#editor.open(id); this.#editor.render(); },
-    onSetMainPinEnabled: (id, enabled) => this.#setMainPinEnabled(id, enabled)
+    onSetMainPinEnabled: (id, enabled) => this.#setMainPinEnabled(id, enabled),
+    onStamp: (id, trigger) => this.#canvas.openStampPicker(id, trigger)
   });
   // Every canvas action is routed by what it touches: GM-only things go to the vault in this
   // client, everything else is a normal shared write request (spec §14).
@@ -257,6 +258,7 @@ export default class JournalApp extends ApplicationV2 {
     onAddCardAnchor: (noteId, anchor) => this.#addCardAnchor(noteId, anchor),
     onMoveCardAnchor: (noteId, anchorId, x, y) => this.#moveCardAnchor(noteId, anchorId, x, y),
     onRemoveCardAnchor: (noteId, anchorId) => this.#removeCardAnchor(noteId, anchorId),
+    onBoardPinAction: action => requestWrite({ type: "boardPinAction", action }),
     // Route A keeps the original link and appends a main-pin waypoint; Route B is an atomic
     // split whose undo id becomes usable only after the GM's writeApplied acknowledgement.
     onRouteNoteOnLink: (sourceId, linkId, noteId, mode, index, undoId) =>
@@ -272,7 +274,9 @@ export default class JournalApp extends ApplicationV2 {
 
   #private = new PrivateWorkspace({
     onChange: () => this.render(),
-    onSelectionChange: () => this.#syncSelectionControls()
+    onSelectionChange: () => this.#syncSelectionControls(),
+    onSend: noteId => this.#openSendPanel(this.element, null, noteId),
+    onStamp: (noteId, trigger) => this.#private.canvas.openStampPicker(noteId, trigger)
   });
 
   #select(noteId) {
@@ -878,13 +882,13 @@ export default class JournalApp extends ApplicationV2 {
   }
 
   /** Sender popover: recipient (never self), selected count and copy-only/link warnings. */
-  #openSendPanel(root, trigger = null) {
+  #openSendPanel(root, trigger = null, noteId = null) {
     const panel = root.querySelector(".journalinator-transfer-send");
     if (!panel) return;
     if (!game.users?.activeGM) return ui.notifications?.warn(t("JN.Private.NeedGM"));
     if (!panel.hidden) return this.#closeTransferPanels(root);
     if (!this.#private.page) return ui.notifications?.warn(t("JN.Transfer.NoPrivateSpace"));
-    const selected = this.#private.getSelectedNoteIds()
+    const selected = (noteId ? [noteId] : this.#private.getSelectedNoteIds())
       .filter(id => this.#private.workspace?.notes?.[id]);
     if (!selected.length) return ui.notifications?.warn(t("JN.Transfer.None"));
     const recipients = [...(game.users ?? [])]
@@ -894,11 +898,10 @@ export default class JournalApp extends ApplicationV2 {
       user.isGM ? t("JN.Transfer.GM") : "",
       user.active === false ? t("JN.Transfer.Offline") : ""
     ].filter(Boolean).join(", ");
-    const options = recipients.length
-      ? recipients.map(user => `<option value="${foundry.utils.escapeHTML(user.id)}">${
+    const options = `<option value="__main__">${t("JN.Private.MainCanvas")}</option>`
+      + recipients.map(user => `<option value="${foundry.utils.escapeHTML(user.id)}">${
         foundry.utils.escapeHTML(user.name ?? user.id)
-      }${details(user) ? ` (${foundry.utils.escapeHTML(details(user))})` : ""}</option>`).join("")
-      : `<option value="">${t("JN.Transfer.NoRecipients")}</option>`;
+      }${details(user) ? ` (${foundry.utils.escapeHTML(details(user))})` : ""}</option>`).join("");
     const titles = selected
       .map(id => this.#private.workspace?.notes?.[id]?.title ?? "")
       .filter(Boolean);
@@ -918,7 +921,7 @@ export default class JournalApp extends ApplicationV2 {
         <button type="button" class="jn-transfer-close" aria-label="${t("JN.Common.Close")}">×</button>
       </div>
       <label class="jn-transfer-field"><span>${t("JN.Transfer.Recipient")}</span>
-        <select class="jn-transfer-recipient"${recipients.length ? "" : " disabled"}>${options}</select>
+        <select class="jn-transfer-recipient">${options}</select>
       </label>
       <p class="jn-transfer-count">${t("JN.Transfer.SelectedCount", { count: selected.length })}</p>
       ${titles.length ? `<p class="jn-transfer-titles">${titles.map(foundry.utils.escapeHTML).join(", ")}</p>` : ""}
@@ -928,18 +931,38 @@ export default class JournalApp extends ApplicationV2 {
       ${dropWarning}
       <div class="jn-transfer-actions">
         <button type="button" class="jn-transfer-cancel">${t("JN.Common.Cancel")}</button>
-        <button type="button" class="jn-transfer-confirm"${recipients.length ? "" : " disabled"}>${t("JN.Transfer.Send")}</button>
+        <button type="button" class="jn-transfer-confirm">${t("JN.Transfer.Send")}</button>
       </div>`;
     panel.querySelector(".jn-transfer-close")?.addEventListener("click", () => this.#closeTransferPanels(root));
     panel.querySelector(".jn-transfer-cancel")?.addEventListener("click", () => this.#closeTransferPanels(root));
     panel.querySelector(".jn-transfer-confirm")?.addEventListener("click", () => {
       const toUserId = panel.querySelector(".jn-transfer-recipient")?.value;
       if (!toUserId) return;
+      if (toUserId === "__main__") {
+        for (const id of selected) this.#publishPrivateNote(id);
+        this.#closeTransferPanels(root);
+        return;
+      }
       // No optimistic notice: the active GM's writeApplied acknowledgement is the only success.
       requestWrite({ type: "sendPrivateTransfer", toUserId, noteIds: selected });
       this.#closeTransferPanels(root);
     });
-    this.#showTransferPanel(panel, trigger ?? root.querySelector(".journalinator-private-send"));
+    this.#showTransferPanel(panel, trigger ?? root.querySelector(".jn-private-send"));
+  }
+
+  async #publishPrivateNote(id) {
+    const note = this.#private.getNote(id);
+    const card = this.#private.layout()?.cards?.[id];
+    if (!note || !card || !game.users.activeGM) return;
+    await requestWrite({
+      type: "pasteNote", title: note.name?.trim() || t("JN.Private.NewNoteTitle"),
+      blocks: (note.system.blocks ?? []).map(block => block.text),
+      style: cardStyleKey(note.system.style), kind: note.system.kind,
+      targetHeading: note.system.targetHeading ?? "", label: note.system.label ?? "",
+      presentation: note.system.presentation, attachment: note.system.attachment,
+      schemaVersion: note.system.schemaVersion,
+      card: { anchors: card.anchors ?? {} }, x: card.x, y: card.y
+    });
   }
 
   /** Recipient inbox: every pending copy addressed to this user, with Accept/Decline. */
@@ -1096,7 +1119,7 @@ export default class JournalApp extends ApplicationV2 {
       <div class="jn-toolbar-group">
         ${toolbarButton("journalinator-new", "fa-note-sticky", t("JN.TopBar.NewNote"), offline)}
         ${toolbarButton("journalinator-add-label", "fa-font", t("JN.TopBar.AddLabel"), offline)}
-        ${toolbarButton("journalinator-add-link", "fa-link", t("JN.Link.Tool"), offline)}
+        ${toolbarButton("journalinator-add-pin", "fa-thumbtack", t("JN.Pin.Tool"), offline)}
       </div>
       <div class="jn-toolbar-group">
         <details class="jn-toolbar-dropdown journalinator-filters${this.#filterAuthors.size || this.#filterStyles.size ? " on" : ""}">
@@ -1126,7 +1149,7 @@ export default class JournalApp extends ApplicationV2 {
       <div class="jn-toolbar-group">
         ${privatePage ? toolbarButton("journalinator-private-new", "fa-note-sticky", t("JN.TopBar.NewNote")) : ""}
         ${privatePage ? toolbarButton("journalinator-private-add-label", "fa-font", t("JN.TopBar.AddLabel")) : ""}
-        ${privatePage ? toolbarButton("journalinator-private-add-link", "fa-link", t("JN.Link.Tool")) : ""}
+        ${privatePage ? toolbarButton("journalinator-private-add-pin", "fa-thumbtack", t("JN.Pin.Tool")) : ""}
       </div>
       <div class="jn-toolbar-group">
         <details class="jn-toolbar-dropdown journalinator-filters${this.#filterStyles.size ? " on" : ""}">
@@ -1142,8 +1165,6 @@ export default class JournalApp extends ApplicationV2 {
         ${privatePage ? toolbarButton("journalinator-private-stats", "fa-chart-column", t("JN.TopBar.Stats")) : ""}
         ${privatePage ? toolbarButton("journalinator-trash", "fa-trash", trashLabel) : ""}
         ${privatePage ? toolbarButton("journalinator-private-fit", "fa-expand", t("JN.TopBar.FitAll")) : ""}
-        ${toolbarButton("journalinator-private-send", "fa-paper-plane",
-          offline ? t("JN.Private.NeedGM") : t("JN.Transfer.SendTo"), true)}
         ${inboxButton}
         ${context.canManagePrivate ? `<button type="button" class="jn-toolbar-icon journalinator-private-admin"
           ${tooltipAttrs(t("JN.Private.AdminTitle"))}><i class="fa-solid fa-user-shield" aria-hidden="true"></i></button>` : ""}
@@ -1384,8 +1405,8 @@ export default class JournalApp extends ApplicationV2 {
     root.querySelector(".journalinator-private-add-label")?.addEventListener("click", () => {
       this.#private.canvas.addLabelButton();
     });
-    root.querySelector(".journalinator-private-add-link")?.addEventListener("click", () => {
-      this.#private.canvas.toggleLinkTool();
+    root.querySelector(".journalinator-private-add-pin")?.addEventListener("click", () => {
+      this.#private.canvas.togglePinTool();
     });
 
     root.querySelector(".journalinator-new")?.addEventListener("click", () => {
@@ -1395,7 +1416,7 @@ export default class JournalApp extends ApplicationV2 {
     root.querySelector(".journalinator-add-label")?.addEventListener("click", () => {
       this.#canvas.addLabelButton();
     });
-    root.querySelector(".journalinator-add-link")?.addEventListener("click", () => this.#canvas.toggleLinkTool());
+    root.querySelector(".journalinator-add-pin")?.addEventListener("click", () => this.#canvas.togglePinTool());
 
     root.querySelector(".journalinator-trash")?.addEventListener("click", () => {
       if (this.#view === "private") this.#private.openTrash();

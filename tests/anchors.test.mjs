@@ -190,7 +190,7 @@ test("pruneAnchorRegistry drops unsafe keys and only preserves the canonical mai
   assert.deepEqual(Object.keys(changed[0].anchors).sort(), ["main", "used"]);
 });
 
-test("pruneAnchorRegistry removes only unreferenced minor anchors and never main", () => {
+test("pruneAnchorRegistry preserves manually placed pins without connections", () => {
   const cards = {
     a: {
       anchors: {
@@ -223,9 +223,7 @@ test("pruneAnchorRegistry removes only unreferenced minor anchors and never main
   }];
 
   const changed = pruneAnchorRegistry(cards, notes);
-  assert.deepEqual(changed.map(card => card.noteId).sort(), ["a", "c"]);
-  assert.deepEqual(Object.keys(changed.find(card => card.noteId === "a").anchors).sort(), ["m1", "main"]);
-  assert.deepEqual(Object.keys(changed.find(card => card.noteId === "c").anchors).sort(), ["main"]);
+  assert.deepEqual(changed, []);
 
   const second = pruneAnchorRegistry({
     ...cards,

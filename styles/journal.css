@@ -925,7 +925,7 @@
   transform-origin: 0 0;
 }
 
-.jn-links, .jn-link-hits {
+.jn-links, .jn-link-hits, .jn-pin-links {
   position: absolute;
   left: 0;
   top: 0;
@@ -935,6 +935,7 @@
   pointer-events: none;
 }
 .jn-links { z-index: 3; }
+.jn-pin-links { z-index: 4; }
 /* Mask luminance, not paint: white keeps the thread, the card silhouette cuts it out. */
 .jn-thread-mask-bg { fill: #fff; }
 
@@ -1692,6 +1693,20 @@ input.jn-task-checkbox:disabled { cursor: default; }
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+.jn-editor-note-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 0;
+}
+.jn-editor-note-actions button {
+  border: 1px solid var(--jn-line);
+  border-radius: 6px;
+  background: var(--jn-bg);
+  color: var(--jn-text);
+  padding: 5px 8px;
+  cursor: pointer;
 }
 .jn-note-tool { position: relative; }
 .jn-note-tool summary,

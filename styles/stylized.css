@@ -819,7 +819,8 @@
 .jn-canvas .jn-card.jn-pins-disabled .jn-card-pins {
   display: none;
 }
-.jn-canvas .jn-card .jn-pin {
+.jn-canvas .jn-card .jn-pin,
+.jn-canvas .jn-board-pin-control {
   --jn-pin-color: #8d8d97;
   position: absolute;
   /* The card lives inside the zoom-scaled world. --jn-zoom-comp = 1/k, so multiplying the DOM
@@ -844,9 +845,11 @@
   touch-action: none;
   -webkit-tap-highlight-color: transparent;
 }
-.jn-canvas .jn-card .jn-pin-main {
+.jn-canvas .jn-card .jn-pin-main,
+.jn-canvas .jn-board-pin-control {
   --jn-pin-color: var(--jn-author-color, #8d8d97);
 }
+.jn-canvas .jn-world > .jn-board-pin-control { z-index: 5; }
 .jn-canvas .jn-card .jn-pin-minor {
   width: var(--jn-minor-pin-size, 7px);
   height: var(--jn-minor-pin-size, 7px);
@@ -862,7 +865,8 @@
 }
 /* The visual head may be only ~9 screen px; the transparent pseudo-element keeps a ~14px screen
    target at every zoom (main inherits its 20px head). */
-.jn-canvas .jn-card .jn-pin::after {
+.jn-canvas .jn-card .jn-pin::after,
+.jn-canvas .jn-board-pin-control::after {
   content: "";
   position: absolute;
   left: 50%;
@@ -872,7 +876,8 @@
   transform: translate(-50%, -50%);
   border-radius: 50%;
 }
-.jn-canvas .jn-card .jn-pin::before {
+.jn-canvas .jn-card .jn-pin::before,
+.jn-canvas .jn-board-pin-control::before {
   content: "";
   position: absolute;
   inset: 0;
@@ -896,7 +901,8 @@
 
 /* Enamel is the default look: author-coloured head with a dark, legible metal rim. */
 .jn-canvas .jn-card .jn-pin-style-enamel::before,
-.jn-canvas .jn-card .jn-pin-style-default::before {
+.jn-canvas .jn-card .jn-pin-style-default::before,
+.jn-canvas .jn-board-pin-control::before {
   background: var(--jn-pin-color);
   border: 2px solid #322820;
   box-shadow:

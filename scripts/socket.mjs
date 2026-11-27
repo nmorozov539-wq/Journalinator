@@ -9,6 +9,7 @@ import {
   defaultMainAnchor, minorOnEdge, pruneAnchorRegistry, projectToEdge, redistributionAnchor, validAnchorId
 } from "./anchors.mjs";
 import { isLinkColor, normalizeLinkColor } from "./link-colors.mjs";
+import { boardPinRef, resolvePin, validPinPosition } from "./board-pins.mjs";
 import { noteImagePath } from "./image-url.mjs";
 import { reconcileTypedLinks } from "./wikilinks.mjs";
 import { maybeSnapshot } from "./snapshots.mjs";
@@ -1656,6 +1657,92 @@ async function handleMessage(message, senderUserId) {
       const ids = label.noteId && stampUrl(label.stamp)
         ? attachedStampIds(layout.system.labels, label.noteId) : [message.labelId];
       await layout.update(Object.fromEntries(ids.map(id => [`system.labels.-=${id}`, null])));
+      return;
+    }
+
+    case "boardPinAction": {
+      const action = message.action;
+      if (!["add", "move", "connect"].includes(action?.type) || !pinsEnabled()) return;
+      const layout = layoutPage(shared);
+      if (!layout) return;
+      const cards = layout.system.cards ?? {};
+      const pins = { ...(layout.system.pins ?? {}) };
+      const pinLinks = { ...(layout.system.pinLinks ?? {}) };
+      const live = new Map(allSharedNoteList(shared).filter(isLiveSharedNotePage)
+        .map(page => [page.id, page]));
+      const boxes = new Map([...live].filter(([id]) => cards[id])
+        .map(([id, page]) => [id, cardBox(page, cards[id])]));
+      const current = { cards, pins, pinLinks };
+      if (action.type === "add") {
+        const noteId = action.noteId || "";
+        if (noteId && !live.has(noteId)) return;
+        if (!validPinPosition(noteId, action.x, action.y)
+            || Object.keys(pins).length >= 2000) return;
+        pins[foundry.utils.randomID()] = { noteId, x: action.x, y: action.y,
+          isDefault: false };
+        await layout.update({ "system.pins": pins });
+        return;
+      }
+      if (action.type === "connect") {
+        if (typeof action.source !== "string" || typeof action.target !== "string"
+            || action.source === action.target || Object.keys(pinLinks).length >= 4000
+            || !resolvePin(action.source, current, boxes)
+            || !resolvePin(action.target, current, boxes)) return;
+        if (Object.values(pinLinks).some(link => link.source === action.source
+            && link.target === action.target || link.source === action.target
+            && link.target === action.source)) return;
+        pinLinks[foundry.utils.randomID()] = { source: action.source, target: action.target };
+        await layout.update({ "system.pinLinks": pinLinks });
+        return;
+      }
+      const noteId = action.noteId || "";
+      if (noteId && !live.has(noteId)) return;
+      if (!validPinPosition(noteId, action.x, action.y)) return;
+      const ref = action.ref;
+      if (typeof ref !== "string" || ref.length > 200) return;
+      let id = ref.startsWith("p:") ? ref.slice(2) : "";
+      const pageUpdates = new Map();
+      if (!id && ref.startsWith("n:")) {
+        const split = ref.indexOf(":", 2);
+        if (split < 0) return;
+        const oldNoteId = ref.slice(2, split), anchorId = ref.slice(split + 1);
+        if (!live.has(oldNoteId) || !validAnchorId(anchorId)) return;
+        const card = cards[oldNoteId], anchor = card?.anchors?.[anchorId];
+        if (!anchor || anchor.kind !== "minor") return;
+        id = foundry.utils.randomID();
+        const anchors = { ...card.anchors };
+        delete anchors[anchorId];
+        const newRef = boardPinRef(id);
+        for (const owner of allSharedNoteList(shared)) {
+          let touched = false;
+          const links = (owner.system.links ?? []).map(link => {
+            let next = link;
+            if (owner.id === oldNoteId && link.sourceAnchorId === anchorId) {
+              next = { ...next, sourcePinRef: newRef, sourceAnchorId: "" };
+            }
+            if (link.targetId === oldNoteId && link.targetAnchorId === anchorId) {
+              next = { ...next, targetPinRef: newRef, targetAnchorId: "" };
+            }
+            if (next !== link) touched = true;
+            return next;
+          });
+          if (touched) pageUpdates.set(owner.id, links);
+        }
+        for (const link of Object.values(pinLinks)) {
+          if (link.source === ref) link.source = newRef;
+          if (link.target === ref) link.target = newRef;
+        }
+        pins[id] = { noteId, x: action.x, y: action.y, isDefault: false };
+        await layout.update({ [`system.cards.${oldNoteId}.anchors`]: anchors,
+          "system.pins": pins, "system.pinLinks": pinLinks });
+        for (const [ownerId, links] of pageUpdates) {
+          await shared.pages.get(ownerId)?.update({ "system.links": links });
+        }
+        return;
+      }
+      if (!validAnchorId(id) || !pins[id] || pins[id].isDefault) return;
+      pins[id] = { noteId, x: action.x, y: action.y, isDefault: false };
+      await layout.update({ "system.pins": pins });
       return;
     }
 

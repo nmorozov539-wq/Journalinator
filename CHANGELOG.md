@@ -2,7 +2,31 @@
 
 These notes start with the small board and toolbar polish patches and cover the follow-up fixes and features.
 
-## Unreleased — Themes, images, and link styling
+## 0.9.3 — Canvas gestures and free pins
+
+- Double-click a note's text to edit it, or double-click empty canvas to create a note there.
+  A single click selects without opening the editor, and a double-click on a note or pin does
+  not create a note underneath it.
+- Right-button dragging pans the camera even when it starts on a note or pin. Note actions
+  moved to the right panel, and the interactive canvas no longer opens a browser context menu.
+- The Connection tool was replaced by one **Pin** tool. Every new note has a fixed top-center
+  default pin. Extra pins can be placed anywhere on a note or on empty canvas without edge
+  snapping. All pins share the primary pin appearance.
+- Start connections from any pin with a click or a drag. A click leaves a preview thread
+  following the pointer; click a destination pin or note body to finish. Dropping on a note body
+  uses that note's default pin. Clicking empty canvas or the source pin cancels the preview.
+- Move a manually placed pin by double-clicking it to pick it up, or by dragging on the second
+  press of a double-click. Pins can move between notes and the canvas without losing their
+  connections. The fixed default pin cannot be moved.
+- Threads may reach pins from any direction and cross notes without an outside-edge hook.
+- The selected private note has one **Send to…** action in the right panel. It offers the Main
+  Canvas and eligible private canvases. Publishing or transferring a private note leaves the
+  source in place; a GM's existing secret-note publication still removes its secret source.
+- Saved canvases retain pin identity, ownership, exact position, and connection endpoints.
+  Existing notes and legacy anchor-linked connections remain readable; moving a legacy pin
+  converts its endpoints to the new pin reference format.
+
+## 0.9.2 — Themes, images, and canvas fixes
 
 - Themes are now data, not a two-value switch: a theme controls the board background (colour,
   dots/grid pattern, size, opacity, vignette, local image), every note type's surface, edge,
@@ -27,11 +51,12 @@ These notes start with the small board and toolbar polish patches and cover the 
 - Link pins, arrows, and labels keep a steadier size while zooming.
 - A **Patch notes** button in the bottom-left corner of the canvas opens this changelog. Versions
   are grouped into foldable series and shown one at a time.
-- **Prototype — actor status badges:** a GM can right-click a note and choose **Link actor…**.
-  While the linked actor has the core **Dead** status, the card shows a small skull. Linking a
-  scene follows that scene's tokens, so an unlinked actor can be dead in one scene and alive in
-  another. The badge is derived per client from documents that client can already see; actor
-  state is never copied into the shared journal.
+- Pin rendering now measures the finished note, keeping attachments aligned with notes whose
+  text or images change their size. Existing pins stay visible as the primary thread endpoints.
+- Pin and link writes refresh the final canvas state after Foundry document updates, reducing
+  brief endpoint jumps. Removing a connection cleans up stale legacy minor anchors.
+- Scene-control activation checks handle Foundry's tool collections consistently, and the
+  toolbar's Trash button is available on the private canvas when it has a workspace.
 
 ## 0.9.1 — Safe deletion and control-mode fixes
 

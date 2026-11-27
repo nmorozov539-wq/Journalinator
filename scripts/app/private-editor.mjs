@@ -296,6 +296,11 @@ export default class PrivateNoteEditor {
           title="${t("JN.Common.Delete")}" aria-label="${t("JN.Common.Delete")}">
           <i class="fa-solid fa-trash" aria-hidden="true"></i></button>
       </div>
+      <div class="jn-editor-note-actions">
+        <button type="button" class="jn-private-send" ${game.users.activeGM ? "" : "disabled"}>${t("JN.Transfer.SendTo")}</button>
+        <button type="button" class="jn-edit-background">${t("JN.Editor.ChangeBackground")}</button>
+        <button type="button" class="jn-edit-stamp">${t("JN.Stamp.Add")}</button>
+      </div>
       <div class="jn-doc" hidden></div>`;
 
     this.#bindHandlers(note);
@@ -303,6 +308,10 @@ export default class PrivateNoteEditor {
 
   #bindHandlers(note) {
     const noteId = this.noteId;
+    this.root.querySelector(".jn-private-send")?.addEventListener("click", () => this.callbacks.onSend?.(noteId));
+    this.root.querySelector(".jn-edit-background")?.addEventListener("click", () => this.editNoteImage(noteId, true));
+    this.root.querySelector(".jn-edit-stamp")?.addEventListener("click", event =>
+      this.callbacks.onStamp?.(noteId, event.currentTarget));
     const titleButton = this.root.querySelector(".jn-inline-title");
     titleButton?.addEventListener("click", () => {
       const input = document.createElement("input");

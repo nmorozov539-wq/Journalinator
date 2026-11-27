@@ -74,6 +74,8 @@ export default class NoteModel extends foundry.abstract.TypeDataModel {
         // anchor registry; links store IDs so resizing/rotation cannot drift duplicates.
         sourceAnchorId: new fields.StringField({ required: false, blank: true, initial: "" }),
         targetAnchorId: new fields.StringField({ required: false, blank: true, initial: "" }),
+        sourcePinRef: new fields.StringField({ required: false, blank: true, initial: "" }),
+        targetPinRef: new fields.StringField({ required: false, blank: true, initial: "" }),
         routeAnchors: new fields.ArrayField(new fields.SchemaField({
           noteId: new fields.DocumentIdField(),
           anchorId: new fields.StringField({ required: true })
