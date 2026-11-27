@@ -167,9 +167,13 @@ export default class JournalCanvas {
     this.hoverPinRef = null;
     this.pinOverride = null;
     this.pendingPinDrop = null;
-    // Note attachment pins are DOM elements on the card, not SVG route pins. `anchorDrag` keeps
-    // a live minor-pin position between pointer frames without writing to the persisted layout.
-    this.anchorDrag = null;
+    // A pin drag repaints only the threads and pin links touching the moving pin, once per
+    // frame. The ghost itself is positioned in the pointer event so it never trails the cursor.
+    this.pinDragFrame = null;
+    this.pinDragCancel = null;
+    // In-place handles for the pin-link SVG. Keeping them lets a drag update path data without
+    // re-parsing the whole pin-link markup.
+    this.pinLinkEls = new Map();
     this.pinsEnabled = null; // null = read the world setting; boolean lets JournalApp/tests override
     this.pinTarget = null;
     this.snappedPinEl = null;
@@ -273,12 +277,6 @@ export default class JournalCanvas {
           && Math.abs(savedPin.x - pending.x) < 1e-9
           && Math.abs(savedPin.y - pending.y) < 1e-9) this.#clearPendingPinDrop();
     }
-    // Unrelated document updates can arrive while a pin is being dragged or its write is
-    // pending. Keep the local endpoint until this exact anchor reaches the requested position.
-    const moving = this.anchorDrag;
-    const saved = moving && this.layout.cards?.[moving.noteId]?.anchors?.[moving.anchorId];
-    if (moving && (!saved || (Math.abs(saved.x - moving.x) < 0.0001
-        && Math.abs(saved.y - moving.y) < 0.0001))) this.anchorDrag = null;
     if (dimMatch) this.dimMatch = dimMatch;
     for (const id of this.selectedLabelIds) {
       if (!this.layout.labels?.[id]) this.selectedLabelIds.delete(id);
@@ -413,9 +411,9 @@ export default class JournalCanvas {
     this.zoomFrame = null;
     this.threads.clear();
     this.pinDrag = null;
+    this.#cancelPinDragFrame();
     this.#cancelPinInteraction();
     this.#clearPendingPinDrop();
-    this.anchorDrag = null;
     this.pinTarget = null;
     this.snappedPinEl = null;
     this.movingThreads.clear();
@@ -605,9 +603,7 @@ export default class JournalCanvas {
         const creator = game.users?.get?.(anchor.createdBy);
         if (creator?.color) pin.style.setProperty("--jn-pin-color", creator.color);
       }
-      const drag = this.anchorDrag;
-      const point = main ? anchor : minorOnEdge(drag?.noteId === note._id && drag.anchorId === anchorId
-        ? { ...anchor, x: drag.x, y: drag.y } : anchor, box);
+      const point = main ? anchor : minorOnEdge(anchor, box);
       const x = point.x;
       const y = point.y;
       const world = anchorWorld(this.#cardBox(note._id), { x, y, kind: main ? "main" : "minor" });
@@ -642,14 +638,16 @@ export default class JournalCanvas {
     }
   }
 
-  #pinPoint(ref) {
+  #pinPoint(ref, boxes = null) {
     if (this.pinOverride?.ref === ref) return this.pinOverride.point;
-    return resolvePin(ref, this.layout, new Map([...this.cardEls.keys()].map(id => [id, this.#cardBox(id)])));
+    return resolvePin(ref, this.layout, boxes
+      ?? new Map([...this.cardEls.keys()].map(id => [id, this.#cardBox(id)])));
   }
 
   #syncPinPositions() {
+    const boxes = new Map([...this.cardEls.keys()].map(id => [id, this.#cardBox(id)]));
     for (const pin of this.pinLayer.querySelectorAll("[data-pin-ref]")) {
-      const point = this.#pinPoint(pin.dataset.pinRef);
+      const point = this.#pinPoint(pin.dataset.pinRef, boxes);
       if (!point) continue;
       pin.style.left = `${point.x}px`;
       pin.style.top = `${point.y}px`;
@@ -659,8 +657,9 @@ export default class JournalCanvas {
   #drawPinLinks() {
     for (const [id, link] of this.linksById) if (link.boardPinLink) this.linksById.delete(id);
     const pieces = [];
+    const boxes = new Map([...this.cardEls.keys()].map(id => [id, this.#cardBox(id)]));
     for (const [id, link] of Object.entries(this.layout.pinLinks ?? {})) {
-      const start = this.#pinPoint(link.source), end = this.#pinPoint(link.target);
+      const start = this.#pinPoint(link.source, boxes), end = this.#pinPoint(link.target, boxes);
       if (!start || !end) continue;
       const cosmetics = resolveLinkCosmetics(link);
       const { path: d, center } = pinnedThreadPath({ ...start, nx: 0, ny: 0 },
@@ -682,18 +681,55 @@ export default class JournalCanvas {
         mx: center.x, my: center.y });
     }
     this.pinLinksSvg.innerHTML = pieces.join("");
+    this.pinLinkEls = new Map([...this.pinLinksSvg.querySelectorAll("g[data-pin-link]")].map(group => [
+      group.dataset.pinLink,
+      {
+        group,
+        lines: [...group.querySelectorAll(".jn-thread-layer")],
+        hit: group.querySelector(".jn-pin-link-hit"),
+        label: group.querySelector(".jn-link-label")
+      }
+    ]));
   }
 
-  /** Persisted anchor plus an in-progress minor-pin drag override. */
+  /**
+   * Fast path for a live pin drag: only pin links touching `ref` change, so reuse their group,
+   * stroke paths, hit path and label instead of rebuilding every pin-link node.
+   */
+  #updatePinLinkGeometry(ref, boxes = null) {
+    const resolved = boxes ?? new Map([...this.cardEls.keys()].map(id => [id, this.#cardBox(id)]));
+    for (const [id, link] of Object.entries(this.layout.pinLinks ?? {})) {
+      if (!link || link.source !== ref && link.target !== ref) continue;
+      const start = this.#pinPoint(link.source, resolved), end = this.#pinPoint(link.target, resolved);
+      const entry = this.pinLinkEls.get(id);
+      // A missing endpoint or element means the structure changed under the drag (for example
+      // the pin was deleted); fall back to the complete draw rather than leaving stale markup.
+      if (!start || !end || !entry) {
+        this.#drawPinLinks();
+        return;
+      }
+      const cosmetics = resolveLinkCosmetics(link);
+      const { path: d, center } = pinnedThreadPath({ ...start, nx: 0, ny: 0 },
+        { ...end, nx: 0, ny: 0 }, [], null, cosmetics.slack);
+      for (const line of entry.lines) line.setAttribute("d", d);
+      entry.hit?.setAttribute("d", d);
+      entry.label?.setAttribute("x", center.x);
+      entry.label?.setAttribute("y", center.y + 4);
+      const stored = this.linksById.get(id);
+      if (stored) {
+        stored.mx = center.x;
+        stored.my = center.y;
+        if (id === this.selectedLinkId) this.#positionLinkToolbar(stored);
+      }
+    }
+  }
+
+  /** Persisted anchor projected onto its card edge. Live pin drags use `pinOverride`. */
   #cardAnchor(noteId, anchorId) {
     if (!validAnchorId(anchorId)) return null;
     const anchors = this.layout.cards?.[noteId]?.anchors;
     const anchor = anchors && Object.hasOwn(anchors, anchorId) ? anchors[anchorId] : null;
     if (!anchor) return null;
-    const drag = this.anchorDrag;
-    if (drag && drag.noteId === noteId && drag.anchorId === anchorId) {
-      return minorOnEdge({ ...anchor, x: drag.x, y: drag.y }, this.#cardBox(noteId));
-    }
     return minorOnEdge(anchor, this.#cardBox(noteId));
   }
 
@@ -1003,9 +1039,9 @@ export default class JournalCanvas {
       ?? threadAttachment(sourceBox, link.sourcePoint, sourceSide);
     const r = this.#anchorAttachment(link.targetId, targetBox, link.targetAnchorId)
       ?? threadAttachment(targetBox, link.targetPoint, targetSide);
-    const sourcePin = link.sourcePinRef && this.#pinPoint(link.sourcePinRef)
+    const sourcePin = link.sourcePinRef && this.#pinPoint(link.sourcePinRef, boxes)
       || this.pinOverride?.ref === pinRef(note._id, link.sourceAnchorId) && this.pinOverride.point;
-    const targetPin = link.targetPinRef && this.#pinPoint(link.targetPinRef)
+    const targetPin = link.targetPinRef && this.#pinPoint(link.targetPinRef, boxes)
       || this.pinOverride?.ref === pinRef(link.targetId, link.targetAnchorId) && this.pinOverride.point;
     if (sourcePin) Object.assign(p, sourcePin, { nx: 0, ny: 0 });
     if (targetPin) Object.assign(r, targetPin, { nx: 0, ny: 0 });
@@ -1346,9 +1382,12 @@ export default class JournalCanvas {
     return true;
   }
 
-  /** Geometry-only refresh: recompute paths, pins, labels, hits and mask points in place. */
-  #updateLinkGeometry(links, boxes, animate, dimmedIds) {
-    const threads = new Map();
+  /**
+   * Geometry-only refresh: recompute paths, pins, labels, hits and mask points in place.
+   * `partial` keeps every other thread untouched, which is what a live pin drag needs.
+   */
+  #updateLinkGeometry(links, boxes, animate, dimmedIds, { partial = false } = {}) {
+    const threads = partial ? new Map(this.threads) : new Map();
     for (const entry of links) {
       const { note, link } = entry;
       const { p, r, cosmetics, pins, routePoints, waypoints, motion } = this.#resolveThread(entry, boxes, animate);
@@ -1356,7 +1395,10 @@ export default class JournalCanvas {
       const key = String(link.id);
       const group = this.linkGroupEls.get(key);
       const hit = this.linkHitEls.get(key);
-      if (!group || !hit) return false;
+      if (!group || !hit) {
+        if (partial) continue;
+        return false;
+      }
       const previous = this.threads.get(link.id);
       const thread = {
         start: p, end: r, pins, routePoints, waypoints, motion, group, hit,
@@ -1396,8 +1438,17 @@ export default class JournalCanvas {
       this.linksById.set(link.id, { sourceId: note._id, targetId: link.targetId, mx, my, ...link });
     }
     this.threads = threads;
-    this.movingThreads = new Set([...threads].filter(([, thread]) => thread.motion.moving).map(([id]) => id));
-    if (!this.#updateThreadMask(boxes, threads)) return false;
+    if (partial) {
+      for (const { link } of links) {
+        const thread = threads.get(link.id);
+        if (!thread) continue;
+        if (thread.motion.moving) this.movingThreads.add(link.id);
+        else this.movingThreads.delete(link.id);
+      }
+    } else {
+      this.movingThreads = new Set([...threads].filter(([, thread]) => thread.motion.moving).map(([id]) => id));
+      if (!this.#updateThreadMask(boxes, threads)) return false;
+    }
     this.#syncMaskState();
     if (animate && this.movingThreads.size) this.#requestThreadFrame();
     return true;
@@ -1559,6 +1610,84 @@ export default class JournalCanvas {
       this.linkDrawTimer = null;
       this.refreshGeometry();
     });
+  }
+
+  #cancelPinDragFrame() {
+    if (this.pinDragFrame === null) return;
+    this.pinDragCancel?.(this.pinDragFrame);
+    this.pinDragFrame = null;
+  }
+
+  /** At most one local pin-drag repaint per frame; the ghost itself already follows the pointer. */
+  #schedulePinDragPaint() {
+    if (this.pinDragFrame !== null) return;
+    const view = this.root.ownerDocument.defaultView;
+    if (!view?.requestAnimationFrame) {
+      this.#paintPinDrag();
+      return;
+    }
+    this.pinDragCancel = view.cancelAnimationFrame.bind(view);
+    this.pinDragFrame = view.requestAnimationFrame(() => {
+      this.pinDragFrame = null;
+      this.#paintPinDrag();
+    });
+  }
+
+  /** Normal links attached to `ref`, mirroring the endpoint precedence in `#resolveThread`. */
+  #linksTouchingPin(ref) {
+    const split = ref.startsWith("n:") ? ref.indexOf(":", 2) : -1;
+    const noteId = split >= 0 ? ref.slice(2, split) : "";
+    const anchorId = split >= 0 ? ref.slice(split + 1) : "";
+    const entries = [];
+    for (const note of this.notes) {
+      for (const link of note.system.links ?? []) {
+        if (!this.cardEls.has(note._id) || !this.cardEls.has(link.targetId)) continue;
+        const sourceHit = link.sourcePinRef === ref
+          || !!noteId && note._id === noteId && link.sourceAnchorId === anchorId;
+        const targetHit = link.targetPinRef === ref
+          || !!noteId && link.targetId === noteId && link.targetAnchorId === anchorId;
+        if (!sourceHit && !targetHit) continue;
+        const a = this.#cardBox(note._id), b = this.#cardBox(link.targetId);
+        entries.push({
+          note, link,
+          sourceSide: CARD_SIDES.includes(link.sourceSide) ? link.sourceSide : this.#facingSide(a, b),
+          targetSide: CARD_SIDES.includes(link.targetSide) ? link.targetSide : this.#facingSide(b, a)
+        });
+      }
+    }
+    return entries;
+  }
+
+  /** Local repaint for a live pin drag: only threads/pin links touching the moving pin. */
+  #paintPinDrag() {
+    const override = this.pinOverride;
+    if (!override?.point) return;
+    // Keep the hidden source element on the same world point as the ghost, so any later
+    // geometry pass during the drag sees the live position instead of the stored layout.
+    const sourcePin = this.pinInteraction?.pinEl;
+    if (sourcePin) {
+      sourcePin.style.left = `${override.point.x}px`;
+      sourcePin.style.top = `${override.point.y}px`;
+    }
+    const boxes = new Map([...this.cardEls.keys()].map(id => [id, this.#cardBox(id)]));
+    const links = this.#linksTouchingPin(override.ref);
+    if (links.length) this.#updateLinkGeometry(links, boxes, false, null, { partial: true });
+    this.#updatePinLinkGeometry(override.ref, boxes);
+    this.#ensureThreadMaskContains(override.point, boxes);
+  }
+
+  /** Grow the stable fade mask only when the dragged pin approaches its clipped bounds. */
+  #ensureThreadMaskContains(point, boxes) {
+    const mask = this.svg.querySelector("mask");
+    const rect = mask?.querySelector(".jn-thread-mask-bg");
+    if (!mask || !rect) return;
+    const x = Number(mask.getAttribute("x")), y = Number(mask.getAttribute("y"));
+    const width = Number(mask.getAttribute("width")), height = Number(mask.getAttribute("height"));
+    if (![x, y, width, height].every(Number.isFinite)) return;
+    const pad = 120;
+    if (point.x >= x + pad && point.x <= x + width - pad
+        && point.y >= y + pad && point.y <= y + height - pad) return;
+    this.#updateThreadMask(boxes, this.threads);
   }
 
   #flushLinkDraw() {
@@ -2566,6 +2695,7 @@ export default class JournalCanvas {
 
   #cancelPinInteraction({ pending = false } = {}) {
     if (!this.pinInteraction) return;
+    this.#cancelPinDragFrame();
     const ghost = this.pinInteraction.ghost;
     this.pinInteraction = null;
     if (!pending) this.pinOverride = null;
@@ -2589,7 +2719,9 @@ export default class JournalCanvas {
     } else {
       this.pinOverride = { ref: state.sourceRef, point: { ...point, nx: 0, ny: 0, movable: true } };
       for (const pin of this.root.querySelectorAll("[data-pin-ref]")) {
-        if (pin.dataset.pinRef === state.sourceRef) pin.style.visibility = "hidden";
+        if (pin.dataset.pinRef !== state.sourceRef) continue;
+        pin.style.visibility = "hidden";
+        state.pinEl = pin;
       }
       if (!state.ghost) {
         const ghost = document.createElement("button");
@@ -2599,9 +2731,11 @@ export default class JournalCanvas {
         this.pinLayer.append(ghost);
         state.ghost = ghost;
       }
+      // The ghost follows the pointer immediately; connected geometry catches up in the next
+      // animation frame without rebuilding the whole SVG or the floating toolbars.
       state.ghost.style.left = `${point.x}px`;
       state.ghost.style.top = `${point.y}px`;
-      this.#flushLinkDraw();
+      this.#schedulePinDragPaint();
     }
   }
 
@@ -2623,6 +2757,13 @@ export default class JournalCanvas {
     const box = noteId ? this.#cardBox(noteId) : null;
     const local = box ? cardNormalizedPoint(box, point) : point;
     if (!local) return this.#cancelPinInteraction();
+    // Pointerup can arrive at a new point without a final pointermove; keep the ghost and the
+    // local override on that exact world point while the single write is in flight.
+    this.pinOverride = { ref: state.sourceRef, point: { ...point, nx: 0, ny: 0, movable: true } };
+    if (state.ghost) {
+      state.ghost.style.left = `${point.x}px`;
+      state.ghost.style.top = `${point.y}px`;
+    }
     const write = this.callbacks.onBoardPinAction?.({ type: "move", ref: state.sourceRef,
       noteId, x: local.x, y: local.y });
     const pending = { ref: state.sourceRef, noteId, x: local.x, y: local.y,
@@ -3240,7 +3381,6 @@ export default class JournalCanvas {
       const stampId = this.readOnly ? null : ev.target.closest("[data-stamp-label-id]")?.dataset.stampLabelId;
       const linkHit = ev.target.closest(".jn-link-hit, .jn-pin-link-hit");
       const pin = this.readOnly ? null : ev.target.closest("[data-pin-index]");
-      const notePin = ev.target.closest(".jn-pin");
       if (ev.button !== 0 || cardEl || labelEl || linkHit) lastBoardClick = null;
 
       // Middle mouse always pans, even when the pointer starts over a card, handle, or link.
@@ -3264,14 +3404,6 @@ export default class JournalCanvas {
         const id = resizeHandle.closest(".jn-card").dataset.id;
         const el = this.cardEls.get(id);
         drag = { type: "resize", id, sx: ev.clientX, sy: ev.clientY, ow: el.offsetWidth, oh: el.offsetHeight, moved: 0 };
-      } else if (notePin) {
-        // Pins own their gestures even when they overlap note text or paper.
-        const card = notePin.closest(".jn-card");
-        drag = {
-          type: "note-pin", id: card.dataset.id, anchorId: notePin.dataset.anchorId,
-          sx: ev.clientX, sy: ev.clientY, moved: 0,
-          readOnly: this.readOnly || notePin.dataset.anchorKind === "main"
-        };
       } else if (cardEl) {
         const initialLabelIds = [...this.selectedLabelIds];
         this.#highlightLabels([]);
@@ -3354,20 +3486,6 @@ export default class JournalCanvas {
         el.classList.add("jn-sized");
         this.cardSizes.delete(drag.id);
         this.#queueLinkDraw();
-      } else if (drag.type === "note-pin" && drag.moved > DRAG_THRESHOLD) {
-        if (drag.readOnly) return;
-        const world = this.#toWorld(ev.clientX, ev.clientY);
-        const box = this.#cardBox(drag.id);
-        const normalized = cardNormalizedPoint(box, world);
-        const point = normalized && minorOnEdge({ kind: "minor", ...normalized }, box);
-        if (!point) return;
-        this.anchorDrag = { noteId: drag.id, anchorId: drag.anchorId, x: point.x, y: point.y };
-        const pin = this.#pinElement(drag.id, drag.anchorId);
-        if (pin) {
-          pin.style.left = `${point.x * 100}%`;
-          pin.style.top = `${point.y * 100}%`;
-        }
-        this.#queueLinkDraw();
       } else if (drag.type === "card") {
         if (drag.readOnly) return;
         for (const id of drag.ids) {
@@ -3445,37 +3563,6 @@ export default class JournalCanvas {
           const local = noteId ? cardNormalizedPoint(this.#cardBox(noteId), point) : point;
           if (local) this.callbacks.onBoardPinAction?.({ type: "add", noteId,
             x: local.x, y: local.y });
-        }
-      } else if (drag.type === "note-pin") {
-        const move = this.anchorDrag;
-        if (wasClick) {
-          this.#setSelection([drag.id], drag.id);
-        } else if (move && !drag.readOnly && ev.type === "pointerup") {
-          const noteId = drag.id, anchorId = drag.anchorId;
-          const write = this.callbacks.onMoveCardAnchor?.(noteId, anchorId, move.x, move.y);
-          // Keep the preview while the GM write travels back through document sync. Clearing
-          // it here made the pin and every attached thread jump to the old position on release.
-          move.pending = true;
-          const restorePin = () => {
-            if (this.anchorDrag === move) this.anchorDrag = null;
-            const stored = this.layout.cards?.[noteId]?.anchors?.[anchorId];
-            const pin = this.#pinElement(noteId, anchorId);
-            if (stored && pin) {
-              pin.style.left = `${stored.x * 100}%`;
-              pin.style.top = `${stored.y * 100}%`;
-            }
-            this.#flushLinkDraw();
-          };
-          Promise.resolve(write).then(result => {
-            if (result === false) restorePin();
-            else {
-              this.#flushLinkDraw();
-              setTimeout(() => { if (this.anchorDrag === move) restorePin(); }, 2000);
-            }
-          }).catch(restorePin);
-        } else if (!wasClick) {
-          this.anchorDrag = null;
-          this.#flushLinkDraw();
         }
       } else if (drag.type === "pin") {
         const move = this.pinDrag;

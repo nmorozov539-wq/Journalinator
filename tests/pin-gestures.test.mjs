@@ -21,9 +21,11 @@ const { notesStore } = await import("../scripts/store/notes-store.mjs");
 const { default: JournalCanvas } = await import("../scripts/app/canvas.mjs");
 registerSocket();
 const tick = () => new Promise(resolve => setTimeout(resolve, 50));
+const frame = () => new Promise(resolve => dom.window.requestAnimationFrame(() => resolve()));
 const event = (target, type, x = 0, y = 0, button = 0) => target.dispatchEvent(
   new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, button })
 );
+const screenPoint = (canvas, x, y) => [x * canvas.view.k + canvas.view.x, y * canvas.view.k + canvas.view.y];
 
 test("pin tool and all four pin gestures use distinct pointer transactions", async () => {
   await requestWrite({ type: "createNote", title: "Pin A", x: 10, y: 20 });
@@ -391,6 +393,135 @@ test("right drag pans over notes and pins; only text and empty-board double clic
   assert.equal(canvas.contextMenu.style.display, "flex");
   canvas.contextMenu.querySelector('[data-action="note"]').click();
   assert.equal(calls.filter(call => call[0] === "create").length, 1);
+  canvas.disconnectGeometry();
+  canvas.root.remove();
+});
+
+test("pin drag repaints attached threads and pin links in place before release", async () => {
+  await requestWrite({ type: "createNote", title: "Drag Pin A", x: 40, y: 40 });
+  await requestWrite({ type: "createNote", title: "Drag Pin B", x: 560, y: 340 });
+  await tick();
+  const notes = notesStore.getAllNotes();
+  const a = notes.find(note => note.name === "Drag Pin A");
+  const b = notes.find(note => note.name === "Drag Pin B");
+  assert.ok(a && b);
+  await requestWrite({ type: "boardPinAction", action: { type: "add", noteId: a.id, x: 0.25, y: 0.75 } });
+  await requestWrite({ type: "boardPinAction", action: { type: "add", noteId: "", x: 900, y: 700 } });
+  await tick();
+  const layout = structuredClone(notesStore.getLayout());
+  const ownedId = Object.keys(layout.pins).find(id => layout.pins[id].noteId === a.id);
+  const freeId = Object.keys(layout.pins).find(id => layout.pins[id].noteId === "");
+  assert.ok(ownedId && freeId);
+  layout.pinLinks = { dragPinLink: {
+    source: `p:${ownedId}`, target: `p:${freeId}`, label: "pin link",
+    color: "", secondaryColor: "", material: "linen", thickness: 2.6, slack: 0.09,
+    pattern: "continuous", ends: "standard"
+  } };
+  const dragNotes = structuredClone(notes);
+  const linkId = "dragNormalLink";
+  dragNotes.find(note => note._id === a.id).system.links = [{
+    id: linkId, targetId: b.id, sourcePinRef: `p:${ownedId}`, sourceAnchorId: "",
+    targetPinRef: "", targetAnchorId: "main", sourceSide: "right", targetSide: "left",
+    color: "", label: "normal"
+  }];
+  const actions = [];
+  const canvas = new JournalCanvas({ onSelectNote() {},
+    onBoardPinAction: action => { actions.push(action); } });
+  document.body.append(canvas.root);
+  canvas.pinsEnabled = true;
+  canvas.update(dragNotes, layout);
+  const normalPath = canvas.svg.querySelector(`g[data-id="${linkId}"] .jn-thread-layer`);
+  const pinGroup = canvas.pinLinksSvg.querySelector('[data-pin-link="dragPinLink"]');
+  const pinPath = pinGroup.querySelector(".jn-thread-layer");
+  assert.ok(normalPath?.getAttribute("d") && pinPath?.getAttribute("d"));
+  const beforeNormal = normalPath.getAttribute("d");
+  const beforePin = pinPath.getAttribute("d");
+  const pin = canvas.root.querySelector(`[data-pin-ref="p:${ownedId}"]`);
+  assert.ok(pin);
+
+  event(pin, "pointerdown", 100, 100);
+  event(pin, "pointerup", 100, 100);
+  event(pin, "pointerdown", 100, 100);
+  const target = { x: 960, y: 760 };
+  const [sx, sy] = screenPoint(canvas, target.x, target.y);
+  event(canvas.root, "pointermove", sx, sy);
+  const ghost = canvas.pinLayer.querySelector(".jn-moving-pin");
+  assert.ok(ghost, "the pin is picked up immediately");
+  assert.equal(Number.parseFloat(ghost.style.left), target.x);
+  assert.equal(Number.parseFloat(ghost.style.top), target.y);
+  assert.equal(actions.length, 0, "no write happens on pointermove");
+
+  await frame();
+  assert.notEqual(normalPath.getAttribute("d"), beforeNormal,
+    "the attached normal thread follows the ghost before release");
+  assert.notEqual(pinPath.getAttribute("d"), beforePin,
+    "the attached pin link follows the ghost before release");
+  assert.equal(canvas.pinLinksSvg.querySelector('[data-pin-link="dragPinLink"]'), pinGroup,
+    "the fast path reuses the existing pin-link group");
+  assert.equal(pinGroup.querySelector(".jn-thread-layer"), pinPath,
+    "existing pin-link paths are updated in place");
+  assert.ok(pinGroup.classList.contains("jn-link-material-linen"));
+  assert.equal(pinGroup.querySelector(".jn-link-label")?.textContent, "pin link");
+
+  event(canvas.root, "pointerup", sx, sy);
+  assert.equal(actions.length, 1, "release emits one final move write");
+  assert.deepEqual(actions[0], { type: "move", ref: `p:${ownedId}`,
+    noteId: "", x: target.x, y: target.y });
+  canvas.disconnectGeometry();
+  canvas.root.remove();
+});
+
+test("dragging a note pin never uses percent positions or snaps back before its write", async () => {
+  await requestWrite({ type: "createNote", title: "Minor Drag", x: 40, y: 40 });
+  await requestWrite({ type: "createNote", title: "Minor Drag Target", x: 600, y: 400 });
+  await tick();
+  const notes = notesStore.getAllNotes();
+  const a = notes.find(note => note.name === "Minor Drag");
+  const b = notes.find(note => note.name === "Minor Drag Target");
+  assert.ok(a && b);
+  await requestWrite({ type: "addCardAnchor", noteId: a.id, kind: "minor", x: 0.3, y: 0.7 });
+  await tick();
+  const layout = notesStore.getLayout();
+  const anchorId = Object.keys(layout.cards[a.id].anchors).find(id => id !== "main");
+  assert.ok(anchorId);
+  await requestWrite({ type: "createLink", sourceId: a.id, targetId: b.id,
+    sourceAnchorId: anchorId, targetAnchorId: "main" });
+  await tick();
+  const link = notesStore.getNote(a.id).system.links.find(item => item.targetId === b.id);
+  assert.ok(link);
+  const canvas = new JournalCanvas({ onSelectNote() {},
+    onBoardPinAction: () => new Promise(() => {}) });
+  document.body.append(canvas.root);
+  canvas.pinsEnabled = true;
+  canvas.update(notesStore.getAllNotes(), notesStore.getLayout());
+  const pin = canvas.root.querySelector(`[data-pin-ref="n:${a.id}:${anchorId}"]`);
+  const path = canvas.svg.querySelector(`g[data-id="${link.id}"] .jn-thread-layer`);
+  assert.ok(pin && path?.getAttribute("d"));
+  const before = { left: pin.style.left, top: pin.style.top };
+  const beforePath = path.getAttribute("d");
+  assert.match(before.left, /px$/);
+
+  event(pin, "pointerdown", 100, 100);
+  event(pin, "pointerup", 100, 100);
+  event(pin, "pointerdown", 100, 100);
+  const target = { x: 980, y: 780 };
+  const [sx, sy] = screenPoint(canvas, target.x, target.y);
+  event(canvas.root, "pointermove", sx, sy);
+  await frame();
+  assert.notEqual(path.getAttribute("d"), beforePath,
+    "a link attached by anchor id follows the moving note pin");
+  assert.match(pin.style.left, /px$/, "the pin stays in world pixels");
+  assert.doesNotMatch(pin.style.left, /%$/, "no legacy percent position is written");
+  assert.equal(Number.parseFloat(pin.style.left), target.x);
+  assert.equal(Number.parseFloat(pin.style.top), target.y);
+
+  event(canvas.root, "pointerup", sx, sy);
+  assert.equal(canvas.pinOverride?.ref, `n:${a.id}:${anchorId}`);
+  assert.match(pin.style.left, /px$/, "the pending write keeps the world-pixel preview");
+  assert.doesNotMatch(pin.style.left, /%$/);
+  assert.equal(Number.parseFloat(pin.style.left), target.x);
+  assert.equal(Number.parseFloat(pin.style.top), target.y);
+  assert.notEqual(pin.style.left, before.left, "the pin does not snap back to its old location");
   canvas.disconnectGeometry();
   canvas.root.remove();
 });
