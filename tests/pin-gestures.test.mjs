@@ -397,6 +397,72 @@ test("right drag pans over notes and pins; only text and empty-board double clic
   canvas.root.remove();
 });
 
+test("only a genuine empty-canvas double click opens the board menu after pin gestures", async () => {
+  const notes = notesStore.getAllNotes();
+  const a = notes.find(note => note.name === "Pin A");
+  const layout = structuredClone(notesStore.getLayout());
+  layout.pins = { menuPin: { noteId: "", x: 300, y: 200, isDefault: false } };
+  layout.pinLinks = {};
+  const calls = [];
+  const actions = [];
+  const canvas = new JournalCanvas({ onSelectNote() {},
+    onBoardPinAction: action => { actions.push(action); },
+    onEditCardBlock: (...args) => calls.push(["edit", ...args]),
+    onCreateNoteAt: (...args) => calls.push(["create", ...args]) });
+  document.body.append(canvas.root);
+  canvas.pinsEnabled = true;
+  canvas.update(notes, layout);
+  const card = canvas.cardEls.get(a.id);
+  const text = card.querySelector('[data-card-text="block"]');
+  const pin = canvas.root.querySelector('[data-pin-ref="p:menuPin"]');
+  assert.ok(text && pin);
+
+  event(text, "dblclick", 40, 50);
+  assert.equal(calls.filter(call => call[0] === "edit").length, 1,
+    "double-clicking note text still edits it");
+  event(card, "dblclick", 40, 50);
+  event(pin, "dblclick", 300, 200);
+  assert.notEqual(canvas.contextMenu.style.display, "flex",
+    "cards and pins never open the board menu");
+
+  // Leave a board click at the future release point, then move a pin there. The old stale
+  // click and the native dblclick released over empty canvas must not open the menu.
+  event(canvas.root, "pointerdown", 760, 520);
+  event(canvas.root, "pointerup", 760, 520);
+  event(pin, "pointerdown", 300, 200);
+  event(pin, "pointerup", 300, 200);
+  event(pin, "pointerdown", 300, 200);
+  event(canvas.root, "pointermove", 760, 520);
+  event(canvas.root, "pointerup", 760, 520);
+  assert.deepEqual(actions.at(-1), { type: "move", ref: "p:menuPin", noteId: "", x: 760, y: 520 });
+  assert.notEqual(canvas.contextMenu.style.display, "flex",
+    "releasing a moved pin on empty canvas does not open the menu");
+
+  event(canvas.root, "pointerdown", 760, 520);
+  event(canvas.root, "pointerup", 760, 520);
+  assert.notEqual(canvas.contextMenu.style.display, "flex",
+    "a stale board click cannot pair with the pin release");
+
+  event(canvas.root, "dblclick", 760, 520);
+  assert.notEqual(canvas.contextMenu.style.display, "flex",
+    "a native dblclick at the pin release point is ignored");
+
+  const fresh = new JournalCanvas({ onSelectNote() {},
+    onCreateNoteAt: (...args) => calls.push(["create", ...args]) });
+  document.body.append(fresh.root);
+  fresh.update(notes, layout);
+  event(fresh.root, "dblclick", 900, 500);
+  assert.equal(fresh.contextMenu.style.display, "flex",
+    "a genuine empty-canvas double click still opens the note-type menu");
+  const kinds = ["note", "memo", "document", "target", "location"];
+  assert.deepEqual([...fresh.contextMenu.querySelectorAll("[data-action]")]
+    .map(button => button.dataset.action).filter(action => kinds.includes(action)), kinds);
+  fresh.disconnectGeometry();
+  fresh.root.remove();
+  canvas.disconnectGeometry();
+  canvas.root.remove();
+});
+
 test("pin drag repaints attached threads and pin links in place before release", async () => {
   await requestWrite({ type: "createNote", title: "Drag Pin A", x: 40, y: 40 });
   await requestWrite({ type: "createNote", title: "Drag Pin B", x: 560, y: 340 });

@@ -22,6 +22,10 @@ import { MAX_ROUTE_ANCHORS } from "../route-notes.mjs";
 import { DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, STAMP_CORNERS, STAMP_IDS, stampUrl } from "../stamps.mjs";
 
 const DRAG_THRESHOLD = 5;
+// A pin pick-up and move is a double press, so the browser also emits a native dblclick at the
+// release point. That point can look like empty canvas once the pin has moved or been hidden.
+// Board menus are ignored for a short window after any pin gesture.
+const BOARD_MENU_PIN_GRACE_MS = 500;
 let threadMaskSequence = 0;
 const LINK_COLOR_OPTIONS = ["", ...LINK_COLOR_SLOTS];
 const CARD_CORNERS = Object.freeze([{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }]);
@@ -163,6 +167,7 @@ export default class JournalCanvas {
     this.pinDrag = null;
     this.pinTool = false;
     this.pinInteraction = null;
+    this.lastPinGestureAt = 0;
     this.selectedPinRef = null;
     this.hoverPinRef = null;
     this.pinOverride = null;
@@ -2723,6 +2728,36 @@ export default class JournalCanvas {
     return { ref: card ? pinRef(card.dataset.id) : null, noteId: card?.dataset.id ?? "", directPin: false };
   }
 
+  /** Records time of any pin press/move/release so the board menu cannot open at its release point. */
+  #markPinGesture() {
+    this.lastPinGestureAt = Date.now();
+  }
+
+  /**
+   * A board menu is only for a double click that starts and ends on empty canvas. The press
+   * sequence is filtered before this call; here the release point must contain no pin, card,
+   * label, or link, and no pin gesture may have just occurred.
+   */
+  #boardMenuAllowed(ev, layers = null) {
+    if (this.readOnly || this.pinTool) return false;
+    if (Date.now() - this.lastPinGestureAt < BOARD_MENU_PIN_GRACE_MS) return false;
+    const elements = layers
+      ?? this.root.ownerDocument.elementsFromPoint?.(ev.clientX, ev.clientY)
+      ?? [ev.target];
+    const blocked = selector => ev.target.closest?.(selector)
+      || elements.some(element => element.closest?.(selector));
+    if (blocked("[data-pin-ref], [data-stamp-label-id], .jn-label, .jn-link-hit, .jn-pin-link-hit")) return false;
+    return !this.#hitCanvas(ev).noteId;
+  }
+
+  /** Single entry point for opening the note-type menu from an empty-canvas double click. */
+  #openBoardMenu(ev, layers = null) {
+    if (!this.#boardMenuAllowed(ev, layers)) return false;
+    ev.preventDefault?.();
+    this.#openContextMenu(ev.clientX, ev.clientY);
+    return true;
+  }
+
   #clearPendingPinDrop() {
     if (!this.pendingPinDrop) return;
     this.pendingPinDrop.ghost?.remove();
@@ -3366,6 +3401,8 @@ export default class JournalCanvas {
         if (this.pinInteraction) {
           ev.preventDefault();
           ev.stopPropagation();
+          this.#markPinGesture();
+          lastBoardClick = null;
           const state = this.pinInteraction;
           const same = hit.directPin && hit.ref === state.sourceRef;
           if (state.mode === "thread" && same && state.movable
@@ -3383,6 +3420,7 @@ export default class JournalCanvas {
           ev.stopPropagation();
           this.root.focus({ preventScroll: true });
           this.#setSelectedPin(hit.ref);
+          this.#markPinGesture();
           lastBoardClick = null;
           this.pinInteraction = { mode: "thread", sourceRef: hit.ref,
             movable: !!this.#pinPoint(hit.ref)?.movable, firstAt: Date.now(),
@@ -3443,6 +3481,7 @@ export default class JournalCanvas {
         drag = { type: "pin", id, index, ox: point.x, oy: point.y,
           sx: ev.clientX, sy: ev.clientY, moved: 0 };
         this.pinDrag = { id, index, ...point };
+        this.#markPinGesture();
         lastBoardClick = null;
       } else if (stampId && cardEl) {
         drag = { type: "attached-stamp", id: stampId, sx: ev.clientX, sy: ev.clientY, moved: 0 };
@@ -3494,6 +3533,9 @@ export default class JournalCanvas {
         ?.closest?.("[data-pin-ref]") ?? ev.target.closest?.("[data-pin-ref]");
       this.hoverPinRef = pointedPin?.dataset.pinRef ?? null;
       if (this.pinInteraction) {
+        // Only an active press is a gesture; the armed thread preview after a single click still
+        // follows the pointer and must not keep refreshing the board-menu suppression window.
+        if (this.pinInteraction.press) this.#markPinGesture();
         const press = this.pinInteraction.press;
         if (press) press.moved = Math.max(press.moved,
           Math.abs(ev.clientX - press.sx) + Math.abs(ev.clientY - press.sy));
@@ -3587,6 +3629,8 @@ export default class JournalCanvas {
 
     const finishDrag = ev => {
       if (this.pinInteraction?.press) {
+        this.#markPinGesture();
+        lastBoardClick = null;
         const state = this.pinInteraction;
         const press = state.press;
         state.press = null;
@@ -3611,6 +3655,8 @@ export default class JournalCanvas {
             x: local.x, y: local.y });
         }
       } else if (drag.type === "pin") {
+        this.#markPinGesture();
+        lastBoardClick = null;
         const move = this.pinDrag;
         this.pinDrag = null;
         const link = this.linksById.get(drag.id);
@@ -3727,9 +3773,7 @@ export default class JournalCanvas {
           const now = Date.now();
           if (lastBoardClick && now - lastBoardClick.at < 450
               && Math.hypot(ev.clientX - lastBoardClick.x, ev.clientY - lastBoardClick.y) <= 8) {
-            if (!this.readOnly && !this.pinTool && !this.#hitCanvas(ev).noteId) {
-              this.#openContextMenu(ev.clientX, ev.clientY);
-            }
+            this.#openBoardMenu(ev);
             lastBoardClick = null;
           } else lastBoardClick = { at: now, x: ev.clientX, y: ev.clientY };
         } else lastBoardClick = null;
@@ -3780,11 +3824,7 @@ export default class JournalCanvas {
         this.#editCardText(text.closest(".jn-card").dataset.id, text);
         return;
       }
-      if (this.#hitCanvas(ev).noteId || ev.target.closest(".jn-link-hit")
-          || layers.some(element => element.closest?.(".jn-link-hit"))) return;
-      if (this.readOnly || this.pinTool) return;
-      ev.preventDefault();
-      this.#openContextMenu(ev.clientX, ev.clientY);
+      this.#openBoardMenu(ev, layers);
     });
   }
 
