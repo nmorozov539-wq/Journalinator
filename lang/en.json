@@ -358,6 +358,8 @@
   "JN.Pin.Main": "Main pin",
   "JN.Pin.Tool": "Pin tool",
   "JN.Pin.Minor": "Minor pin",
+  "JN.Pin.SelectedMinor": "Minor pin selected. Press Delete or Backspace to remove it.",
+  "JN.Pin.SelectedMain": "Main pin selected. It is permanent and cannot be deleted.",
   "JN.Pin.Add": "Add pin",
   "JN.Pin.AddMinor": "Add minor pin",
   "JN.Pin.Enabled": "Main pin enabled",

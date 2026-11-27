@@ -620,6 +620,7 @@ export default class JournalApp extends ApplicationV2 {
             && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey) {
           consume();
           if (!ev.repeat) {
+            if (this.#private.canvas.deletePinForShortcut()) return;
             if (!this.#private.canvas.deleteSelectedLink()) this.#private.deleteSelected();
           }
           return;
@@ -638,6 +639,7 @@ export default class JournalApp extends ApplicationV2 {
           && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey) {
         consume();
         if (ev.repeat) return;
+        if (this.#canvas.deletePinForShortcut()) return;
         if (this.#canvas.deleteSelectedLink()) return;
         const labelIds = this.#canvas.getSelectedLabelIds();
         const selected = this.#canvas.getSelectedNoteIds();

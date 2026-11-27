@@ -315,6 +315,7 @@ export default class JournalCanvas {
       if (!seenCards.has(pin.dataset.noteId)) pin.remove();
     }
     this.#renderBoardPins();
+    this.#syncPinSelection();
 
     for (const [id, el] of [...this.labelEls]) {
       if (!seenLabels.has(id)) { el.remove(); this.labelEls.delete(id); }
@@ -636,6 +637,32 @@ export default class JournalCanvas {
       pin.style.left = `${world.x}px`;
       pin.style.top = `${world.y}px`;
     }
+  }
+
+  /** Selected pins get a persistent ring and an accessible label explaining the delete keys. */
+  #syncPinSelection() {
+    const pins = this.pinLayer.querySelectorAll("[data-pin-ref]");
+    let selected = null;
+    for (const pin of pins) {
+      if (pin.dataset.pinRef === this.selectedPinRef) selected = pin;
+    }
+    if (this.selectedPinRef && !selected) this.selectedPinRef = null;
+    for (const pin of pins) {
+      const isSelected = pin === selected;
+      const main = pin.dataset.anchorKind === "main";
+      const label = isSelected
+        ? t(main ? "JN.Pin.SelectedMain" : "JN.Pin.SelectedMinor")
+        : t(main ? "JN.Pin.Main" : "JN.Pin.Minor");
+      pin.classList.toggle("jn-pin-selected", isSelected);
+      pin.setAttribute("aria-label", label);
+      if (isSelected) pin.setAttribute("title", label);
+      else pin.removeAttribute("title");
+    }
+  }
+
+  #setSelectedPin(ref) {
+    this.selectedPinRef = ref ?? null;
+    this.#syncPinSelection();
   }
 
   #pinPoint(ref, boxes = null) {
@@ -1755,6 +1782,17 @@ export default class JournalCanvas {
     return true;
   }
 
+  /**
+   * Returns true when a selected or hovered pin owns this Delete/Backspace press. Movable pins
+   * are removed once per press; the permanent main pin consumes the key without any write so the
+   * shortcut cannot fall through to note or link deletion.
+   */
+  deletePinForShortcut({ repeat = false } = {}) {
+    if (!this.selectedPinRef && !this.hoverPinRef) return false;
+    if (!repeat) this.#deleteTargetPin();
+    return true;
+  }
+
   #requestDeleteLink(link) {
     if (link.boardPinLink) this.callbacks.onBoardPinAction?.({ type: "deleteLink", linkId: link.id });
     else this.callbacks.onDeleteLink?.(link.sourceId, link.id);
@@ -2659,7 +2697,7 @@ export default class JournalCanvas {
     const ref = this.selectedPinRef ?? this.hoverPinRef;
     if (!ref || !this.#pinPoint(ref)?.movable || this.readOnly) return false;
     this.#cancelPinInteraction();
-    this.selectedPinRef = null;
+    this.#setSelectedPin(null);
     this.callbacks.onBoardPinAction?.({ type: "delete", ref });
     return true;
   }
@@ -3241,13 +3279,14 @@ export default class JournalCanvas {
 
     this.root.addEventListener("keydown", ev => {
       if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
-      if (ev.key === "Backspace" && !ev.isComposing && !ev.ctrlKey && !ev.metaKey
+      if ((ev.key === "Delete" || ev.key === "Backspace") && !ev.isComposing && !ev.ctrlKey && !ev.metaKey
           && !ev.altKey && !ev.shiftKey
           && !ev.target.closest("input, textarea, select, [contenteditable]")) {
-        if (this.selectedPinRef || this.hoverPinRef) {
+        // A selected or hovered pin owns this key even when the pin is permanent (main), so the
+        // event never falls through to link deletion. #deleteTargetPin itself refuses main pins.
+        if (this.deletePinForShortcut(ev)) {
           ev.preventDefault();
           ev.stopPropagation();
-          if (!ev.repeat) this.#deleteTargetPin();
           return;
         }
       }
@@ -3286,6 +3325,13 @@ export default class JournalCanvas {
         ev.preventDefault();
         ev.stopPropagation();
         this.#cancelPinInteraction();
+        this.#setSelectedPin(null);
+        return;
+      }
+      if (ev.key === "Escape" && this.selectedPinRef) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.#setSelectedPin(null);
         return;
       }
       // Inline card text is opened by a deliberate double click below.
@@ -3315,6 +3361,7 @@ export default class JournalCanvas {
         return;
       }
       if (ev.button === 0 && !ev.target.closest(".jn-floating-toolbar, .jn-floating-popover, .jn-route-chooser")) {
+        if (!ev.target.closest("[data-pin-ref]")) this.#setSelectedPin(null);
         const hit = this.#hitCanvas(ev);
         if (this.pinInteraction) {
           ev.preventDefault();
@@ -3335,7 +3382,7 @@ export default class JournalCanvas {
           ev.preventDefault();
           ev.stopPropagation();
           this.root.focus({ preventScroll: true });
-          this.selectedPinRef = hit.ref;
+          this.#setSelectedPin(hit.ref);
           lastBoardClick = null;
           this.pinInteraction = { mode: "thread", sourceRef: hit.ref,
             movable: !!this.#pinPoint(hit.ref)?.movable, firstAt: Date.now(),
@@ -3355,7 +3402,6 @@ export default class JournalCanvas {
           return;
         }
       }
-      if (ev.button === 0 && !ev.target.closest("[data-pin-ref]")) this.selectedPinRef = null;
       if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
       if (ev.target.closest(".jn-route-chooser")) return;
       if (ev.target.closest(".jn-floating-toolbar, .jn-floating-popover")) return;

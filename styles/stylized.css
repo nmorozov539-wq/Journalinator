@@ -863,6 +863,14 @@
   outline: 3px solid var(--jn-sc-pin-ring, #ffe2a1);
   outline-offset: 3px;
 }
+/* Selection is persistent and intentionally different from the transient hover/focus and snap
+   rings: a wider offset ring hugs the pin without covering its own metal shadow. */
+.jn-canvas .jn-pin-layer .jn-pin.jn-pin-selected,
+.jn-canvas .jn-board-pin-control.jn-pin-selected {
+  outline: 2px solid var(--jn-sc-pin-ring, #f6dfae);
+  outline-offset: 4px;
+  filter: drop-shadow(0 0 4px rgba(246, 223, 174, .6));
+}
 
 /* Enamel is the default look: author-coloured head with a dark, legible metal rim. */
 .jn-canvas .jn-pin-layer .jn-pin-style-enamel::before,

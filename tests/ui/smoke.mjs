@@ -314,6 +314,70 @@ test("Backspace removes labels and stamps or trashes notes, and Ctrl+Z restores 
   host.remove();
 });
 
+test("pin Delete shortcuts win over selected note and link deletion", async () => {
+  await requestWrite({ type: "createNote", title: "Pin Key Note", x: 1200, y: 100 });
+  await requestWrite({ type: "createNote", title: "Pin Key Target", x: 1600, y: 100 });
+  await settle();
+  const source = sharedByName("Pin Key Note");
+  const target = sharedByName("Pin Key Target");
+  await requestWrite({ type: "createLink", sourceId: source.id, targetId: target.id });
+  await requestWrite({ type: "boardPinAction", action: { type: "add", noteId: source.id, x: 0.5, y: 0.5 } });
+  await settle();
+  const pinId = Object.keys(notesStore.getLayout().pins)
+    .find(id => notesStore.getLayout().pins[id].noteId === source.id);
+  assert.ok(pinId);
+  await requestWrite({ type: "boardPinAction", action: { type: "connect",
+    source: `p:${pinId}`, target: `n:${target.id}:main` } });
+  await settle();
+  const pinLinkId = Object.entries(notesStore.getLayout().pinLinks)
+    .find(([, link]) => link.source === `p:${pinId}` || link.target === `p:${pinId}`)[0];
+  const noteLink = notesStore.getNote(source.id).system.links.find(link => link.targetId === target.id);
+  assert.ok(pinLinkId && noteLink);
+
+  const app = new JournalApp();
+  const context = await app._prepareContext();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  app._replaceHTML(await app._renderHTML(context), host);
+  app._onFirstRender();
+  let canvas = host.querySelector(".jn-canvas");
+  const select = (element, x = 10, y = 10) => {
+    element.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: x, clientY: y }));
+    element.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: x, clientY: y }));
+  };
+  const pressDelete = () => canvas.dispatchEvent(
+    new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Delete" }));
+
+  select(canvas.querySelector(`.jn-card[data-id="${source.id}"]`));
+  select(canvas.querySelector(`[data-pin-ref="p:${pinId}"]`));
+  assert.equal(canvas.querySelector(`[data-pin-ref="p:${pinId}"]`).classList.contains("jn-pin-selected"), true);
+  pressDelete();
+  await settle();
+  assert.equal(notesStore.getLayout().pins[pinId], undefined, "Delete removes the selected board pin");
+  assert.equal(notesStore.getLayout().pinLinks[pinLinkId], undefined);
+  assert.ok(notesStore.getNote(source.id), "the note selection survives a pin delete");
+  assert.equal(notesStore.getNote(source.id).system.deleted, null, "the note is not trashed");
+  assert.ok(notesStore.getNote(source.id).system.links.some(link => link.id === noteLink.id),
+    "the note link is not deleted");
+
+  app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+  canvas = host.querySelector(".jn-canvas");
+  select(canvas.querySelector(`.jn-link-hit[data-id="${noteLink.id}"]`), 20, 20);
+  assert.ok(canvas.querySelector(".jn-link-selected"), "the note link is selected");
+  select(canvas.querySelector(`[data-pin-ref="n:${source.id}:main"]`));
+  pressDelete();
+  await settle();
+  assert.ok(notesStore.getLayout().cards[source.id].anchors.main,
+    "Delete on the selected main pin leaves its anchor intact");
+  assert.ok(notesStore.getNote(source.id).system.links.some(link => link.id === noteLink.id),
+    "Delete on the selected main pin does not fall through to link deletion");
+  assert.equal(notesStore.getNote(source.id).system.deleted, null,
+    "Delete on the selected main pin does not trash the note");
+  app._onClose();
+  host.remove();
+});
+
 test("the selection box includes labels and an empty-board double click opens type choices", () => {
   const calls = [];
   const canvas = new JournalCanvas(new Proxy({}, { get: (_, name) => (...args) => calls.push([name, ...args]) }));
