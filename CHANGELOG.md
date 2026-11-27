@@ -2,6 +2,21 @@
 
 These notes start with the small board and toolbar polish patches and cover the follow-up fixes and features.
 
+## 0.9.4 — Canvas interaction polish
+
+- Notes no longer show a player signature; authorship and permissions remain in saved data.
+- Pins draw above existing and preview threads, keep a steady screen size while zooming, and
+  remain the first pointer target where they overlap a thread.
+- The Pin tool stays visibly selected while active. Manually placed pins can be removed with
+  Backspace, which also removes their attached connections; default pins are protected.
+- Moving a pin now updates its position and connected threads with the pointer before saving
+  its final owner and position.
+- Existing threads can be selected through a wider invisible hit area, and their settings are
+  saved and restored on both canvases.
+- Double-clicking note text edits that note. Double-clicking empty canvas opens a single-level
+  note-type menu and creates a note only after a type is chosen.
+- The module zip now contains the `fvtt-journalinator` folder expected by Foundry.
+
 ## 0.9.3 — Canvas gestures and free pins
 
 - Double-click a note's text to edit it, or double-click empty canvas to create a note there.

@@ -7,18 +7,18 @@ VERSION="$(node -p "require('$ROOT/module.json').version")"
 # Keep this in lockstep with module.json's download URL (Journalinator-v<version>.zip).
 NAME="Journalinator-v$VERSION"
 OUT="$ROOT/dist"
-STAGE="$OUT/$NAME"
+MODULE_DIR="$OUT/fvtt-journalinator"
 
-rm -rf "$STAGE" "$OUT/$NAME.zip"
-mkdir -p "$STAGE"
+rm -rf "$MODULE_DIR" "$OUT/$NAME.zip"
+mkdir -p "$MODULE_DIR"
 
-cp "$ROOT/module.json" "$ROOT/LICENSE" "$STAGE/"
-cp "$ROOT/README.md" "$ROOT/CHANGELOG.md" "$ROOT/STYLIZED-CANVAS.md" "$STAGE/"
-cp -a "$ROOT/scripts" "$ROOT/styles" "$ROOT/lang" "$ROOT/assets" "$STAGE/"
+cp "$ROOT/module.json" "$ROOT/LICENSE" "$MODULE_DIR/"
+cp "$ROOT/README.md" "$ROOT/CHANGELOG.md" "$ROOT/STYLIZED-CANVAS.md" "$MODULE_DIR/"
+cp -a "$ROOT/scripts" "$ROOT/styles" "$ROOT/lang" "$ROOT/assets" "$MODULE_DIR/"
 
 # Never ship design references, tests, source maps, node_modules, or the stale legacy dist.
-find "$STAGE" -name '*.map' -delete
-( cd "$OUT" && zip -qr "$NAME.zip" "$NAME" )
+find "$MODULE_DIR" -name '*.map' -delete
+( cd "$OUT" && zip -qr "$NAME.zip" fvtt-journalinator )
 ( cd "$OUT" && sha256sum "$NAME.zip" > "$NAME.zip.sha256" )
 
 echo "Built $OUT/$NAME.zip"

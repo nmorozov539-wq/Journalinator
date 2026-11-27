@@ -65,9 +65,9 @@ test("the module changelog covers every version from 0.8.0", () => {
   const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
   const sections = parsePatchNotes(changelog);
   const versions = sections.filter(section => section.version).map(section => section.version);
-  assert.equal(latestPatchNoteId(sections), "v0.9.3");
+  assert.equal(latestPatchNoteId(sections), "v0.9.4");
   for (const expected of ["0.8.0", "0.8.1", "0.8.2", "0.8.3", "0.8.4",
-    "0.9.0", "0.9.1", "0.9.2", "0.9.3"]) {
+    "0.9.0", "0.9.1", "0.9.2", "0.9.3", "0.9.4"]) {
     assert.ok(versions.includes(expected), `missing ${expected}`);
   }
   assert.ok(versions.every(version => compareVersions(version, "0.8.0") >= 0));
