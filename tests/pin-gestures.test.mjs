@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { JSDOM } from "jsdom";
 import showdown from "showdown";
 
@@ -46,6 +47,7 @@ test("pin tool and all four pin gestures use distinct pointer transactions", asy
   assert.ok(source);
 
   canvas.togglePinTool();
+  assert.ok(canvas.root.classList.contains("jn-placing-pin"), "pin tool marks the canvas");
   event(cardA, "pointerdown", 70, 60);
   event(cardA, "pointerup", 70, 60);
   assert.deepEqual(actions.at(-1), { type: "add", noteId: a.id,
@@ -54,6 +56,12 @@ test("pin tool and all four pin gestures use distinct pointer transactions", asy
   event(canvas.root, "pointerup", 600, 300);
   assert.deepEqual(actions.at(-1), { type: "add", noteId: "", x: 600, y: 300 });
   canvas.togglePinTool();
+  assert.equal(canvas.root.classList.contains("jn-placing-pin"), false,
+    "toggling the pin tool off clears the placement class");
+  canvas.togglePinTool();
+  canvas.deactivatePinTool();
+  assert.equal(canvas.root.classList.contains("jn-placing-pin"), false,
+    "deactivation also clears the placement class");
 
   const manualId = "manual1";
   const layout = structuredClone(notesStore.getLayout());
@@ -114,6 +122,23 @@ test("pin tool and all four pin gestures use distinct pointer transactions", asy
     x: (390 - 350) / 190, y: (60 - 20) / 70 });
   canvas.disconnectGeometry();
   canvas.root.remove();
+});
+
+test("pin tool paints a pin-tipped cursor on the canvas and its descendants", () => {
+  const css = readFileSync(new URL("../styles/journal.css", import.meta.url), "utf8");
+  const block = css.match(/\.jn-canvas\.jn-placing-pin,[\s\S]*?\}/)?.[0];
+  assert.ok(block, "the pin tool cursor rule exists");
+  assert.match(block, /\.jn-canvas\.jn-placing-pin\s+\.jn-world\s+\*/,
+    "the rule covers every world descendant");
+  const cursor = block.match(/cursor:\s*url\("data:image\/svg\+xml,([^"]+)"\)\s+(\d+)\s+(\d+),\s*crosshair;/);
+  assert.ok(cursor, "cursor uses an inline SVG with a hotspot and crosshair fallback");
+  const [, svg, hotX, hotY] = cursor;
+  assert.match(svg, /width='28'%20height='28'/, "cursor is a compact 28px pin");
+  assert.match(svg, /viewBox='0%200%2028%2028'/);
+  assert.match(svg, /%3Cpath%20d='M14%2026\.5/, "cursor draws a pin body");
+  assert.match(svg, /%3Ccircle%20cx='14'%20cy='11\.5'/, "cursor has a pin head");
+  assert.match(svg, /stroke='%23241b22'/, "the pin has a dark outline for dark cork");
+  assert.equal(`${hotX} ${hotY}`, "14 27", "the hotspot sits on the pin tip");
 });
 
 test("pins stay above threads and keep a fixed screen size during wheel zoom", () => {

@@ -535,6 +535,22 @@
 .jn-canvas[data-placing-link] .jn-world * {
   cursor: crosshair;
 }
+/* Pin tool: a gold pin with a dark rim reads on both light paper and dark cork. The hotspot is
+   the tip (14 27), so a placed pin lands exactly where the cursor points. The extra selectors
+   outrank the pin/card/label cursor rules in stylized.css and override their descendants too. */
+.jn-canvas.jn-placing-pin,
+.jn-canvas.jn-placing-pin .jn-world *,
+.jn-canvas.jn-placing-pin .jn-world .jn-card,
+.jn-canvas.jn-placing-pin .jn-world .jn-card *,
+.jn-canvas.jn-placing-pin .jn-world .jn-label,
+.jn-canvas.jn-placing-pin .jn-world .jn-label *,
+.jn-canvas.jn-placing-pin .jn-world .jn-pin-layer .jn-pin,
+.jn-canvas.jn-placing-pin .jn-world .jn-pin-layer .jn-pin *,
+.jn-canvas.jn-placing-pin .jn-world .jn-board-pin-control,
+.jn-canvas.jn-placing-pin .jn-world .jn-links *,
+.jn-canvas.jn-placing-pin .jn-world .jn-pin-links * {
+  cursor: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='28'%20height='28'%20viewBox='0%200%2028%2028'%3E%3Cpath%20d='M14%2026.5C11.4%2022.9%205.5%2016.8%205.5%2011.5a8.5%208.5%200%201%201%2017%200c0%205.3-5.9%2011.4-8.5%2015z'%20fill='%23f3d69a'%20stroke='%23241b22'%20stroke-width='2'%20stroke-linejoin='round'/%3E%3Ccircle%20cx='14'%20cy='11.5'%20r='3.1'%20fill='%23241b22'/%3E%3Cpath%20d='M9.5%208.3a5.9%205.9%200%200%201%203.6-2.5'%20fill='none'%20stroke='%23fff7e6'%20stroke-width='1.5'%20stroke-linecap='round'/%3E%3C/svg%3E") 14 27, crosshair;
+}
 .jn-link-placement-hint {
   position: absolute;
   z-index: 9;
