@@ -308,6 +308,13 @@
 .journalinator-preview:hover {
   border-color: var(--jn-acc);
 }
+.journalinator-topbar .jn-toolbar-icon.on,
+.journalinator-topbar .jn-toolbar-icon[aria-pressed="true"] {
+  color: var(--jn-acc);
+  border-color: var(--jn-acc);
+  background: color-mix(in srgb, var(--jn-acc) 18%, var(--jn-bg));
+  box-shadow: inset 0 0 0 1px var(--jn-acc);
+}
 .journalinator-topbar .jn-toolbar-icon {
   position: relative;
   display: inline-grid;
@@ -935,7 +942,14 @@
   pointer-events: none;
 }
 .jn-links { z-index: 3; }
-.jn-pin-links { z-index: 4; }
+.jn-pin-links { z-index: 5; }
+.jn-link-hits { z-index: 5; }
+.jn-pin-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  pointer-events: none;
+}
 /* Mask luminance, not paint: white keeps the thread, the card silhouette cuts it out. */
 .jn-thread-mask-bg { fill: #fff; }
 
@@ -1136,7 +1150,7 @@
   flex-direction: column;
   box-sizing: border-box;
   width: 190px;
-  padding: 12px 14px 30px;
+  padding: 12px 14px 12px;
   color: var(--jn-card-text);
   cursor: grab;
   user-select: none;
@@ -1308,23 +1322,6 @@
 
 /* Bottom-left author initial. Kept clear of content with the card padding and above the resize
    handle; pointer-events stay off so the whole card remains a drag target. */
-.jn-card-signature {
-  position: absolute;
-  left: 10px;
-  bottom: 8px;
-  z-index: 3;
-  display: grid;
-  place-items: center;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: var(--jn-author-color);
-  color: #fff;
-  font: 700 9px/1 var(--jn-ui-font);
-  text-shadow: 0 1px 1px rgba(0, 0, 0, .7);
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, .38), inset 0 0 0 1px rgba(255, 255, 255, .2);
-  pointer-events: none;
-}
 .jn-card-lock-pill {
   display: none;
   position: absolute;
@@ -1614,7 +1611,7 @@ input.jn-task-checkbox:disabled { cursor: default; }
 /* Nominal extended widths; manually-sized cards override these with an inline width. */
 .jn-card.jn-extended.jn-card-memo { width: 360px; }
 .jn-card.jn-extended.jn-card-document { width: 248px; }
-.jn-card.jn-extended.jn-card-wanted { width: 252px; gap: 7px; padding: 14px 18px 30px; }
+.jn-card.jn-extended.jn-card-wanted { width: 252px; gap: 7px; padding: 14px 18px 12px; }
 .jn-card.jn-extended.jn-card-document .jn-card-title {
   padding-bottom: 6px;
   border-bottom: var(--jn-rule-width) solid var(--jn-rule);
@@ -1886,9 +1883,10 @@ input.jn-task-checkbox:disabled { cursor: default; }
 
 /* --- Links --- */
 
-.jn-link-hit {
+.jn-link-hit,
+.jn-pin-link-hit {
   stroke: transparent;
-  stroke-width: 18;
+  stroke-width: 22;
   fill: none;
   pointer-events: stroke;
   cursor: pointer;

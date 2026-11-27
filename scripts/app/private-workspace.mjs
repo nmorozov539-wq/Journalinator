@@ -4,7 +4,7 @@ import { privateStore, MAX_TITLE_LENGTH } from "../store/private-store.mjs";
 import { CARD_STYLES } from "../styles/registry.mjs";
 import { linkAnchors, moveThreadPin } from "../card-ports.mjs";
 import { anchorSide, minorOnEdge, pruneAnchorRegistry, validAnchorId } from "../anchors.mjs";
-import { boardPinRef, resolvePin, validPinPosition } from "../board-pins.mjs";
+import { boardPinRef, normalizePinLink, resolvePin, validPinPosition } from "../board-pins.mjs";
 import { isLinkColor, normalizeLinkColor } from "../link-colors.mjs";
 import {
   LINK_ENDS, LINK_MATERIALS, LINK_PATTERNS, LINK_SLACK, LINK_THICKNESS, MAX_CARD_ANCHORS,
@@ -22,11 +22,12 @@ const esc = text => foundry.utils.escapeHTML(String(text ?? ""));
 
 /** The private tab's canvas, editor, selection, trash, and clipboard actions. */
 export default class PrivateWorkspace {
-  constructor({ onChange, onSelectionChange, onSend, onStamp } = {}) {
+  constructor({ onChange, onSelectionChange, onSend, onStamp, onPinToolChange } = {}) {
     this.onChange = onChange ?? (() => {});
     this.onSelectionChange = onSelectionChange ?? (() => {});
     this.onSend = onSend ?? (() => {});
     this.onStamp = onStamp ?? (() => {});
+    this.onPinToolChange = onPinToolChange ?? (() => {});
     this.page = null;
     this.workspace = null;
     this.selectedNoteId = null;
@@ -63,7 +64,8 @@ export default class PrivateWorkspace {
         const slot = this.canvas.cardEls.get(id)?.querySelector(".jn-card-block");
         if (slot && this.selectedNoteId === id) this.editor.editFirstBlock(id, slot);
       },
-      onCreateNoteAt: options => this.createNoteAt(options),
+      onCreateNoteAt: (x, y, options) => this.createNoteAt({ ...options, x, y }),
+      onPinToolChange: active => this.onPinToolChange(active),
       onMoveCard: (id, x, y) => this.moveCard(id, x, y),
       onResizeCard: (id, width, height) => this.resizeCard(id, width, height),
       onResetCardSize: id => this.resizeCard(id, null, null),
@@ -531,7 +533,7 @@ export default class PrivateWorkspace {
   }
 
   async boardPinAction(action) {
-    if (!this.workspace || !["add", "move", "connect"].includes(action?.type)) return false;
+    if (!this.workspace || !["add", "move", "connect", "delete", "updateLink", "deleteLink"].includes(action?.type)) return false;
     return this.#save(data => {
       const layout = data.layout;
       layout.pins ??= {};
@@ -553,9 +555,40 @@ export default class PrivateWorkspace {
         if (Object.values(layout.pinLinks).some(link => link.source === action.source
             && link.target === action.target || link.source === action.target
             && link.target === action.source)) return;
-        layout.pinLinks[foundry.utils.randomID()] = {
-          source: action.source, target: action.target
-        };
+        layout.pinLinks[foundry.utils.randomID()] = normalizePinLink({ source: action.source, target: action.target });
+        return;
+      }
+      if (action.type === "updateLink" || action.type === "deleteLink") {
+        if (!layout.pinLinks[action.linkId]) return;
+        if (action.type === "deleteLink") delete layout.pinLinks[action.linkId];
+        else layout.pinLinks[action.linkId] = normalizePinLink(layout.pinLinks[action.linkId], action.fields);
+        return;
+      }
+      if (action.type === "delete") {
+        const ref = action.ref;
+        if (typeof ref !== "string") return;
+        let oldNoteId = "", anchorId = "";
+        if (ref.startsWith("p:")) {
+          const id = ref.slice(2);
+          if (!layout.pins[id] || layout.pins[id].isDefault) return;
+          delete layout.pins[id];
+        } else if (ref.startsWith("n:")) {
+          const split = ref.indexOf(":", 2);
+          oldNoteId = ref.slice(2, split);
+          anchorId = ref.slice(split + 1);
+          const anchors = layout.cards[oldNoteId]?.anchors;
+          if (split < 0 || anchors?.[anchorId]?.kind !== "minor") return;
+          delete anchors[anchorId];
+        } else return;
+        for (const [id, link] of Object.entries(layout.pinLinks)) {
+          if (link.source === ref || link.target === ref) delete layout.pinLinks[id];
+        }
+        for (const note of Object.values(data.notes)) {
+          note.links = (note.links ?? []).filter(link => link.sourcePinRef !== ref
+            && link.targetPinRef !== ref
+            && !(note.id === oldNoteId && link.sourceAnchorId === anchorId)
+            && !(link.targetId === oldNoteId && link.targetAnchorId === anchorId));
+        }
         return;
       }
       if (action.noteId && !layout.cards[action.noteId]) return;

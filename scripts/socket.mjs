@@ -9,7 +9,7 @@ import {
   defaultMainAnchor, minorOnEdge, pruneAnchorRegistry, projectToEdge, redistributionAnchor, validAnchorId
 } from "./anchors.mjs";
 import { isLinkColor, normalizeLinkColor } from "./link-colors.mjs";
-import { boardPinRef, resolvePin, validPinPosition } from "./board-pins.mjs";
+import { boardPinRef, normalizePinLink, resolvePin, validPinPosition } from "./board-pins.mjs";
 import { noteImagePath } from "./image-url.mjs";
 import { reconcileTypedLinks } from "./wikilinks.mjs";
 import { maybeSnapshot } from "./snapshots.mjs";
@@ -1662,7 +1662,7 @@ async function handleMessage(message, senderUserId) {
 
     case "boardPinAction": {
       const action = message.action;
-      if (!["add", "move", "connect"].includes(action?.type) || !pinsEnabled()) return;
+      if (!["add", "move", "connect", "delete", "updateLink", "deleteLink"].includes(action?.type) || !pinsEnabled()) return;
       const layout = layoutPage(shared);
       if (!layout) return;
       const cards = layout.system.cards ?? {};
@@ -1691,8 +1691,56 @@ async function handleMessage(message, senderUserId) {
         if (Object.values(pinLinks).some(link => link.source === action.source
             && link.target === action.target || link.source === action.target
             && link.target === action.source)) return;
-        pinLinks[foundry.utils.randomID()] = { source: action.source, target: action.target };
+        pinLinks[foundry.utils.randomID()] = normalizePinLink({ source: action.source, target: action.target });
         await layout.update({ "system.pinLinks": pinLinks });
+        return;
+      }
+      if (action.type === "updateLink" || action.type === "deleteLink") {
+        if (typeof action.linkId !== "string" || !validAnchorId(action.linkId)
+            || !pinLinks[action.linkId]) return;
+        if (action.type === "deleteLink") delete pinLinks[action.linkId];
+        else pinLinks[action.linkId] = normalizePinLink(pinLinks[action.linkId], action.fields);
+        await layout.update({ "system.pinLinks": pinLinks });
+        return;
+      }
+      if (action.type === "delete") {
+        const ref = action.ref;
+        if (typeof ref !== "string" || ref.length > 200) return;
+        let cardUpdate = null;
+        if (ref.startsWith("p:")) {
+          const id = ref.slice(2);
+          if (!pins[id] || pins[id].isDefault) return;
+          delete pins[id];
+        } else if (ref.startsWith("n:")) {
+          const split = ref.indexOf(":", 2);
+          if (split < 0) return;
+          const ownerId = ref.slice(2, split), anchorId = ref.slice(split + 1);
+          const card = cards[ownerId];
+          if (!live.has(ownerId) || card?.anchors?.[anchorId]?.kind !== "minor") return;
+          const anchors = { ...card.anchors };
+          delete anchors[anchorId];
+          cardUpdate = { ownerId, anchorId, anchors };
+        } else return;
+        for (const [id, link] of Object.entries(pinLinks)) {
+          if (link.source === ref || link.target === ref) delete pinLinks[id];
+        }
+        const pageUpdates = [];
+        for (const owner of allSharedNoteList(shared)) {
+          const links = (owner.system.links ?? []).filter(link => {
+            if (link.sourcePinRef === ref || link.targetPinRef === ref) return false;
+            if (!cardUpdate) return true;
+            return !(owner.id === cardUpdate.ownerId && link.sourceAnchorId === cardUpdate.anchorId)
+              && !(link.targetId === cardUpdate.ownerId && link.targetAnchorId === cardUpdate.anchorId);
+          });
+          if (links.length !== (owner.system.links ?? []).length) pageUpdates.push([owner, links]);
+        }
+        const updates = { "system.pins": pins, "system.pinLinks": pinLinks };
+        if (cardUpdate) {
+          updates[`system.cards.${cardUpdate.ownerId}.anchors`] = cardUpdate.anchors;
+          updates[`system.cards.${cardUpdate.ownerId}.anchors.-=${cardUpdate.anchorId}`] = null;
+        }
+        await layout.update(updates);
+        for (const [owner, links] of pageUpdates) await owner.update({ "system.links": links });
         return;
       }
       const noteId = action.noteId || "";

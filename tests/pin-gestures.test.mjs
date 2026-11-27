@@ -40,7 +40,7 @@ test("pin tool and all four pin gestures use distinct pointer transactions", asy
   canvas.pinsEnabled = true;
   canvas.update(notes, notesStore.getLayout());
   const cardA = canvas.cardEls.get(a.id), cardB = canvas.cardEls.get(b.id);
-  let source = cardA.querySelector('[data-pin-ref$=":main"]');
+  let source = canvas.root.querySelector(`[data-pin-ref="n:${a.id}:main"]`);
   assert.ok(source);
 
   canvas.togglePinTool();
@@ -59,8 +59,8 @@ test("pin tool and all four pin gestures use distinct pointer transactions", asy
     free1: { noteId: "", x: 600, y: 300, isDefault: false } };
   layout.pinLinks = {};
   canvas.update(notes, layout);
-  source = cardA.querySelector('[data-pin-ref$=":main"]');
-  const manual = cardA.querySelector('[data-pin-ref="p:manual1"]');
+  source = canvas.root.querySelector(`[data-pin-ref="n:${a.id}:main"]`);
+  const manual = canvas.root.querySelector('[data-pin-ref="p:manual1"]');
   assert.ok(manual);
   event(source, "pointerdown", 105, 20);
   assert.ok(canvas.root.querySelector(".jn-link-preview"), "thread appears on first press");
@@ -110,6 +110,141 @@ test("pin tool and all four pin gestures use distinct pointer transactions", asy
   event(cardB, "pointerup", 390, 60);
   assert.deepEqual(actions.at(-1), { type: "move", ref: "p:manual1", noteId: b.id,
     x: (390 - 350) / 190, y: (60 - 20) / 70 });
+  canvas.disconnectGeometry();
+  canvas.root.remove();
+});
+
+test("pins stay above threads and keep a fixed screen size during wheel zoom", () => {
+  const notes = notesStore.getAllNotes();
+  const a = notes.find(note => note.name === "Pin A");
+  const b = notes.find(note => note.name === "Pin B");
+  const layout = structuredClone(notesStore.getLayout());
+  layout.pins = { noteExtra: { noteId: a.id, x: 0.4, y: 0.5, isDefault: false },
+    standalone: { noteId: "", x: 700, y: 300, isDefault: false } };
+  layout.pinLinks = { visible: { source: "p:noteExtra", target: "p:standalone" } };
+  const canvas = new JournalCanvas({ onSelectNote() {} });
+  document.body.append(canvas.root);
+  canvas.update(notes, layout);
+  const worldChildren = [...canvas.world.children];
+  assert.ok(worldChildren.indexOf(canvas.pinLayer) > worldChildren.indexOf(canvas.svg));
+  assert.ok(worldChildren.indexOf(canvas.pinLayer) > worldChildren.indexOf(canvas.pinLinksSvg));
+  const refs = [`n:${a.id}:main`, "p:noteExtra", "p:standalone"];
+  for (const k of [0.35, 0.8, 1.5, 2.8]) {
+    canvas.view.k = k;
+    canvas.refreshGeometry();
+    assert.equal(Number.parseFloat(canvas.root.style.getPropertyValue("--jn-main-pin-size")) * k, 14);
+    assert.equal(Number.parseFloat(canvas.root.style.getPropertyValue("--jn-pin-hit-size")) * k, 20);
+    for (const ref of refs) assert.ok(canvas.pinLayer.querySelector(`[data-pin-ref="${ref}"]`));
+    const pin = canvas.pinLayer.querySelector('[data-pin-ref="p:noteExtra"]');
+    pin.dispatchEvent(new dom.window.WheelEvent("wheel", {
+      bubbles: true, cancelable: true, clientX: 20, clientY: 20, deltaY: 20
+    }));
+    assert.ok(Math.abs(Number.parseFloat(canvas.root.style.getPropertyValue("--jn-main-pin-size")) * canvas.view.k - 14) < 1e-9,
+      "zoom compensation updates in the wheel event while the pointer is on a pin");
+  }
+  const path = canvas.pinLinksSvg.querySelector('[data-pin-link="visible"] .jn-thread-layer');
+  assert.ok(path?.getAttribute("d"));
+  canvas.disconnectGeometry();
+  canvas.root.remove();
+});
+
+test("double-click type menu creates once at the original panned world point", () => {
+  const a = notesStore.getAllNotes().find(note => note.name === "Pin A");
+  const calls = [];
+  const canvas = new JournalCanvas({ onSelectNote() {},
+    onEditCardBlock: (...args) => calls.push(["edit", ...args]),
+    onCreateNoteAt: (...args) => calls.push(["create", ...args]) });
+  document.body.append(canvas.root);
+  canvas.update(notesStore.getAllNotes(), notesStore.getLayout());
+  canvas.view = { x: 60, y: -25, k: 1.6 };
+  canvas.refreshGeometry();
+  const card = canvas.cardEls.get(a.id);
+  const text = card.querySelector('[data-card-text="block"]');
+  const pin = canvas.pinLayer.querySelector(`[data-pin-ref="n:${a.id}:main"]`);
+  event(text, "dblclick", 90, 70);
+  assert.equal(calls.filter(call => call[0] === "edit").length, 1);
+  event(card, "dblclick", 90, 70);
+  event(pin, "dblclick", 90, 70);
+  assert.notEqual(canvas.contextMenu.style.display, "flex");
+  const world = { x: 1200, y: 800 };
+  const screen = { x: world.x * canvas.view.k + canvas.view.x,
+    y: world.y * canvas.view.k + canvas.view.y };
+  const kinds = ["note", "memo", "document", "target", "location"];
+  for (const kind of kinds) {
+    event(canvas.root, "dblclick", screen.x, screen.y);
+    assert.deepEqual([...canvas.contextMenu.querySelectorAll("[data-action]")]
+      .map(button => button.dataset.action).filter(action => kinds.includes(action)), kinds);
+    const before = calls.length;
+    canvas.contextMenu.querySelector(`[data-action="${kind}"]`).click();
+    assert.equal(calls.length, before + 1);
+    const [, x, y, options] = calls.at(-1);
+    assert.ok(Math.abs(x + ({ note: 60, memo: 180, document: 124, target: 126, location: 122.5 }[kind]) - world.x) < 1e-6);
+    assert.ok(Math.abs(y + (kind === "note" ? 30 : kind === "location" ? 45 : 40) - world.y) < 1e-6);
+    assert.equal(options.kind, kind === "location" ? "location" : "note");
+  }
+  event(canvas.root, "dblclick", screen.x, screen.y);
+  const beforeDismiss = calls.length;
+  event(canvas.root, "pointerdown", screen.x + 100, screen.y + 100);
+  assert.equal(calls.length, beforeDismiss);
+  canvas.disconnectGeometry();
+  canvas.root.remove();
+});
+
+test("pin Backspace removes attached connections while preserving text editing and default pins", async () => {
+  const a = notesStore.getAllNotes().find(note => note.name === "Pin A");
+  const b = notesStore.getAllNotes().find(note => note.name === "Pin B");
+  await requestWrite({ type: "boardPinAction", action: { type: "add", noteId: a.id, x: 0.6, y: 0.5 } });
+  await requestWrite({ type: "boardPinAction", action: { type: "add", noteId: "", x: 850, y: 450 } });
+  await tick();
+  let layout = notesStore.getLayout();
+  const owned = Object.entries(layout.pins).find(([, pin]) => pin.noteId === a.id)[0];
+  const free = Object.entries(layout.pins).find(([, pin]) => !pin.noteId)[0];
+  await requestWrite({ type: "boardPinAction", action: { type: "connect",
+    source: `p:${owned}`, target: `p:${free}` } });
+  await tick();
+  layout = notesStore.getLayout();
+  const linkId = Object.keys(layout.pinLinks)[0];
+  const canvas = new JournalCanvas({ onSelectNote() {}, onBoardPinAction: action =>
+    requestWrite({ type: "boardPinAction", action }) });
+  document.body.append(canvas.root);
+  canvas.update(notesStore.getAllNotes(), layout);
+  const hit = canvas.pinLinksSvg.querySelector(`[data-pin-link="${linkId}"] .jn-pin-link-hit`);
+  assert.ok(hit);
+  event(hit, "pointerdown", 500, 300);
+  event(hit, "pointerup", 500, 300);
+  assert.equal(canvas.linkToolbar.style.display, "flex");
+  const thickness = canvas.linkToolbar.querySelector(".jn-link-thickness");
+  thickness.value = "4.2";
+  thickness.dispatchEvent(new Event("change", { bubbles: true }));
+  await tick();
+  canvas.update(notesStore.getAllNotes(), notesStore.getLayout());
+  assert.equal(notesStore.getLayout().pinLinks[linkId].thickness, 4.2);
+  const pin = canvas.pinLayer.querySelector(`[data-pin-ref="p:${owned}"]`);
+  event(pin, "pointerdown", 124, 55);
+  event(pin, "pointerup", 124, 55);
+  canvas.root.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Backspace" }));
+  await tick();
+  layout = notesStore.getLayout();
+  assert.equal(layout.pins[owned], undefined);
+  assert.equal(layout.pinLinks[linkId], undefined);
+  const defaultPin = canvas.pinLayer.querySelector(`[data-pin-ref="n:${a.id}:main"]`);
+  event(defaultPin, "pointerdown", 105, 20);
+  event(defaultPin, "pointerup", 105, 20);
+  canvas.root.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Backspace" }));
+  assert.ok(notesStore.getLayout().cards[a.id].anchors.main);
+  const input = document.createElement("input");
+  canvas.root.append(input);
+  input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Backspace" }));
+  assert.ok(notesStore.getLayout().pins[free]);
+  await requestWrite({ type: "boardPinAction", action: { type: "delete", ref: `p:${free}` } });
+  await tick();
+  assert.equal(notesStore.getLayout().pins[free], undefined);
+  const reloaded = new JournalCanvas({ onSelectNote() {} });
+  document.body.append(reloaded.root);
+  reloaded.update(notesStore.getAllNotes(), notesStore.getLayout());
+  assert.equal(reloaded.pinLinksSvg.querySelector(`[data-pin-link="${linkId}"]`), null);
+  reloaded.disconnectGeometry();
+  reloaded.root.remove();
   canvas.disconnectGeometry();
   canvas.root.remove();
 });
@@ -224,7 +359,7 @@ test("right drag pans over notes and pins; only text and empty-board double clic
   canvas.update(notes, notesStore.getLayout());
   const card = canvas.cardEls.get(a.id);
   const text = card.querySelector("[data-card-text='block']");
-  const pin = card.querySelector('[data-pin-ref$=":main"]');
+  const pin = canvas.root.querySelector(`[data-pin-ref="n:${a.id}:main"]`);
   event(text, "pointerdown", 40, 50);
   event(text, "pointerup", 40, 50);
   assert.equal(calls.some(call => call[0] === "edit"), false,
@@ -252,6 +387,9 @@ test("right drag pans over notes and pins; only text and empty-board double clic
   event(card, "dblclick", 40, 40);
   assert.equal(calls.filter(call => call[0] === "create").length, 0);
   event(canvas.root, "dblclick", 600, 400);
+  assert.equal(calls.filter(call => call[0] === "create").length, 0);
+  assert.equal(canvas.contextMenu.style.display, "flex");
+  canvas.contextMenu.querySelector('[data-action="note"]').click();
   assert.equal(calls.filter(call => call[0] === "create").length, 1);
   canvas.disconnectGeometry();
   canvas.root.remove();

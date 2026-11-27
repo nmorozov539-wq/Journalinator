@@ -490,18 +490,18 @@ test("applyTheme writes data attributes and custom properties for the stylized p
   assert.equal(root.style.values["--jn-sc-paper-memo"], "#ead9b4");
 });
 
-test("pin heads scale gently while hit targets stay usable", () => {
+test("pin heads and hit targets keep a stable screen size through zoom", () => {
   const css = readFileSync(new URL("../styles/stylized.css", import.meta.url), "utf8");
   assert.match(css,
-    /\.jn-canvas \.jn-card \.jn-pin,[\s\S]*?\.jn-canvas \.jn-board-pin-control \{[^}]*width:\s*var\(--jn-main-pin-size, 14px\);[^}]*height:\s*var\(--jn-main-pin-size, 14px\);/);
+    /\.jn-canvas \.jn-pin-layer \.jn-pin,[\s\S]*?\.jn-canvas \.jn-board-pin-control \{[^}]*width:\s*var\(--jn-main-pin-size, 14px\);[^}]*height:\s*var\(--jn-main-pin-size, 14px\);/);
   assert.match(css,
-    /\.jn-canvas \.jn-card \.jn-pin-minor \{[\s\S]*?width:\s*var\(--jn-minor-pin-size, 7px\);/);
+    /\.jn-canvas \.jn-pin-layer \.jn-pin-minor \{[\s\S]*?width:\s*var\(--jn-minor-pin-size, 7px\);/);
   assert.match(css,
-    /\.jn-canvas \.jn-card \.jn-pin::after,[\s\S]*?\.jn-canvas \.jn-board-pin-control::after \{[^}]*width:\s*max\(var\(--jn-pin-hit-size, 20px\), 100%\);/);
+    /\.jn-canvas \.jn-pin-layer \.jn-pin::after,[\s\S]*?\.jn-canvas \.jn-board-pin-control::after \{[^}]*width:\s*max\(var\(--jn-pin-hit-size, 20px\), 100%\);/);
 
   for (const k of [0.25, 1, 4]) {
-    const main = Math.max(8, Math.min(22, 14 * Math.sqrt(k)));
-    assert.ok(main >= 8 && main <= 22);
+    const main = (14 / k) * k;
+    assert.equal(main, 14);
     assert.equal((20 / k) * k, 20, `hit target stays 20px at k=${k}`);
   }
 });

@@ -554,7 +554,7 @@ export function importPrivateTransfer(workspace, transfer, recipientId) {
   for (const link of Object.values(transfer.pinLinks ?? {})) {
     const source = pinRefMap(link?.source), target = pinRefMap(link?.target);
     if (!source || !target || source === target) continue;
-    result.layout.pinLinks[freshId(usedPinLinkIds)] = { source, target };
+    result.layout.pinLinks[freshId(usedPinLinkIds)] = { ...link, source, target };
   }
 
   return { workspace: result, imported, droppedLinks, droppedWaypoints };

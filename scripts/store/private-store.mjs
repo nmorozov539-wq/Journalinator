@@ -5,7 +5,7 @@ import {
 } from "../card-ports.mjs";
 import { normalizeLinkColor } from "../link-colors.mjs";
 import { validAnchorId } from "../anchors.mjs";
-import { resolvePin, validPinPosition } from "../board-pins.mjs";
+import { normalizePinLink, resolvePin, validPinPosition } from "../board-pins.mjs";
 import { DEFAULT_STAMP_CORNER, STAMP_COLORS, isStampCorner, stampUrl } from "../stamps.mjs";
 import {
   resolveAttachment, resolveLinkCosmetics, resolvePresentation, sanitizeCardAnchorsWithMain
@@ -258,7 +258,7 @@ export function normalizeWorkspace(input) {
     if (!validAnchorId(id) || typeof link?.source !== "string"
         || typeof link?.target !== "string" || link.source === link.target) continue;
     if (resolvePin(link.source, pinLayout, boxes) && resolvePin(link.target, pinLayout, boxes)) {
-      pinLinks[id] = { source: link.source, target: link.target };
+      pinLinks[id] = normalizePinLink(link);
     }
   }
   const trash = (Array.isArray(source.trash) ? source.trash : []).map(entry => {

@@ -43,7 +43,15 @@ export default class LayoutModel extends foundry.abstract.TypeDataModel {
       }), { required: false, initial: () => ({}) }),
       pinLinks: new fields.TypedObjectField(new fields.SchemaField({
         source: new fields.StringField({ required: true }),
-        target: new fields.StringField({ required: true })
+        target: new fields.StringField({ required: true }),
+        label: new fields.StringField({ required: false, initial: "" }),
+        color: new fields.StringField({ required: false, initial: "" }),
+        secondaryColor: new fields.StringField({ required: false, initial: "" }),
+        material: new fields.StringField({ required: false, initial: "linen" }),
+        thickness: new fields.NumberField({ required: false, initial: 2.6 }),
+        slack: new fields.NumberField({ required: false, initial: 0 }),
+        pattern: new fields.StringField({ required: false, initial: "continuous" }),
+        ends: new fields.StringField({ required: false, initial: "standard" })
       }), { required: false, initial: () => ({}) }),
       viewport: new fields.SchemaField({
         x: new fields.NumberField({ required: true, initial: 0 }),

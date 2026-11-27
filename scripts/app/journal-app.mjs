@@ -56,10 +56,11 @@ function tooltipAttrs(label) {
   return `${game.tooltip ? `data-tooltip="${text}" data-tooltip-direction="DOWN"` : `title="${text}"`} aria-label="${text}"`;
 }
 
-function toolbarButton(className, icon, label, disabled = false, badge = null) {
+function toolbarButton(className, icon, label, disabled = false, badge = null, pressed = false) {
   const count = Number.isFinite(badge) && badge > 0
     ? `<span class="jn-toolbar-badge" aria-hidden="true">${badge}</span>` : "";
-  return `<button type="button" class="jn-toolbar-icon ${className}"${disabled ? " disabled" : ""} ${tooltipAttrs(label)}>
+  return `<button type="button" class="jn-toolbar-icon ${className}${pressed ? " on" : ""}"${disabled ? " disabled" : ""}
+    ${pressed ? 'aria-pressed="true"' : 'aria-pressed="false"'} ${tooltipAttrs(label)}>
     <i class="fa-solid ${icon}" aria-hidden="true"></i>${count}</button>`;
 }
 
@@ -199,6 +200,11 @@ export default class JournalApp extends ApplicationV2 {
       if (slot && this.#selectedNoteId === id) this.#editor.editFirstBlock(id, slot);
     },
     onCreateNoteAt: (x, y, options) => this.#createNoteAt({ ...options, x, y, immediate: true }),
+    onPinToolChange: active => {
+      const button = this.element?.querySelector(".journalinator-add-pin");
+      button?.classList.toggle("on", active);
+      button?.setAttribute("aria-pressed", String(active));
+    },
     onMoveCard: (noteId, x, y) => notesStore.isSecretNote(noteId)
       ? gm(() => secrets.moveSecretCard(noteId, x, y))
       : requestWrite({ type: "moveCard", noteId, x, y }),
@@ -276,7 +282,12 @@ export default class JournalApp extends ApplicationV2 {
     onChange: () => this.render(),
     onSelectionChange: () => this.#syncSelectionControls(),
     onSend: noteId => this.#openSendPanel(this.element, null, noteId),
-    onStamp: (noteId, trigger) => this.#private.canvas.openStampPicker(noteId, trigger)
+    onStamp: (noteId, trigger) => this.#private.canvas.openStampPicker(noteId, trigger),
+    onPinToolChange: active => {
+      const button = this.element?.querySelector(".journalinator-private-add-pin");
+      button?.classList.toggle("on", active);
+      button?.setAttribute("aria-pressed", String(active));
+    }
   });
 
   #select(noteId) {
@@ -1119,7 +1130,7 @@ export default class JournalApp extends ApplicationV2 {
       <div class="jn-toolbar-group">
         ${toolbarButton("journalinator-new", "fa-note-sticky", t("JN.TopBar.NewNote"), offline)}
         ${toolbarButton("journalinator-add-label", "fa-font", t("JN.TopBar.AddLabel"), offline)}
-        ${toolbarButton("journalinator-add-pin", "fa-thumbtack", t("JN.Pin.Tool"), offline)}
+        ${toolbarButton("journalinator-add-pin", "fa-thumbtack", t("JN.Pin.Tool"), offline, null, this.#canvas.pinTool)}
       </div>
       <div class="jn-toolbar-group">
         <details class="jn-toolbar-dropdown journalinator-filters${this.#filterAuthors.size || this.#filterStyles.size ? " on" : ""}">
@@ -1149,7 +1160,7 @@ export default class JournalApp extends ApplicationV2 {
       <div class="jn-toolbar-group">
         ${privatePage ? toolbarButton("journalinator-private-new", "fa-note-sticky", t("JN.TopBar.NewNote")) : ""}
         ${privatePage ? toolbarButton("journalinator-private-add-label", "fa-font", t("JN.TopBar.AddLabel")) : ""}
-        ${privatePage ? toolbarButton("journalinator-private-add-pin", "fa-thumbtack", t("JN.Pin.Tool")) : ""}
+        ${privatePage ? toolbarButton("journalinator-private-add-pin", "fa-thumbtack", t("JN.Pin.Tool"), false, null, this.#private.canvas.pinTool) : ""}
       </div>
       <div class="jn-toolbar-group">
         <details class="jn-toolbar-dropdown journalinator-filters${this.#filterStyles.size ? " on" : ""}">
@@ -1395,14 +1406,18 @@ export default class JournalApp extends ApplicationV2 {
         this.#filterStyles.clear();
         this.#canvas.cancelLinkTool();
         this.#private.canvas.cancelLinkTool();
+        this.#canvas.deactivatePinTool();
+        this.#private.canvas.deactivatePinTool();
         this.render();
       });
     });
 
     root.querySelector(".journalinator-private-new")?.addEventListener("click", () => {
+      this.#private.canvas.deactivatePinTool();
       this.#private.createNoteAt({ ...this.#private.canvas.newCardPosition(), title: t("JN.Private.NewNoteTitle") });
     });
     root.querySelector(".journalinator-private-add-label")?.addEventListener("click", () => {
+      this.#private.canvas.deactivatePinTool();
       this.#private.canvas.addLabelButton();
     });
     root.querySelector(".journalinator-private-add-pin")?.addEventListener("click", () => {
@@ -1410,10 +1425,12 @@ export default class JournalApp extends ApplicationV2 {
     });
 
     root.querySelector(".journalinator-new")?.addEventListener("click", () => {
+      this.#canvas.deactivatePinTool();
       this.#createNoteAt(this.#canvas.newCardPosition());
     });
 
     root.querySelector(".journalinator-add-label")?.addEventListener("click", () => {
+      this.#canvas.deactivatePinTool();
       this.#canvas.addLabelButton();
     });
     root.querySelector(".journalinator-add-pin")?.addEventListener("click", () => this.#canvas.togglePinTool());

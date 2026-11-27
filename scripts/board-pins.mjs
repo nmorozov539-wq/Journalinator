@@ -1,8 +1,24 @@
 import { MAIN_ANCHOR_ID, anchorWorld, validAnchorId } from "./anchors.mjs";
+import { normalizeLinkColor } from "./link-colors.mjs";
+import { resolveLinkCosmetics } from "./presentation.mjs";
 
 export const PIN_WORLD_LIMIT = 1000000;
 export const pinRef = (noteId, anchorId = MAIN_ANCHOR_ID) => `n:${noteId}:${anchorId}`;
 export const boardPinRef = id => `p:${id}`;
+const PIN_LINK_FIELDS = ["label", "color", "secondaryColor", "material", "thickness", "slack", "pattern", "ends"];
+
+export function normalizePinLink(link, fields = {}) {
+  const changes = Object.fromEntries(PIN_LINK_FIELDS.filter(key => Object.hasOwn(fields, key))
+    .map(key => [key, fields[key]]));
+  const next = { ...link, ...changes };
+  const cosmetics = resolveLinkCosmetics(next);
+  return {
+    source: link.source, target: link.target,
+    label: typeof next.label === "string" ? next.label.slice(0, 200) : "",
+    color: normalizeLinkColor(next.color),
+    ...cosmetics
+  };
+}
 
 export function validPinPosition(noteId, x, y) {
   if (!Number.isFinite(x) || !Number.isFinite(y)) return false;

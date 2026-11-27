@@ -314,7 +314,7 @@ test("Backspace removes labels and stamps or trashes notes, and Ctrl+Z restores 
   host.remove();
 });
 
-test("the selection box includes labels and an empty-board double click creates a note", () => {
+test("the selection box includes labels and an empty-board double click opens type choices", () => {
   const calls = [];
   const canvas = new JournalCanvas(new Proxy({}, { get: (_, name) => (...args) => calls.push([name, ...args]) }));
   document.body.appendChild(canvas.root);
@@ -341,7 +341,9 @@ test("the selection box includes labels and an empty-board double click creates 
     pointer("pointerdown", 70, 70);
     pointer("pointerup", 70, 70);
   }
-  assert.equal(canvas.contextMenu.style.display, "none");
+  assert.equal(canvas.contextMenu.style.display, "flex");
+  assert.ok(!calls.some(([name]) => name === "onCreateNoteAt"));
+  canvas.contextMenu.querySelector('[data-action="note"]').click();
   assert.ok(calls.some(([name]) => name === "onCreateNoteAt"));
   canvas.root.remove();
 });
@@ -633,7 +635,7 @@ test("the right panel opens attached stamp settings", async () => {
   }
 });
 
-test("double clicking empty canvas creates a note and the toolbar opens the dialog", async () => {
+test("double clicking empty canvas opens note types and the toolbar opens the dialog", async () => {
   const app = new JournalApp();
   const host = document.createElement("div");
   app.element = host;
@@ -650,9 +652,12 @@ test("double clicking empty canvas creates a note and the toolbar opens the dial
     assert.equal(canvas.querySelector(".jn-context-menu button"), null);
     const existing = new Set(containers.shared.pages.keys());
     for (let i = 0; i < 2; i++) {
-      canvas.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
-      canvas.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0 }));
+      canvas.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 5000, clientY: 5000 }));
+      canvas.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 5000, clientY: 5000 }));
     }
+    await settle();
+    assert.equal(canvas.querySelectorAll('.jn-context-menu [data-action="note"], .jn-context-menu [data-action="memo"], .jn-context-menu [data-action="document"], .jn-context-menu [data-action="target"], .jn-context-menu [data-action="location"]').length, 5);
+    canvas.querySelector('.jn-context-menu [data-action="note"]').click();
     await settle();
     const created = [...containers.shared.pages.values()].filter(page => !existing.has(page.id));
     assert.equal(created.length, 1);
@@ -905,7 +910,7 @@ test("cards hide the internal name, show labels, and promote on qualifying conte
     assert.equal(untitled.querySelector(".jn-card-title").hidden, true);
     assert.equal(untitled.querySelector(".jn-card-title").textContent, "");
     assert.equal(untitled.textContent.includes("New Note 7"), false, "the internal Foundry name is never displayed");
-    assert.ok(untitled.querySelector(".jn-card-signature").textContent, "the author signature stays visible");
+    assert.equal(untitled.querySelector(".jn-card-signature"), null, "the author signature is removed");
 
     const labelled = card("labelledcard0001");
     assert.ok(labelled.classList.contains("jn-extended"), "a label promotes to extended");
@@ -974,7 +979,7 @@ test("stylized canvas uses cork, paper surfaces, fonts and torn clipping on the 
       const el = card(note._id);
       assert.ok(el, `card ${note._id} rendered`);
       assert.ok(el.querySelector(":scope > .jn-card-main"), "paper surface is the main wrapper");
-      assert.ok(el.querySelector(":scope > .jn-card-signature").textContent, "author signature remains");
+      assert.equal(el.querySelector(":scope > .jn-card-signature"), null, "author signature is absent");
       assert.equal(el.querySelector(".jn-author-stripe, .jn-author-badge, .jn-card-author-stripe, .jn-card-author-badge"), null,
         "no legacy author stripe/badge");
       assert.equal(el.classList.contains("jn-card-sticky"), false, "no legacy sticky class");
@@ -1455,7 +1460,7 @@ test("link groups carry layered stroke stacks, cosmetics and state classes witho
     }));
     await new Promise(resolve => setTimeout(resolve, 40));
     const comp = Number.parseFloat(canvas.root.style.getPropertyValue("--jn-zoom-comp"));
-    const expected = Math.round(Math.min(2, Math.max(0.5, 1 / canvas.view.k)) * 1000) / 1000;
+    const expected = 1 / canvas.view.k;
     assert.equal(comp, expected);
     assert.equal(group("legacy").querySelector(".jn-thread-layer").getAttribute("d"), pathBefore, "zoom does not redraw links");
   } finally {
@@ -3310,17 +3315,18 @@ test("attachment pins render author colour, all candidate styles, and transform 
   try {
     canvas.update([a, b], makeLayout());
     const card = id => canvas.root.querySelector(`.jn-card[data-id="${id}"]`);
-    const main = card(aId).querySelector(".jn-pin-main");
-    const minor = card(aId).querySelector('.jn-pin[data-anchor-id="m1"]');
+    const pinFor = (id, anchorId) => canvas.root.querySelector(`.jn-pin-layer [data-note-id="${id}"][data-anchor-id="${anchorId}"]`);
+    const main = pinFor(aId, "main");
+    const minor = pinFor(aId, "m1");
     assert.ok(main, "main pin rendered when attachment.mainPinEnabled and a main anchor exists");
     assert.ok(main.classList.contains("jn-pin-style-brass"), "pin style class comes from the attachment");
     assert.equal(main.style.getPropertyValue("--jn-pin-color"), gmUser.color,
       "the main pin uses the creator/author colour");
-    assert.equal(main.style.left, "50%");
-    assert.equal(main.style.top, "0%");
+    assert.equal(main.style.left, "100px");
+    assert.equal(main.style.top, "0px");
     assert.ok(minor, "minor anchors render their own pin");
-    assert.equal(minor.style.left, "20%", "legacy interior anchors keep their local position");
-    assert.equal(minor.style.top, "30%");
+    assert.equal(minor.style.left, "40px", "legacy interior anchors keep their local position");
+    assert.equal(minor.style.top, "30px");
     assert.equal(main.closest(".jn-card-main"), null, "pins live outside the clipped paper wrapper");
 
     const group = canvas.svg.querySelector('g[data-id="pinlink"]');
@@ -3341,7 +3347,7 @@ test("attachment pins render author colour, all candidate styles, and transform 
       a.system.attachment = { mainPinEnabled: true, mainSnapRadius: 24, minorSnapRadius: 6, pinStyle: style };
       canvas.update([a, b], makeLayout());
       const expected = style === "default" ? "enamel" : style;
-      assert.ok(card(aId).querySelector(`.jn-pin-main.jn-pin-style-${expected}`),
+      assert.ok(pinFor(aId, "main")?.classList.contains(`jn-pin-style-${expected}`),
         `${style} maps to the ${expected} pin visual`);
     }
     const css = readFileSync(new URL("../../styles/stylized.css", import.meta.url), "utf8");
@@ -3352,7 +3358,7 @@ test("attachment pins render author colour, all candidate styles, and transform 
       /\.jn-canvas \.jn-board-pin-control \{[^}]*width:\s*var\(--jn-main-pin-size, 14px\);/,
       "all pin heads use the primary pin size");
     assert.match(css,
-      /\.jn-canvas \.jn-card \.jn-pin::after,[\s\S]*?\.jn-canvas \.jn-board-pin-control::after \{[^}]*width:\s*max\(var\(--jn-pin-hit-size, 20px\), 100%\);/,
+      /\.jn-canvas \.jn-pin-layer \.jn-pin::after,[\s\S]*?\.jn-canvas \.jn-board-pin-control::after \{[^}]*width:\s*max\(var\(--jn-pin-hit-size, 20px\), 100%\);/,
       "small pins keep a 20px screen-space hit target");
     for (const style of ["enamel", "brass", "iron", "wood", "decorative", "wax"]) {
       assert.ok(css.includes(`.jn-pin-style-${style}::before`), `${style} has a pin visual rule`);
@@ -3364,7 +3370,7 @@ test("attachment pins render author colour, all candidate styles, and transform 
     layout.cards[aId].height = 120;
     layout.cards[aId].rotation = 90;
     canvas.update([a, b], layout);
-    assert.equal(card(aId).querySelector(".jn-pin-main").style.left, "50%",
+    assert.equal(pinFor(aId, "main").style.left, "180px",
       "normalized pin coordinates survive rotation and resize");
     const rotatedWorld = anchorWorld({ x: 0, y: 0, w: 240, h: 120, rotation: 90 },
       { kind: "main", x: 0.5, y: 0 });
@@ -3385,9 +3391,9 @@ test("attachment pins render author colour, all candidate styles, and transform 
     canvas.pinsEnabled = true;
     a.system.attachment = { mainPinEnabled: false, mainSnapRadius: 24, minorSnapRadius: 6, pinStyle: "brass" };
     canvas.update([a, b], layout);
-    assert.equal(card(aId).querySelector('.jn-pin[data-anchor-id="main"]'), null,
+    assert.equal(pinFor(aId, "main"), null,
       "a disabled main pin renders nothing and is never synthesized on the client");
-    assert.ok(card(aId).querySelector('.jn-pin[data-anchor-id="m1"]'), "minor pins remain visible");
+    assert.ok(pinFor(aId, "m1"), "minor pins remain visible");
   } finally {
     canvas.disconnectGeometry();
     canvas.root.remove();
@@ -3691,7 +3697,7 @@ test("private editor pin controls save attachment values directly", async () => 
     workspace.selectedNoteId = noteId;
     workspace.renderInto(canvasSlot, editorSlot);
     const card = canvasSlot.querySelector(`.jn-card[data-id="${noteId}"]`);
-    assert.ok(card.querySelector(".jn-pin-main"), "private notes render their main pin");
+    assert.ok(canvasSlot.querySelector(`.jn-pin-layer [data-note-id="${noteId}"][data-anchor-id="main"]`), "private notes render their main pin");
     const root = workspace.editor.root;
     const toggle = root.querySelector(".journalinator-main-pin");
     assert.ok(toggle, "the private editor exposes the same pin controls");
@@ -3740,12 +3746,13 @@ test("secret/hidden links never receive anchor ids or specs", async () => {
     canvas.update(notes, layout);
     const secretCard = canvas.root.querySelector(`.jn-card[data-id="${secretId}"]`);
     const sharedCard = canvas.root.querySelector(`.jn-card[data-id="${sharedId}"]`);
-    assert.ok(secretCard.querySelector(".jn-pin-main"), "a secret note keeps its own main pin");
+    const secretPin = canvas.root.querySelector(`.jn-pin-layer [data-note-id="${secretId}"][data-anchor-id="main"]`);
+    assert.ok(secretPin, "a secret note keeps its own main pin");
     const secretData = layout.cards[secretId];
     const sharedData = layout.cards[sharedId];
     canvas.toggleLinkTool();
-    secretCard.querySelector(".jn-pin-main").dispatchEvent(new MouseEvent("click", {
-      bubbles: true, button: 0, clientX: secretData.x + 100, clientY: secretData.y
+    secretCard.dispatchEvent(new MouseEvent("click", {
+      bubbles: true, button: 0, clientX: secretData.x + 100, clientY: secretData.y + 50
     }));
     sharedCard.dispatchEvent(new MouseEvent("click", {
       bubbles: true, button: 0, clientX: sharedData.x, clientY: sharedData.y + 50
@@ -5427,6 +5434,103 @@ test("search and filters show how many live notes are hidden, not deleted", asyn
     style.checked = false;
     style.dispatchEvent(new Event("change", { bubbles: true }));
     assert.equal(indicator.hidden, true, "removing the last filter hides the indicator");
+  } finally {
+    app._onClose();
+    host.remove();
+  }
+});
+
+test("private canvas saves pin link settings, deletes pins, and creates chosen note types", async () => {
+  const owner = makeUser("PrivateFollowup01", { name: "Private Followup" });
+  const page = await privateStore.createFor(owner);
+  const workspace = new PrivateWorkspace({ onChange() {} });
+  workspace.setPage(page);
+  const canvasSlot = document.createElement("div");
+  const editorSlot = document.createElement("div");
+  document.body.append(canvasSlot, editorSlot);
+  try {
+    const a = await workspace.createNoteAt({ title: "A", x: 10, y: 20 });
+    const b = await workspace.createNoteAt({ title: "B", x: 370, y: 20 });
+    await workspace.boardPinAction({ type: "add", noteId: a, x: 0.4, y: 0.5 });
+    await workspace.boardPinAction({ type: "add", noteId: "", x: 750, y: 300 });
+    const refs = Object.entries(workspace.workspace.layout.pins);
+    const ownedId = refs.find(([, pin]) => pin.noteId === a)[0];
+    const freeId = refs.find(([, pin]) => !pin.noteId)[0];
+    await workspace.boardPinAction({ type: "connect", source: `p:${ownedId}`, target: `p:${freeId}` });
+    workspace.renderInto(canvasSlot, editorSlot);
+    const canvas = workspace.canvas;
+    canvas.refreshGeometry();
+    const linkId = Object.keys(workspace.workspace.layout.pinLinks)[0];
+    const hit = canvas.pinLinksSvg.querySelector(`[data-pin-link="${linkId}"] .jn-pin-link-hit`);
+    assert.ok(hit);
+    hit.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 400, clientY: 160 }));
+    hit.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 400, clientY: 160 }));
+    assert.equal(canvas.linkToolbar.style.display, "flex");
+    const label = canvas.linkToolbar.querySelector(".jn-link-label-input");
+    label.value = "Private thread";
+    label.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    assert.equal(workspace.workspace.layout.pinLinks[linkId].label, "Private thread");
+    workspace.setPage(page);
+    assert.equal(workspace.workspace.layout.pinLinks[linkId].label, "Private thread",
+      "private link settings survive reload");
+    await workspace.boardPinAction({ type: "delete", ref: `p:${ownedId}` });
+    workspace.setPage(page);
+    assert.equal(workspace.workspace.layout.pins[ownedId], undefined);
+    assert.equal(workspace.workspace.layout.pinLinks[linkId], undefined);
+    assert.ok(workspace.workspace.layout.cards[a].anchors.main);
+    canvas.update(workspace.notes(), workspace.workspace.layout);
+    canvas.view = { x: 40, y: -30, k: 1.5 };
+    canvas.refreshGeometry();
+    const x = 1400 * canvas.view.k + canvas.view.x;
+    const y = 900 * canvas.view.k + canvas.view.y;
+    canvas.root.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, clientX: x, clientY: y }));
+    assert.ok(canvas.contextMenu.querySelector('[data-action="target"]'));
+    canvas.contextMenu.querySelector('[data-action="target"]').click();
+    await settle();
+    const created = workspace.notes().find(note => note._id !== a && note._id !== b);
+    assert.ok(created);
+    assert.equal(created.system.presentation.extendedStyle, "target");
+    assert.ok(Math.abs(workspace.workspace.layout.cards[created._id].x - (1400 - 126)) < 1e-6);
+  } finally {
+    workspace.canvas.disconnectGeometry();
+    canvasSlot.remove();
+    editorSlot.remove();
+  }
+});
+
+test("Pin tool remains highlighted until deactivated on both canvases", async () => {
+  await privateStore.createFor(gmUser);
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.append(host);
+  try {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+    let button = host.querySelector(".journalinator-add-pin");
+    button.click();
+    assert.equal(button.getAttribute("aria-pressed"), "true");
+    assert.ok(button.classList.contains("on"));
+    button.dispatchEvent(new MouseEvent("pointerout", { bubbles: true }));
+    assert.ok(button.classList.contains("on"), "pointer exit does not clear the active treatment");
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+    button = host.querySelector(".journalinator-add-pin");
+    assert.equal(button.getAttribute("aria-pressed"), "true", "render preserves the tool state");
+    button.click();
+    assert.equal(button.getAttribute("aria-pressed"), "false");
+    host.querySelector(".jn-view-switch").click();
+    host.querySelector(".jn-view-option[data-view='private']").click();
+    await settle();
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+    button = host.querySelector(".journalinator-private-add-pin");
+    assert.ok(button);
+    button.click();
+    assert.equal(button.getAttribute("aria-pressed"), "true");
+    host.querySelector(".journalinator-private-add-label").click();
+    assert.equal(button.getAttribute("aria-pressed"), "false", "another tool deactivates Pin");
   } finally {
     app._onClose();
     host.remove();

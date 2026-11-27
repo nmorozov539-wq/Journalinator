@@ -160,6 +160,8 @@ export default class JournalCanvas {
     this.pinDrag = null;
     this.pinTool = false;
     this.pinInteraction = null;
+    this.selectedPinRef = null;
+    this.hoverPinRef = null;
     this.pinOverride = null;
     this.pendingPinDrop = null;
     // Note attachment pins are DOM elements on the card, not SVG route pins. `anchorDrag` keeps
@@ -216,6 +218,7 @@ export default class JournalCanvas {
         <svg class="jn-link-hits" aria-hidden="true"></svg>
         <svg class="jn-links"></svg>
         <svg class="jn-pin-links" aria-hidden="true"></svg>
+        <div class="jn-pin-layer"></div>
       </div>
       <div class="jn-selection-box"></div>
       <div class="jn-context-menu"></div>
@@ -227,6 +230,7 @@ export default class JournalCanvas {
     this.world = this.root.querySelector(".jn-world");
     this.svg = this.root.querySelector(".jn-links");
     this.pinLinksSvg = this.root.querySelector(".jn-pin-links");
+    this.pinLayer = this.root.querySelector(".jn-pin-layer");
     this.linkHits = this.root.querySelector(".jn-link-hits");
     this.selectionBox = this.root.querySelector(".jn-selection-box");
     this.contextMenu = this.root.querySelector(".jn-context-menu");
@@ -305,6 +309,9 @@ export default class JournalCanvas {
         this.cardEls.delete(id);
         this.cardSizes.delete(id);
       }
+    }
+    for (const pin of this.pinLayer.querySelectorAll("[data-anchor-id]")) {
+      if (!seenCards.has(pin.dataset.noteId)) pin.remove();
     }
     this.#renderBoardPins();
 
@@ -448,8 +455,6 @@ export default class JournalCanvas {
             <div class="jn-card-text"><div class="jn-card-excerpt"></div></div>
           </div>
         </div>
-        <div class="jn-card-pins"></div>
-        <span class="jn-card-signature" aria-hidden="true"></span>
         <div class="jn-card-stamps"></div>
         <span class="jn-card-lock-pill">&#9998;</span>
         <b class="jn-card-resize"></b>
@@ -502,10 +507,6 @@ export default class JournalCanvas {
 
     const author = game.users.get(note.system.authorId);
     el.style.setProperty("--jn-author-color", author?.color ?? "#8d8d97");
-    const signature = el.querySelector(".jn-card-signature");
-    const initial = (author?.name ?? "?").trim().charAt(0).toUpperCase() || "?";
-    signature.textContent = initial;
-    signature.title = author?.name ?? "";
 
     const image = el.querySelector(".jn-card-image");
     const portrait = image.querySelector("img");
@@ -566,18 +567,14 @@ export default class JournalCanvas {
    * therefore rotate/resize with the card without any per-frame JavaScript.
    */
   #renderCardPins(el, note, cardData, attachment) {
-    const container = el.querySelector(".jn-card-pins");
-    if (!container) return;
+    for (const pin of this.pinLayer.querySelectorAll(`[data-note-id="${note._id}"][data-anchor-id]`)) pin.remove();
     const anchors = cardData?.anchors && typeof cardData.anchors === "object" ? cardData.anchors : {};
     const enabled = this.#pinsOn();
     el.classList.toggle("jn-pins-disabled", !enabled);
     el.dataset.pinStyle = attachment.pinStyle || "default";
     if (!enabled) {
-      container.replaceChildren();
-      container.hidden = true;
       return;
     }
-    container.hidden = false;
     const pins = [];
     for (const [anchorId, anchor] of Object.entries(anchors)) {
       if (!validAnchorId(anchorId)) continue;
@@ -610,19 +607,18 @@ export default class JournalCanvas {
         ? { ...anchor, x: drag.x, y: drag.y } : anchor, box);
       const x = point.x;
       const y = point.y;
-      pin.style.left = `${Math.min(1, Math.max(0, x)) * 100}%`;
-      pin.style.top = `${Math.min(1, Math.max(0, y)) * 100}%`;
+      const world = anchorWorld(this.#cardBox(note._id), { x, y, kind: main ? "main" : "minor" });
+      pin.style.left = `${world.x}px`;
+      pin.style.top = `${world.y}px`;
       const base = t(main ? "JN.Pin.Main" : "JN.Pin.Minor");
-      const label = main ? `${base} · ${t("JN.Pin.DragHint")}` : base;
-      pin.title = label;
-      pin.setAttribute("aria-label", label);
+      pin.setAttribute("aria-label", base);
       pins.push(pin);
     }
-    container.replaceChildren(...pins);
+    this.pinLayer.append(...pins);
   }
 
   #renderBoardPins() {
-    for (const pin of this.world.querySelectorAll(".jn-board-pin-control:not(.jn-moving-pin)")) pin.remove();
+    for (const pin of this.pinLayer.querySelectorAll(".jn-board-pin-control:not(.jn-moving-pin)")) pin.remove();
     for (const [id, data] of Object.entries(this.layout.pins ?? {})) {
       const owner = data.noteId ? this.cardEls.get(data.noteId) : null;
       if (data.noteId && !owner) continue;
@@ -636,15 +632,10 @@ export default class JournalCanvas {
       }
       pin.dataset.noteId = data.noteId ?? "";
       pin.setAttribute("aria-label", t("JN.Pin.Minor"));
-      if (owner) {
-        owner.querySelector(".jn-card-pins")?.append(pin);
-        pin.style.left = `${data.x * 100}%`;
-        pin.style.top = `${data.y * 100}%`;
-      } else {
-        this.world.append(pin);
-        pin.style.left = `${data.x}px`;
-        pin.style.top = `${data.y}px`;
-      }
+      this.pinLayer.append(pin);
+      const world = owner ? anchorWorld(this.#cardBox(data.noteId), { x: data.x, y: data.y }) : data;
+      pin.style.left = `${world.x}px`;
+      pin.style.top = `${world.y}px`;
     }
   }
 
@@ -653,18 +644,39 @@ export default class JournalCanvas {
     return resolvePin(ref, this.layout, new Map([...this.cardEls.keys()].map(id => [id, this.#cardBox(id)])));
   }
 
+  #syncPinPositions() {
+    for (const pin of this.pinLayer.querySelectorAll("[data-pin-ref]")) {
+      const point = this.#pinPoint(pin.dataset.pinRef);
+      if (!point) continue;
+      pin.style.left = `${point.x}px`;
+      pin.style.top = `${point.y}px`;
+    }
+  }
+
   #drawPinLinks() {
+    for (const [id, link] of this.linksById) if (link.boardPinLink) this.linksById.delete(id);
     const pieces = [];
     for (const [id, link] of Object.entries(this.layout.pinLinks ?? {})) {
       const start = this.#pinPoint(link.source), end = this.#pinPoint(link.target);
       if (!start || !end) continue;
-      const d = pinnedThreadPath({ ...start, nx: 0, ny: 0 }, { ...end, nx: 0, ny: 0 }, []).path;
+      const cosmetics = resolveLinkCosmetics(link);
+      const { path: d, center } = pinnedThreadPath({ ...start, nx: 0, ny: 0 },
+        { ...end, nx: 0, ny: 0 }, [], null, cosmetics.slack);
       const safeId = foundry.utils.escapeHTML(id);
-      pieces.push(`<g data-pin-link="${safeId}" class="jn-link-color-default jn-link-material-linen jn-link-pattern-continuous"
-        style="--jn-thread-k:0.765;--jn-thread-width:2.6"><g class="jn-link-strokes">
-        ${threadLayerSpecs("linen", 2.6).layers.map(layer => `<path class="jn-thread-layer jn-thread-${layer.role}"
+      const specs = threadLayerSpecs(cosmetics.material, cosmetics.thickness);
+      const color = normalizeLinkColor(link.color);
+      pieces.push(`<g data-pin-link="${safeId}" class="jn-link-color-${color || "default"}
+        jn-link-material-${specs.material} jn-link-pattern-${cosmetics.pattern}
+        ${this.selectedLinkId === id ? "jn-link-selected" : ""}"
+        style="--jn-thread-k:${specs.k};--jn-thread-width:${cosmetics.thickness}"><g class="jn-link-strokes">
+        ${specs.layers.map(layer => `<path class="jn-thread-layer jn-thread-${layer.role}"
           style="--jn-layer-width:${layer.widthFactor};--jn-layer-opacity:${layer.opacity};--jn-layer-dx:${layer.dx};--jn-layer-dy:${layer.dy}"
-          d="${d}"/>`).join("")}</g></g>`);
+          d="${d}"/>`).join("")}</g>
+        <path class="jn-pin-link-hit" data-id="${safeId}" d="${d}"/>
+        ${link.label ? `<text class="jn-link-label" x="${center.x}" y="${center.y + 4}">${foundry.utils.escapeHTML(link.label)}</text>` : ""}
+        </g>`);
+      this.linksById.set(id, { ...link, id, sourceId: null, boardPinLink: true,
+        mx: center.x, my: center.y });
     }
     this.pinLinksSvg.innerHTML = pieces.join("");
   }
@@ -1549,6 +1561,7 @@ export default class JournalCanvas {
   #flushLinkDraw() {
     if (this.linkDrawTimer !== null) this.linkDrawCancel?.(this.linkDrawTimer);
     this.linkDrawTimer = null;
+    this.#syncPinPositions();
     this.#drawLinks();
     this.#drawPinLinks();
     this.#syncLinkToolbar();
@@ -1605,9 +1618,14 @@ export default class JournalCanvas {
     if (this.readOnly || !this.selectedLinkId) return false;
     const link = this.linksById.get(this.selectedLinkId);
     if (!link) return false;
-    this.callbacks.onDeleteLink?.(link.sourceId, link.id);
+    this.#requestDeleteLink(link);
     this.#closeLinkToolbar();
     return true;
+  }
+
+  #requestDeleteLink(link) {
+    if (link.boardPinLink) this.callbacks.onBoardPinAction?.({ type: "deleteLink", linkId: link.id });
+    else this.callbacks.onDeleteLink?.(link.sourceId, link.id);
   }
 
   #syncLinkToolbar() {
@@ -1678,15 +1696,17 @@ export default class JournalCanvas {
         <input type="text" class="jn-link-label-input" placeholder="${t("JN.Link.Label")}" value="${foundry.utils.escapeHTML(link.label ?? "")}">
       </div>
       <div class="jn-link-row jn-link-actions">
-        ${this.#clearBoardPinsButton(link)}
-        ${this.#routeDetachButtons(link)}
-        ${this.#gmLinkButtons(link)}
+        ${link.boardPinLink ? "" : this.#clearBoardPinsButton(link)}
+        ${link.boardPinLink ? "" : this.#routeDetachButtons(link)}
+        ${link.boardPinLink ? "" : this.#gmLinkButtons(link)}
         <button type="button" class="jn-link-delete" title="${t("JN.Link.Delete")}">✕</button>
       </div>
     `;
     this.#positionLinkToolbar(link);
 
-    const update = fields => this.callbacks.onUpdateLink?.(link.sourceId, link.id, fields);
+    const update = fields => link.boardPinLink
+      ? this.callbacks.onBoardPinAction?.({ type: "updateLink", linkId: link.id, fields })
+      : this.callbacks.onUpdateLink?.(link.sourceId, link.id, fields);
     // Commit on change (blur), not per keystroke: one socket message and one world write
     // per label edit, matching the block-save rule in spec §6.2.
     this.linkToolbar.querySelector(".jn-link-label-input").onchange = ev => update({ label: ev.target.value });
@@ -1759,7 +1779,7 @@ export default class JournalCanvas {
       this.#closeLinkToolbar();
     });
     this.linkToolbar.querySelector(".jn-link-delete").onclick = () => {
-      this.callbacks.onDeleteLink(link.sourceId, link.id);
+      this.#requestDeleteLink(link);
       this.#closeLinkToolbar();
     };
 
@@ -1773,8 +1793,8 @@ export default class JournalCanvas {
 
   /** Selection is a class toggle, so clicking a thread never forces a full SVG rebuild. */
   #syncLinkSelection() {
-    for (const group of this.svg.querySelectorAll("g[data-id]")) {
-      group.classList.toggle("jn-link-selected", group.dataset.id === this.selectedLinkId);
+    for (const group of this.root.querySelectorAll(".jn-links g[data-id], .jn-pin-links g[data-pin-link]")) {
+      group.classList.toggle("jn-link-selected", (group.dataset.id ?? group.dataset.pinLink) === this.selectedLinkId);
     }
     this.#syncFloatingToolbar();
   }
@@ -2349,20 +2369,19 @@ export default class JournalCanvas {
     this.root.style.setProperty("--jn-board-zoom", String(this.view.k));
     this.root.style.setProperty("--jn-board-pattern-pos", `${this.view.x}px ${this.view.y}px`);
     this.root.classList.toggle("jn-far-zoom", this.view.k < 0.48);
-    this.#queueZoomComp();
+    this.#syncZoomComp();
   }
 
   /**
    * Pins and labels live inside the CSS-scaled world while thread strokes are
-   * non-scaling. Dividing by the zoom keeps their on-screen size steady for k in [0.5, 2]
-   * and eases off outside that range so extreme zooms still feel like zooming.
+   * non-scaling. Update in the same wheel event as the transform so a hovered pin
+   * never spends a frame at the new zoom with the old diameter.
    */
   #syncZoomComp() {
     const k = this.view.k || 1;
-    const comp = Math.min(2, Math.max(0.5, 1 / k));
-    this.root.style.setProperty("--jn-zoom-comp", String(Math.round(comp * 1000) / 1000));
-    // Pin heads change gently with board zoom. Their invisible hit areas remain 20 screen px.
-    this.root.style.setProperty("--jn-main-pin-size", `${Math.max(8, Math.min(22, 14 * Math.sqrt(k))) / k}px`);
+    const comp = 1 / k;
+    this.root.style.setProperty("--jn-zoom-comp", String(comp));
+    this.root.style.setProperty("--jn-main-pin-size", `${14 / k}px`);
     this.root.style.setProperty("--jn-minor-pin-size", `${Math.max(5, Math.min(10, 7 * Math.sqrt(k))) / k}px`);
     this.root.style.setProperty("--jn-pin-hit-size", `${20 / k}px`);
   }
@@ -2496,7 +2515,21 @@ export default class JournalCanvas {
     if (this.readOnly) return this.#warnReadOnly();
     this.pinTool = !this.pinTool;
     this.root.classList.toggle("jn-placing-pin", this.pinTool);
+    this.callbacks.onPinToolChange?.(this.pinTool);
     if (!this.pinTool) this.#cancelPinInteraction();
+  }
+
+  deactivatePinTool() {
+    if (this.pinTool) this.togglePinTool();
+  }
+
+  #deleteTargetPin() {
+    const ref = this.selectedPinRef ?? this.hoverPinRef;
+    if (!ref || !this.#pinPoint(ref)?.movable || this.readOnly) return false;
+    this.#cancelPinInteraction();
+    this.selectedPinRef = null;
+    this.callbacks.onBoardPinAction?.({ type: "delete", ref });
+    return true;
   }
 
   #hitCanvas(ev) {
@@ -2505,6 +2538,18 @@ export default class JournalCanvas {
     const pin = elements.find(element => element.closest?.("[data-pin-ref]"))?.closest("[data-pin-ref]");
     if (pin) return { ref: pin.dataset.pinRef, noteId: pin.dataset.noteId ?? "", directPin: true };
     const card = elements.find(element => element.closest?.(".jn-card"))?.closest(".jn-card");
+    if (!card) {
+      const world = this.#toWorld(ev.clientX, ev.clientY);
+      for (const [id] of [...this.cardEls].reverse()) {
+        const box = this.#cardBox(id);
+        const angle = -(box.rotation ?? 0) * Math.PI / 180;
+        const dx = world.x - box.x - box.w / 2, dy = world.y - box.y - box.h / 2;
+        const x = dx * Math.cos(angle) - dy * Math.sin(angle);
+        const y = dx * Math.sin(angle) + dy * Math.cos(angle);
+        if (Math.abs(x) <= box.w / 2 && Math.abs(y) <= box.h / 2)
+          return { ref: pinRef(id), noteId: id, directPin: false };
+      }
+    }
     return { ref: card ? pinRef(card.dataset.id) : null, noteId: card?.dataset.id ?? "", directPin: false };
   }
 
@@ -2548,7 +2593,7 @@ export default class JournalCanvas {
         ghost.type = "button";
         ghost.className = "jn-pin jn-pin-main jn-pin-style-enamel jn-board-pin-control jn-moving-pin";
         ghost.style.pointerEvents = "none";
-        this.world.append(ghost);
+        this.pinLayer.append(ghost);
         state.ghost = ghost;
       }
       state.ghost.style.left = `${point.x}px`;
@@ -2767,7 +2812,7 @@ export default class JournalCanvas {
   }
 
   #pinElement(noteId, anchorId) {
-    for (const pin of this.cardEls.get(noteId)?.querySelectorAll(".jn-pin") ?? []) {
+    for (const pin of this.pinLayer.querySelectorAll(`[data-note-id="${noteId}"][data-anchor-id]`)) {
       if (pin.dataset.anchorId === anchorId) return pin;
     }
     return null;
@@ -2959,7 +3004,6 @@ export default class JournalCanvas {
     let lastLabelClick = null;
     let lastCardClick = null;
     let lastBoardClick = null;
-    let lastBoardCreatedAt = 0;
 
     // Hover/editing fade is pure class toggling on the existing mask shapes. No path or DOM
     // rebuild happens here, so a busy board stays responsive.
@@ -3022,6 +3066,16 @@ export default class JournalCanvas {
 
     this.root.addEventListener("keydown", ev => {
       if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
+      if (ev.key === "Backspace" && !ev.isComposing && !ev.ctrlKey && !ev.metaKey
+          && !ev.altKey && !ev.shiftKey
+          && !ev.target.closest("input, textarea, select, [contenteditable]")) {
+        if (this.selectedPinRef || this.hoverPinRef) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          if (!ev.repeat) this.#deleteTargetPin();
+          return;
+        }
+      }
       if ((ev.key === "Delete" || ev.key === "Backspace") && this.selectedLinkId
           && !this.readOnly && !ev.isComposing && !ev.ctrlKey && !ev.metaKey
           && !ev.altKey && !ev.shiftKey && !ev.target.closest("input, textarea, select, [contenteditable]")) {
@@ -3029,7 +3083,7 @@ export default class JournalCanvas {
         ev.stopPropagation();
         if (!ev.repeat) {
           const link = this.linksById.get(this.selectedLinkId);
-          if (link) this.callbacks.onDeleteLink?.(link.sourceId, link.id);
+          if (link) this.#requestDeleteLink(link);
           this.#closeLinkToolbar();
         }
         return;
@@ -3105,6 +3159,8 @@ export default class JournalCanvas {
         if (hit.directPin && !this.readOnly) {
           ev.preventDefault();
           ev.stopPropagation();
+          this.root.focus({ preventScroll: true });
+          this.selectedPinRef = hit.ref;
           lastBoardClick = null;
           this.pinInteraction = { mode: "thread", sourceRef: hit.ref,
             movable: !!this.#pinPoint(hit.ref)?.movable, firstAt: Date.now(),
@@ -3114,7 +3170,8 @@ export default class JournalCanvas {
           try { this.root.setPointerCapture(ev.pointerId); } catch { /* synthetic pointer */ }
           return;
         }
-        if (this.pinTool && !this.readOnly) {
+        if (this.pinTool && !this.readOnly
+            && !ev.target.closest(".jn-link-hit, .jn-pin-link-hit")) {
           ev.preventDefault();
           ev.stopPropagation();
           drag = { type: "place-pin", sx: ev.clientX, sy: ev.clientY, moved: 0,
@@ -3123,6 +3180,7 @@ export default class JournalCanvas {
           return;
         }
       }
+      if (ev.button === 0 && !ev.target.closest("[data-pin-ref]")) this.selectedPinRef = null;
       if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
       if (ev.target.closest(".jn-route-chooser")) return;
       if (ev.target.closest(".jn-floating-toolbar, .jn-floating-popover")) return;
@@ -3146,7 +3204,7 @@ export default class JournalCanvas {
       const resizeHandle = this.readOnly ? null : ev.target.closest(".jn-card-resize");
       const labelEl = ev.target.closest(".jn-label");
       const stampId = this.readOnly ? null : ev.target.closest("[data-stamp-label-id]")?.dataset.stampLabelId;
-      const linkHit = ev.target.closest(".jn-link-hit");
+      const linkHit = ev.target.closest(".jn-link-hit, .jn-pin-link-hit");
       const pin = this.readOnly ? null : ev.target.closest("[data-pin-index]");
       const notePin = ev.target.closest(".jn-pin");
       if (ev.button !== 0 || cardEl || labelEl || linkHit) lastBoardClick = null;
@@ -3220,6 +3278,9 @@ export default class JournalCanvas {
     });
 
     this.root.addEventListener("pointermove", ev => {
+      const pointedPin = this.root.ownerDocument.elementFromPoint?.(ev.clientX, ev.clientY)
+        ?.closest?.("[data-pin-ref]") ?? ev.target.closest?.("[data-pin-ref]");
+      this.hoverPinRef = pointedPin?.dataset.pinRef ?? null;
       if (this.pinInteraction) {
         const press = this.pinInteraction.press;
         if (press) press.moved = Math.max(press.moved,
@@ -3475,7 +3536,7 @@ export default class JournalCanvas {
         const now = Date.now();
         if (this.lastLinkClick?.id === drag.id && now - this.lastLinkClick.at < 420) {
           const link = this.linksById.get(drag.id);
-          if (link && !drag.readOnly) this.callbacks.onDeleteLink(link.sourceId, link.id);
+          if (link && !drag.readOnly) this.#requestDeleteLink(link);
           this.lastLinkClick = null;
           this.selectedLinkId = null;
           this.#syncLinkSelection();
@@ -3499,12 +3560,8 @@ export default class JournalCanvas {
           const now = Date.now();
           if (lastBoardClick && now - lastBoardClick.at < 450
               && Math.hypot(ev.clientX - lastBoardClick.x, ev.clientY - lastBoardClick.y) <= 8) {
-            if (!this.readOnly) {
-              const point = this.#toWorld(ev.clientX, ev.clientY);
-              this.callbacks.onCreateNoteAt?.(point.x - CREATE_WIDTHS.note / 2, point.y - 30, {
-                kind: "note", presentation: { extendedStyle: "memo", forceExtended: false }
-              });
-              lastBoardCreatedAt = now;
+            if (!this.readOnly && !this.pinTool && !this.#hitCanvas(ev).noteId) {
+              this.#openContextMenu(ev.clientX, ev.clientY);
             }
             lastBoardClick = null;
           } else lastBoardClick = { at: now, x: ev.clientX, y: ev.clientY };
@@ -3534,7 +3591,9 @@ export default class JournalCanvas {
     this.root.addEventListener("dblclick", ev => {
       if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
       if (ev.target.closest(".jn-floating-toolbar, .jn-floating-popover")) return;
-      if (ev.target.closest("[data-pin-ref]")) return;
+      const layers = this.root.ownerDocument.elementsFromPoint?.(ev.clientX, ev.clientY) ?? [ev.target];
+      if (layers.some(element => element.closest?.("[data-pin-ref]"))
+          || ev.target.closest("[data-pin-ref]")) return;
       if (ev.target.closest("[data-stamp-label-id], .jn-label")) return;
       if (ev.target.closest(".jn-card-resize")) {
         if (this.readOnly) return this.#warnReadOnly();
@@ -3547,19 +3606,18 @@ export default class JournalCanvas {
         this.callbacks.onResetCardSize(id);
         return;
       }
-      const text = ev.target.closest("[data-card-text]");
+      const text = layers.find(element => element.closest?.("[data-card-text]"))
+        ?.closest("[data-card-text]") ?? ev.target.closest("[data-card-text]");
       if (text && !this.readOnly) {
         ev.preventDefault();
         this.#editCardText(text.closest(".jn-card").dataset.id, text);
         return;
       }
-      if (ev.target.closest(".jn-card, .jn-link-hit, .jn-pin")) return;
-      if (Date.now() - lastBoardCreatedAt < 450 || this.readOnly || this.pinTool) return;
-      const point = this.#toWorld(ev.clientX, ev.clientY);
-      this.callbacks.onCreateNoteAt?.(point.x - CREATE_WIDTHS.note / 2, point.y - 30, {
-        kind: "note", presentation: { extendedStyle: "memo", forceExtended: false }
-      });
-      lastBoardCreatedAt = Date.now();
+      if (this.#hitCanvas(ev).noteId || ev.target.closest(".jn-link-hit")
+          || layers.some(element => element.closest?.(".jn-link-hit"))) return;
+      if (this.readOnly || this.pinTool) return;
+      ev.preventDefault();
+      this.#openContextMenu(ev.clientX, ev.clientY);
     });
   }
 
