@@ -815,6 +815,11 @@
   --jn-pin-color: var(--jn-author-color, #8d8d97);
 }
 .jn-canvas .jn-world > .jn-board-pin-control { z-index: 5; }
+/* The drag ghost is positioned entirely through transform; keep it on its own paint layer. */
+.jn-canvas .jn-pin-layer .jn-moving-pin {
+  will-change: transform;
+  pointer-events: none;
+}
 /* The transparent pseudo-element keeps a 20px screen target at every zoom. */
 .jn-canvas .jn-pin-layer .jn-pin::after,
 .jn-canvas .jn-board-pin-control::after {

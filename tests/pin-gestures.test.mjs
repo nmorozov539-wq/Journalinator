@@ -538,8 +538,8 @@ test("pin drag repaints attached threads and pin links in place before release",
   event(canvas.root, "pointermove", sx, sy);
   const ghost = canvas.pinLayer.querySelector(".jn-moving-pin");
   assert.ok(ghost, "the pin is picked up immediately");
-  assert.equal(Number.parseFloat(ghost.style.left), target.x);
-  assert.equal(Number.parseFloat(ghost.style.top), target.y);
+  assert.match(ghost.style.transform, new RegExp(`translate3d\\(${target.x}px, ${target.y}px`),
+    "the ghost follows the pointer through a composited transform");
   assert.equal(actions.length, 0, "no write happens on pointermove");
 
   await frame();
@@ -601,18 +601,19 @@ test("dragging a note pin never uses percent positions or snaps back before its 
   await frame();
   assert.notEqual(path.getAttribute("d"), beforePath,
     "a link attached by anchor id follows the moving note pin");
-  assert.match(pin.style.left, /px$/, "the pin stays in world pixels");
-  assert.doesNotMatch(pin.style.left, /%$/, "no legacy percent position is written");
-  assert.equal(Number.parseFloat(pin.style.left), target.x);
-  assert.equal(Number.parseFloat(pin.style.top), target.y);
+  const ghost = canvas.pinLayer.querySelector(".jn-moving-pin");
+  assert.ok(ghost, "the dragged pin has a live ghost");
+  assert.match(ghost.style.transform, new RegExp(`translate3d\\(${target.x}px, ${target.y}px`),
+    "the ghost follows the pointer in world pixels without a percent position");
+  assert.equal(pin.style.visibility, "hidden", "the stored pin is hidden under the ghost");
 
   event(canvas.root, "pointerup", sx, sy);
   assert.equal(canvas.pinOverride?.ref, `n:${a.id}:${anchorId}`);
-  assert.match(pin.style.left, /px$/, "the pending write keeps the world-pixel preview");
-  assert.doesNotMatch(pin.style.left, /%$/);
-  assert.equal(Number.parseFloat(pin.style.left), target.x);
-  assert.equal(Number.parseFloat(pin.style.top), target.y);
-  assert.notEqual(pin.style.left, before.left, "the pin does not snap back to its old location");
+  assert.match(ghost.style.transform, new RegExp(`translate3d\\(${target.x}px, ${target.y}px`),
+    "the pending write keeps the ghost at the drop point");
+  assert.equal(pin.style.visibility, "hidden");
+  assert.equal(Number.parseFloat(pin.style.left), target.x,
+    "the hidden pin follows the pending override in world pixels");
   canvas.disconnectGeometry();
   canvas.root.remove();
 });
@@ -649,4 +650,49 @@ test("moving a legacy minor anchor migrates its link endpoint without changing t
     "the original connection still renders after reload");
   canvas.disconnectGeometry();
   canvas.root.remove();
+});
+
+test("duplicate legacy anchors render one pin and no small endpoint dots", () => {
+  const aId = "pinstack00000001";
+  const bId = "pinstack00000002";
+  const note = (id, links = []) => ({
+    _id: id, name: id,
+    system: {
+      style: "sticky", authorId: user.id, blocks: [], links,
+      attachment: { mainPinEnabled: true, mainSnapRadius: 24, minorSnapRadius: 6, pinStyle: "enamel" }
+    }
+  });
+  const links = [
+    { id: "dup", targetId: bId, sourceAnchorId: "dup1", targetAnchorId: "main" },
+    { id: "legacy", targetId: bId, sourcePoint: { x: 1, y: 0.5 }, targetPoint: { x: 0, y: 0.5 } }
+  ];
+  const layout = {
+    cards: {
+      [aId]: { x: 0, y: 0, width: 200, height: 100, rotation: 0, anchors: {
+        main: { kind: "main", x: 0.5, y: 0, createdBy: user.id },
+        dup1: { kind: "minor", x: 0.5, y: 0, createdBy: user.id },
+        dup2: { kind: "minor", x: 0.5, y: 0, createdBy: user.id }
+      } },
+      [bId]: { x: 400, y: 0, width: 200, height: 100, rotation: 0, anchors: {
+        main: { kind: "main", x: 0.5, y: 0, createdBy: user.id }
+      } }
+    },
+    labels: {}
+  };
+  const canvas = new JournalCanvas({ onSelectNote() {} });
+  document.body.append(canvas.root);
+  canvas.pinsEnabled = true;
+  try {
+    canvas.update([note(aId, links), note(bId)], layout);
+    const pins = canvas.root.querySelectorAll(`.jn-pin-layer [data-note-id="${aId}"]`);
+    assert.equal(pins.length, 1, "three coincident anchors paint one physical pin");
+    assert.equal(pins[0].dataset.anchorId, "main", "the main pin is the canonical visible pin");
+    const endpoints = [...canvas.svg.querySelectorAll(".jn-thread-pin:not(.jn-board-pin)")];
+    assert.ok(endpoints.length > 0);
+    assert.ok(endpoints.every(pin => pin.classList.contains("jn-thread-pin-attached")),
+      "with pins enabled there are no small SVG endpoint pins, including legacy point-only links");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
 });

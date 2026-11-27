@@ -2,8 +2,8 @@ import {
   CARD_SIDES, MAX_THREAD_PINS, THREAD_PIN_RADIUS, cardEdgeAt, cardPointAnchor, moveThreadPin, threadAttachment, validThreadPin
 } from "../card-ports.mjs";
 import {
-  MAIN_ANCHOR_ID, anchorWorld, cardNormalizedPoint, isMainAnchor, minorOnEdge, nearestAnchor,
-  nearestMinorAnchor, validAnchorId
+  ANCHOR_MERGE_TOLERANCE, MAIN_ANCHOR_ID, anchorWorld, cardNormalizedPoint, isMainAnchor,
+  minorOnEdge, nearestAnchor, nearestMinorAnchor, validAnchorId
 } from "../anchors.mjs";
 import { boardPinRef, pinRef, resolvePin } from "../board-pins.mjs";
 import { looseTails, pinnedThreadPath, threadLayerSpecs, ThreadMotion, THREAD_PRESETS } from "../link-thread.mjs";
@@ -179,6 +179,9 @@ export default class JournalCanvas {
     // In-place handles for the pin-link SVG. Keeping them lets a drag update path data without
     // re-parsing the whole pin-link markup.
     this.pinLinkEls = new Map();
+    // Render-time alias for old duplicate anchors: link endpoint dots resolve to the one pin
+    // actually painted at that physical point until the data cleanup rewrites the ids.
+    this.pinAliases = new Map();
     this.pinsEnabled = null; // null = read the world setting; boolean lets JournalApp/tests override
     this.pinTarget = null;
     this.snappedPinEl = null;
@@ -304,6 +307,7 @@ export default class JournalCanvas {
       }
     }
     const seenCards = new Set();
+    this.pinAliases.clear();
     for (const note of notes) {
       seenCards.add(note._id);
       this.#renderCard(note, attached.get(note._id));
@@ -582,15 +586,38 @@ export default class JournalCanvas {
     if (!enabled) {
       return;
     }
-    const pins = [];
+    // Do not measure an anchor-less card here: tests and startup can bind late, and caching a
+    // placeholder height before the card is laid out would place every later pin incorrectly.
+    if (!Object.keys(anchors).length) return;
+    const box = this.#cardBox(note._id);
+    const candidates = [];
     for (const [anchorId, anchor] of Object.entries(anchors)) {
       if (!validAnchorId(anchorId)) continue;
       if (!anchor || !Number.isFinite(anchor.x) || !Number.isFinite(anchor.y)) continue;
       const main = isMainAnchor(anchor);
       if (main && !attachment.mainPinEnabled) continue;
-      const box = !main ? this.#cardBox(note._id) : null;
-      const styleKey = attachment.pinStyle || "default";
-      const style = styleKey === "default" ? "enamel" : styleKey;
+      const world = anchorWorld(box, { ...anchor, x: anchor.x, y: anchor.y, kind: main ? "main" : "minor" });
+      if (!world) continue;
+      candidates.push({ anchorId, anchor, main, world });
+    }
+    // A main pin wins over any coincident legacy anchor; otherwise the lexicographically first id
+    // is canonical. Old boards can still contain several anchors at one physical point, so the
+    // renderer paints one pin immediately instead of showing a stack until the next data cleanup.
+    candidates.sort((left, right) =>
+      Number(right.main) - Number(left.main) || left.anchorId.localeCompare(right.anchorId));
+    const rendered = [];
+    const styleKey = attachment.pinStyle || "default";
+    const style = styleKey === "default" ? "enamel" : styleKey;
+    const pins = [];
+    for (const candidate of candidates) {
+      const canonical = rendered.find(entry => Math.hypot(
+        entry.world.x - candidate.world.x, entry.world.y - candidate.world.y) <= ANCHOR_MERGE_TOLERANCE);
+      if (canonical) {
+        this.pinAliases.set(`${note._id}\u0000${candidate.anchorId}`, canonical.anchorId);
+        continue;
+      }
+      rendered.push(candidate);
+      const { anchorId, anchor, main, world } = candidate;
       const pin = document.createElement("button");
       pin.type = "button";
       // There is one pin type: every attachment pin uses the same main-pin visual, including
@@ -611,10 +638,6 @@ export default class JournalCanvas {
         const creator = game.users?.get?.(anchor.createdBy);
         if (creator?.color) pin.style.setProperty("--jn-pin-color", creator.color);
       }
-      const point = main ? anchor : minorOnEdge(anchor, box);
-      const x = point.x;
-      const y = point.y;
-      const world = anchorWorld(this.#cardBox(note._id), { x, y, kind: main ? "main" : "minor" });
       pin.style.left = `${world.x}px`;
       pin.style.top = `${world.y}px`;
       const base = t(main ? "JN.Pin.Main" : "JN.Pin.Minor");
@@ -1696,13 +1719,8 @@ export default class JournalCanvas {
   #paintPinDrag() {
     const override = this.pinOverride;
     if (!override?.point) return;
-    // Keep the hidden source element on the same world point as the ghost, so any later
-    // geometry pass during the drag sees the live position instead of the stored layout.
-    const sourcePin = this.pinInteraction?.pinEl;
-    if (sourcePin) {
-      sourcePin.style.left = `${override.point.x}px`;
-      sourcePin.style.top = `${override.point.y}px`;
-    }
+    // The override is the source of truth for the drag; the hidden source element does not need
+    // its own layout update. Avoid touching it so the pointer path stays layout-free.
     const boxes = new Map([...this.cardEls.keys()].map(id => [id, this.#cardBox(id)]));
     const links = this.#linksTouchingPin(override.ref);
     if (links.length) this.#updateLinkGeometry(links, boxes, false, null, { partial: true });
@@ -2601,11 +2619,11 @@ export default class JournalCanvas {
     this.#syncLinkToolbar();
   }
 
-  #toWorld(clientX, clientY) {
-    const rect = this.root.getBoundingClientRect();
+  #toWorld(clientX, clientY, rect = null) {
+    const bounds = rect ?? this.root.getBoundingClientRect();
     return {
-      x: (clientX - rect.left - this.view.x) / this.view.k,
-      y: (clientY - rect.top - this.view.y) / this.view.k
+      x: (clientX - bounds.left - this.view.x) / this.view.k,
+      y: (clientY - bounds.top - this.view.y) / this.view.k
     };
   }
 
@@ -2784,7 +2802,10 @@ export default class JournalCanvas {
   #updatePinInteraction(ev) {
     const state = this.pinInteraction;
     if (!state) return;
-    const point = this.#toWorld(ev.clientX, ev.clientY);
+    // A pin drag runs while the root transform is fixed. Cache its viewport rect once so a
+    // pointermove never forces a fresh layout just to convert client to world coordinates.
+    state.rect ??= this.root.getBoundingClientRect();
+    const point = this.#toWorld(ev.clientX, ev.clientY, state.rect);
     if (state.mode === "thread") {
       const start = this.#pinPoint(state.sourceRef);
       if (start && this.previewPath) this.previewPath.setAttribute("d", pinnedThreadPath(
@@ -2805,10 +2826,12 @@ export default class JournalCanvas {
         this.pinLayer.append(ghost);
         state.ghost = ghost;
       }
-      // The ghost follows the pointer immediately; connected geometry catches up in the next
-      // animation frame without rebuilding the whole SVG or the floating toolbars.
-      state.ghost.style.left = `${point.x}px`;
-      state.ghost.style.top = `${point.y}px`;
+      // The ghost follows the pointer immediately. A composited transform avoids a layout pass
+      // on every pointermove; connected geometry catches up in the next animation frame without
+      // rebuilding the whole SVG or the floating toolbars.
+      state.ghost.style.left = "0px";
+      state.ghost.style.top = "0px";
+      state.ghost.style.transform = `translate3d(${point.x}px, ${point.y}px, 0) translate(-50%, -50%)`;
       this.#schedulePinDragPaint();
     }
   }
@@ -2826,8 +2849,9 @@ export default class JournalCanvas {
   #finishPinMove(ev) {
     const state = this.pinInteraction;
     if (!state || state.mode !== "move") return;
-    const point = this.#toWorld(ev.clientX, ev.clientY);
+    const point = this.#toWorld(ev.clientX, ev.clientY, state.rect ?? null);
     const noteId = this.#hitCanvas(ev).noteId;
+    if (noteId) this.cardSizes.delete(noteId);
     const box = noteId ? this.#cardBox(noteId) : null;
     const local = box ? cardNormalizedPoint(box, point) : point;
     if (!local) return this.#cancelPinInteraction();
@@ -2835,8 +2859,9 @@ export default class JournalCanvas {
     // local override on that exact world point while the single write is in flight.
     this.pinOverride = { ref: state.sourceRef, point: { ...point, nx: 0, ny: 0, movable: true } };
     if (state.ghost) {
-      state.ghost.style.left = `${point.x}px`;
-      state.ghost.style.top = `${point.y}px`;
+      state.ghost.style.left = "0px";
+      state.ghost.style.top = "0px";
+      state.ghost.style.transform = `translate3d(${point.x}px, ${point.y}px, 0) translate(-50%, -50%)`;
     }
     const write = this.callbacks.onBoardPinAction?.({ type: "move", ref: state.sourceRef,
       noteId, x: local.x, y: local.y });
@@ -3065,12 +3090,20 @@ export default class JournalCanvas {
     return null;
   }
 
-  /** The DOM pin is the sole visible dot for an attached endpoint, including legacy overlaps. */
+  /**
+   * With pins enabled the DOM pin is the only visible endpoint marker. This also hides legacy
+   * SVG endpoint dots (the old "small pin" leftovers) and resolves duplicate anchor ids to the
+   * one rendered pin at that physical point.
+   */
   #visibleEndpointPin(noteId, anchorId) {
-    if (!anchorId || !this.#pinsOn()) return false;
-    if (this.#pinElement(noteId, anchorId)) return true;
-    return isMainAnchor(this.#cardAnchor(noteId, anchorId))
-      && !!this.#pinElement(noteId, MAIN_ANCHOR_ID);
+    if (!this.#pinsOn()) return false;
+    if (anchorId) {
+      const canonicalId = this.pinAliases.get(`${noteId}\u0000${anchorId}`) ?? anchorId;
+      if (this.#pinElement(noteId, canonicalId)) return true;
+      if (isMainAnchor(this.#cardAnchor(noteId, anchorId))
+          && this.#pinElement(noteId, MAIN_ANCHOR_ID)) return true;
+    }
+    return true;
   }
 
   #highlightSnappedPin(cardId, anchorId) {
@@ -3530,10 +3563,11 @@ export default class JournalCanvas {
     });
 
     this.root.addEventListener("pointermove", ev => {
-      const pointedPin = this.root.ownerDocument.elementFromPoint?.(ev.clientX, ev.clientY)
-        ?.closest?.("[data-pin-ref]") ?? ev.target.closest?.("[data-pin-ref]");
-      this.hoverPinRef = pointedPin?.dataset.pinRef ?? null;
       if (this.pinInteraction) {
+        // Do not call elementFromPoint during a pin drag: it can force a synchronous layout
+        // before the ghost's new transform is painted. The target under the captured pointer is
+        // enough for hover state here.
+        this.hoverPinRef = ev.target.closest?.("[data-pin-ref]")?.dataset.pinRef ?? null;
         // Only an active press is a gesture; the armed thread preview after a single click still
         // follows the pointer and must not keep refreshing the board-menu suppression window.
         if (this.pinInteraction.press) this.#markPinGesture();
@@ -3543,6 +3577,9 @@ export default class JournalCanvas {
         this.#updatePinInteraction(ev);
         return;
       }
+      const pointedPin = this.root.ownerDocument.elementFromPoint?.(ev.clientX, ev.clientY)
+        ?.closest?.("[data-pin-ref]") ?? ev.target.closest?.("[data-pin-ref]");
+      this.hoverPinRef = pointedPin?.dataset.pinRef ?? null;
       if (this.linkPlacement) {
         const world = this.#toWorld(ev.clientX, ev.clientY);
         const card = this.#linkCardAt(ev);
@@ -3650,8 +3687,20 @@ export default class JournalCanvas {
       if (drag.type === "place-pin") {
         if (wasClick && ev.type === "pointerup") {
           const point = this.#toWorld(ev.clientX, ev.clientY);
-          const noteId = this.#hitCanvas(ev).noteId || drag.noteId;
-          const local = noteId ? cardNormalizedPoint(this.#cardBox(noteId), point) : point;
+          // Prefer the note under the original press. Re-hit-testing on pointerup can land on a
+          // neighbouring/overlapping card or a pin and make the same edge click materialize on a
+          // different note's middle. Re-measure that note first: a stale size cache turns an edge
+          // click into a normalized middle coordinate.
+          const noteId = drag.noteId || this.#hitCanvas(ev).noteId;
+          if (noteId) this.cardSizes.delete(noteId);
+          const box = noteId ? this.#cardBox(noteId) : null;
+          let local = box ? cardNormalizedPoint(box, point) : point;
+          if (box && local) {
+            const edge = cardEdgeAt(box, point);
+            if (edge.distance * this.view.k <= 10) {
+              local = { ...edge.point };
+            }
+          }
           if (local) this.callbacks.onBoardPinAction?.({ type: "add", noteId,
             x: local.x, y: local.y });
         }

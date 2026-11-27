@@ -47,7 +47,12 @@ export function anchorSide(anchor, box) {
 /** World point and outward normal for one normalized anchor. */
 export function anchorWorld(box, anchor) {
   if (!anchor || !validLinkPoint(anchor)) return null;
-  anchor = minorOnEdge(anchor, box);
+  // The main pin is a constant at the top-centre of the note. Older/corrupt records could carry
+  // different coordinates; geometry must always canonicalize them so threads, hit tests and the
+  // visible pin cannot disagree about where the main pin lives.
+  anchor = isMainAnchor(anchor)
+    ? { ...anchor, x: MAIN_PIN.x, y: MAIN_PIN.y }
+    : minorOnEdge(anchor, box);
   const point = cardPointAnchor(box, anchor);
   const distances = [
     { side: "top", value: anchor.y * box.h },
@@ -341,6 +346,124 @@ export function mergeNearbyMinorAnchors(cards, notes, {
   }
 
   return { cards: next, changed, links, pinLinks: rewiredPinLinks };
+}
+
+function freshAnchorId(anchors) {
+  const taken = new Set(Object.keys(anchors ?? {}));
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const id = globalThis.foundry?.utils?.randomID?.()
+      ?? `pin${Math.random().toString(36).slice(2, 10)}`;
+    if (id !== MAIN_ANCHOR_ID && !taken.has(id) && validAnchorId(id)) return id.slice(0, MAX_ANCHOR_ID_LENGTH);
+  }
+  let id = `pin${Date.now().toString(36)}`;
+  while (taken.has(id)) id += "x";
+  return id.slice(0, MAX_ANCHOR_ID_LENGTH);
+}
+
+/**
+ * Converts legacy point-only link endpoints into stable anchor references. Older boards stored
+ * `sourcePoint`/`targetPoint` without an anchor id, which made each endpoint paint as a small SVG
+ * dot even after the pin system existed. Reusing an existing main/minor pin at the same physical
+ * point (or creating one minor) gives those links the single normal pin visual and lets the old
+ * endpoint dots disappear. Returns changed anchor registries and rewritten link arrays.
+ */
+export function promoteLegacyLinkAnchors(cards, notes, {
+  tolerance = ANCHOR_MERGE_TOLERANCE
+} = {}) {
+  const next = { ...(cards ?? {}) };
+  const noteById = new Map();
+  for (const note of notes ?? []) {
+    const id = note?._id ?? note?.id ?? note?.noteId;
+    if (id) noteById.set(id, note);
+  }
+  const states = new Map();
+  const stateFor = noteId => {
+    if (states.has(noteId)) return states.get(noteId);
+    const card = next[noteId];
+    if (!card || typeof card !== "object" || Array.isArray(card)) return null;
+    const state = {
+      card,
+      anchors: { ...(card.anchors ?? {}) },
+      changed: false,
+      box: {
+        x: Number.isFinite(card.x) ? card.x : 0,
+        y: Number.isFinite(card.y) ? card.y : 0,
+        w: Number.isFinite(card.width) && card.width > 0 ? card.width : 190,
+        h: Number.isFinite(card.height) && card.height > 0 ? card.height : 90,
+        rotation: Number.isFinite(card.rotation) ? card.rotation : 0
+      }
+    };
+    states.set(noteId, state);
+    return state;
+  };
+
+  for (const [noteId, card] of Object.entries(next)) {
+    if (!card || typeof card !== "object" || Array.isArray(card)) continue;
+    // Validate the card before it can receive a promoted endpoint.
+    stateFor(noteId);
+  }
+
+  const links = [];
+  for (const note of notes ?? []) {
+    const noteId = note?._id ?? note?.id ?? note?.noteId;
+    if (!noteId) continue;
+    const current = note?.system?.links ?? note?.links ?? [];
+    if (!Array.isArray(current) || !current.length) continue;
+    let touched = false;
+    const rewritten = current.map(link => {
+      let nextLink = link;
+      for (const prefix of ["source", "target"]) {
+        const endpointNoteId = prefix === "source" ? noteId : link?.targetId;
+        const state = endpointNoteId ? stateFor(endpointNoteId) : null;
+        if (!state) continue;
+        const anchorKey = `${prefix}AnchorId`;
+        const pointKey = `${prefix}Point`;
+        const existingId = link?.[anchorKey];
+        const hasAnchorField = Object.hasOwn(link ?? {}, anchorKey);
+        if (existingId && validAnchorId(existingId)
+            && Object.hasOwn(state.anchors, existingId) && state.anchors[existingId]) continue;
+        // An explicit empty id means the author deliberately cleared the anchor and wants the
+        // point/side fallback. Only old records that do not have the field at all are promoted.
+        if (hasAnchorField && !existingId) continue;
+        const point = link?.[pointKey];
+        if (!validLinkPoint(point)) continue;
+        const endpointNote = noteById.get(endpointNoteId);
+        const mainEntry = Object.entries(state.anchors).find(([, anchor]) => isMainAnchor(anchor));
+        let anchorId = "";
+        if (mainEntry && endpointNote?.system?.attachment?.mainPinEnabled !== false) {
+          const mainWorld = anchorWorld(state.box, mainEntry[1]);
+          const pointWorld = cardPointAnchor(state.box, point);
+          if (mainWorld && Math.hypot(mainWorld.x - pointWorld.x, mainWorld.y - pointWorld.y) <= tolerance) {
+            anchorId = mainEntry[0];
+          }
+        }
+        if (!anchorId) {
+          const reuse = nearestMinorAnchor(state.box, state.anchors, point, tolerance);
+          if (reuse) anchorId = reuse.id;
+        }
+        if (!anchorId) {
+          anchorId = freshAnchorId(state.anchors);
+          state.anchors[anchorId] = {
+            kind: "minor", x: point.x, y: point.y,
+            createdBy: typeof link?.createdBy === "string" ? link.createdBy.slice(0, MAX_ANCHOR_ID_LENGTH) : ""
+          };
+          state.changed = true;
+        }
+        nextLink = { ...nextLink, [anchorKey]: anchorId };
+        touched = true;
+      }
+      return nextLink;
+    });
+    if (touched) links.push({ noteId, links: rewritten });
+  }
+
+  const changed = [];
+  for (const [noteId, state] of states) {
+    if (!state.changed) continue;
+    next[noteId] = { ...state.card, anchors: state.anchors };
+    changed.push({ noteId, anchors: state.anchors });
+  }
+  return { cards: next, changed, links };
 }
 
 /**

@@ -4,8 +4,8 @@ import { privateStore, MAX_TITLE_LENGTH } from "../store/private-store.mjs";
 import { CARD_STYLES } from "../styles/registry.mjs";
 import { linkAnchors, moveThreadPin } from "../card-ports.mjs";
 import {
-  anchorSide, mergeNearbyMinorAnchors, minorOnEdge, nearestMinorAnchor, pruneAnchorRegistry,
-  validAnchorId
+  anchorSide, mergeNearbyMinorAnchors, minorOnEdge, nearestMinorAnchor, promoteLegacyLinkAnchors,
+  pruneAnchorRegistry, validAnchorId
 } from "../anchors.mjs";
 import { boardPinRef, normalizePinLink, resolvePin, validPinPosition } from "../board-pins.mjs";
 import { isLinkColor, normalizeLinkColor } from "../link-colors.mjs";
@@ -197,18 +197,28 @@ export default class PrivateWorkspace {
         ...Object.values(data.notes ?? {}),
         ...(data.trash ?? []).map(entry => entry?.note).filter(Boolean)
       ];
+      // Promote old point-only endpoints before merging, so they stop rendering as small SVG
+      // dots and any endpoints landing on one spot fold into a single pin.
+      const promoted = this.#pinsEnabled()
+        ? promoteLegacyLinkAnchors(data.layout?.cards ?? {}, owners)
+        : { cards: data.layout?.cards ?? {}, changed: [], links: [] };
+      if (promoted.changed.length) data.layout.cards = promoted.cards;
+      const byId = new Map(owners.filter(note => note?.id).map(note => [note.id, note]));
+      for (const { noteId, links } of promoted.links) {
+        const owner = byId.get(noteId);
+        if (owner) owner.links = links;
+      }
       const merged = mergeNearbyMinorAnchors(data.layout?.cards ?? {}, owners, {
         pinLinks: data.layout?.pinLinks ?? {}
       });
       if (merged.changed.length) data.layout.cards = merged.cards;
       if (merged.links.length || merged.pinLinks.length) {
-        const byId = new Map(owners.filter(note => note?.id).map(note => [note.id, note]));
         for (const { noteId, links } of merged.links) {
           const owner = byId.get(noteId);
           if (owner) owner.links = links;
         }
         for (const { id, source, target } of merged.pinLinks) {
-          const pinLink = data.layout.pinLinks?.[id];
+          const pinLink = data.layout?.pinLinks?.[id];
           if (pinLink) Object.assign(pinLink, { source, target });
         }
       }

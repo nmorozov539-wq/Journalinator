@@ -7,7 +7,7 @@ import {
 import {
   ANCHOR_MERGE_TOLERANCE, MAIN_ANCHOR_ID, anchorSide, anchorWorld, canonicalizeMainAnchors,
   collectAnchorRefs, defaultMainAnchor, mergeNearbyMinorAnchors, minorOnEdge, nearestMinorAnchor,
-  pruneAnchorRegistry, projectToEdge, redistributionAnchor, validAnchorId
+  promoteLegacyLinkAnchors, pruneAnchorRegistry, projectToEdge, redistributionAnchor, validAnchorId
 } from "./anchors.mjs";
 import { isLinkColor, normalizeLinkColor } from "./link-colors.mjs";
 import { boardPinRef, normalizePinLink, resolvePin, validPinPosition } from "./board-pins.mjs";
@@ -758,20 +758,38 @@ async function pruneSharedAnchors(shared, layout = layoutPage(shared), linkOverr
   // exact array we just wrote when pruning after a link edit or deletion.
   const notes = allSharedNoteList(shared).map(page => page.id === linkOverride?.noteId
     ? { _id: page.id, system: { links: linkOverride.links } } : page);
+  // Promote legacy point-only endpoints first, so old links stop rendering as small SVG dots and
+  // join the normal pin system. This may create anchors; the merge below then folds any that land
+  // on the same physical point.
+  const promoted = pinsEnabled()
+    ? promoteLegacyLinkAnchors(layout.system.cards ?? {}, notes)
+    : { cards: layout.system.cards ?? {}, changed: [], links: [] };
+  const promotedLinks = new Map(promoted.links.map(entry => [entry.noteId, entry.links]));
+  const promotedNotes = promotedLinks.size
+    ? notes.map(note => {
+      const noteId = note?._id ?? note?.id;
+      const links = promotedLinks.get(noteId);
+      return links ? { ...note, system: { ...(note.system ?? {}), links } } : note;
+    })
+    : notes;
+  for (const { noteId, links } of promoted.links) {
+    const page = shared.pages.get(noteId);
+    if (page?.type === `${MODULE_ID}.note`) await page.update({ "system.links": links });
+  }
   // Fold duplicate minors left by an older link-creation bug before any pruning. The rewritten
   // links are written first; canonicalizing mains below then works from the merged arrays so it
   // never rewrites a stale reference back.
-  const merged = mergeNearbyMinorAnchors(layout.system.cards ?? {}, notes, {
+  const merged = mergeNearbyMinorAnchors(promoted.cards, promotedNotes, {
     pinLinks: layout.system.pinLinks ?? {}
   });
   const mergedLinks = new Map(merged.links.map(entry => [entry.noteId, entry.links]));
   const mergedNotes = mergedLinks.size
-    ? notes.map(note => {
+    ? promotedNotes.map(note => {
       const noteId = note?._id ?? note?.id;
       const links = mergedLinks.get(noteId);
       return links ? { ...note, system: { ...(note.system ?? {}), links } } : note;
     })
-    : notes;
+    : promotedNotes;
   for (const { noteId, links } of merged.links) {
     const page = shared.pages.get(noteId);
     if (page?.type === `${MODULE_ID}.note`) await page.update({ "system.links": links });
@@ -803,6 +821,7 @@ async function pruneSharedAnchors(shared, layout = layoutPage(shared), linkOverr
       }
     }
   };
+  for (const { noteId, anchors } of promoted.changed) setRegistry(noteId, anchors);
   for (const { noteId, anchors } of merged.changed) setRegistry(noteId, anchors);
   for (const { noteId, anchors } of canonical.changed) {
     setRegistry(noteId, anchors);
@@ -1923,6 +1942,16 @@ async function handleMessage(message, senderUserId) {
       if (!validAnchorId(id) || !pins[id] || pins[id].isDefault) return;
       pins[id] = { noteId, x: action.x, y: action.y, isDefault: false };
       await layout.update({ "system.pins": pins });
+      return;
+    }
+
+    case "normalizePins": {
+      // One-shot cleanup request from an opened canvas: folds duplicate/legacy anchors, promotes
+      // old point-only link endpoints, and prunes anything no longer referenced. Idempotent; a
+      // no-op when the board is already clean.
+      if (!pinsEnabled()) return;
+      const layout = layoutPage(shared);
+      if (layout) await pruneSharedAnchors(shared, layout);
       return;
     }
 

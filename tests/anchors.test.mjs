@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   ANCHOR_MERGE_TOLERANCE, MAIN_ANCHOR_ID, anchorWorld, canonicalizeMainAnchors, cardNormalizedPoint,
   collectAnchorRefs, defaultMainAnchor, mergeNearbyMinorAnchors, nearestAnchor, nearestMinorAnchor,
-  projectToEdge, pruneAnchorRegistry, redistributionAnchor, validAnchorId
+  projectToEdge, promoteLegacyLinkAnchors, pruneAnchorRegistry, redistributionAnchor, validAnchorId
 } from "../scripts/anchors.mjs";
 import { sanitizeCardAnchors } from "../scripts/presentation.mjs";
 
@@ -18,10 +18,14 @@ test("anchorWorld maps normalized anchors to world points with outward normals",
   near(top.nx, 0);
   near(top.ny, -1);
 
-  const left = anchorWorld(box(), { kind: "main", x: 0, y: 0.5 });
+  const left = anchorWorld(box(), { kind: "minor", x: 0, y: 0.5 });
   assert.equal(left.side, "left");
   near(left.nx, -1);
   near(left.ny, 0);
+
+  // Main is a constant at the top-centre even if an old record stored other coordinates.
+  const main = anchorWorld(box(), { kind: "main", x: 0, y: 0.5 });
+  assert.deepEqual([main.x, main.y, main.side], [50, 0, "top"]);
 
   const rotated = anchorWorld(box({ x: 10, y: 20, rotation: 90 }), { kind: "minor", x: 0.5, y: 0 });
   near(rotated.x, 85);
@@ -382,4 +386,37 @@ test("mergeNearbyMinorAnchors folds stacked minors and rewrites every reference"
   assert.deepEqual(again.links, []);
   assert.deepEqual(again.pinLinks, []);
   assert.equal(ANCHOR_MERGE_TOLERANCE, 2);
+});
+
+test("promoteLegacyLinkAnchors converts point-only endpoints and reuses nearby pins", () => {
+  const cards = {
+    a: { x: 0, y: 0, width: 200, height: 100, anchors: {
+      main: { kind: "main", x: 0.5, y: 0, createdBy: "u" }
+    } },
+    b: { x: 300, y: 0, width: 200, height: 100, anchors: {} }
+  };
+  const notes = [
+    { _id: "a", system: { attachment: { mainPinEnabled: true }, links: [
+      { id: "one", targetId: "b", targetPoint: { x: 0, y: 0.5 } },
+      { id: "two", targetId: "b", targetPoint: { x: 0, y: 0.5 } }
+    ] } },
+    { _id: "b", system: { attachment: { mainPinEnabled: true }, links: [] } }
+  ];
+  const result = promoteLegacyLinkAnchors(cards, notes);
+  const links = result.links.find(entry => entry.noteId === "a").links;
+  assert.ok(links[0].targetAnchorId);
+  assert.equal(links[1].targetAnchorId, links[0].targetAnchorId,
+    "the second legacy endpoint reuses the pin the first one created");
+  assert.equal(result.cards.b.anchors[links[0].targetAnchorId].kind, "minor");
+  assert.equal(result.changed.some(entry => entry.noteId === "b"), true);
+
+  // An explicitly cleared id is not legacy data; it must keep the point/side fallback.
+  const cleared = promoteLegacyLinkAnchors(cards, [
+    { _id: "a", system: { links: [
+      { id: "cleared", targetId: "b", targetPoint: { x: 0, y: 0.5 }, targetAnchorId: "" }
+    ] } },
+    { _id: "b", system: { links: [] } }
+  ]);
+  assert.equal(cleared.links.length, 0,
+    "a deliberate empty anchor id stays empty and is not promoted");
 });

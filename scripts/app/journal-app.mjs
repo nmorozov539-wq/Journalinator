@@ -143,6 +143,7 @@ export default class JournalApp extends ApplicationV2 {
   #transferDismiss = null;
   #focusedCanvasRenders = new WeakSet();
   #lastAppliedTheme = null;
+  #pinsNormalized = false;
   // One chronological undo stack for every client-visible operation. Delete entries are pushed
   // when the request is sent; pin/route entries only after the active GM acknowledges the write,
   // so a rejected or rolled-back operation can never consume a Ctrl+Z.
@@ -532,6 +533,7 @@ export default class JournalApp extends ApplicationV2 {
 
   _onFirstRender() {
     this.#editor.activate();
+    this.#normalizePinsOnce();
     const rerender = () => this.render();
     for (const hook of [
       "createJournalEntryPage", "updateJournalEntryPage", "deleteJournalEntryPage",
@@ -767,6 +769,13 @@ export default class JournalApp extends ApplicationV2 {
       button.title = String(label ?? "");
     }
     button.setAttribute("aria-label", text);
+  }
+
+  /** One idempotent pin cleanup per app session, once an active GM can service the write. */
+  #normalizePinsOnce() {
+    if (this.#pinsNormalized || !game.users?.activeGM) return;
+    this.#pinsNormalized = true;
+    requestWrite({ type: "normalizePins" });
   }
 
   /**
@@ -1449,6 +1458,7 @@ export default class JournalApp extends ApplicationV2 {
 
   _onRender() {
     const root = this.element;
+    this.#normalizePinsOnce();
     // The window element survives re-renders, so install the delegated listener only once. It
     // queries live dropdown nodes instead of closing over the ones from a particular render.
     if (!this.#onToolbarPointerDown) {
