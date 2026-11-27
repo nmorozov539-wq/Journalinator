@@ -26,14 +26,46 @@ export const Hooks = {
   reset() { hooks.clear(); }
 };
 
+function isPlainObject(value) {
+  if (!value || typeof value !== "object") return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+/**
+ * Foundry updates documents by recursively merging plain objects: omitting a key leaves the old
+ * value in place, and an explicit `-=key` entry deletes it. Arrays and scalars are replaced.
+ * Mirroring that here keeps deletion regressions from being hidden by the test document.
+ */
+function mergeObject(target, changes) {
+  for (const [key, value] of Object.entries(changes)) {
+    if (key.startsWith("-=")) {
+      delete target[key.slice(2)];
+      continue;
+    }
+    if (isPlainObject(value)) {
+      if (!isPlainObject(target[key])) target[key] = {};
+      mergeObject(target[key], value);
+    } else {
+      target[key] = structuredClone(value);
+    }
+  }
+}
+
 function applyUpdate(target, changes) {
   for (const [path, value] of Object.entries(changes)) {
     const parts = path.split(".");
     const last = parts.pop();
     let obj = target;
-    for (const p of parts) { obj[p] ??= {}; obj = obj[p]; }
+    for (const p of parts) {
+      if (!isPlainObject(obj[p])) obj[p] = {};
+      obj = obj[p];
+    }
     if (last.startsWith("-=")) delete obj[last.slice(2)];
-    else obj[last] = structuredClone(value);
+    else if (isPlainObject(value)) {
+      if (!isPlainObject(obj[last])) obj[last] = {};
+      mergeObject(obj[last], value);
+    } else obj[last] = structuredClone(value);
   }
 }
 

@@ -3493,7 +3493,7 @@ test("attachment pins render author colour, all candidate styles, and transform 
     const css = readFileSync(new URL("../../styles/stylized.css", import.meta.url), "utf8");
     assert.match(css,
       /\.jn-canvas \.jn-board-pin-control \{[^}]*width:\s*var\(--jn-main-pin-size, 14px\);/,
-      "main pin heads use the zoom-scaled size");
+      "main pin heads use the fixed board-size token");
     assert.match(css,
       /\.jn-canvas \.jn-board-pin-control \{[^}]*width:\s*var\(--jn-main-pin-size, 14px\);/,
       "all pin heads use the primary pin size");

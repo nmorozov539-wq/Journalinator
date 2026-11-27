@@ -1764,6 +1764,7 @@ test("pin undo restores a partial raw attachment exactly", async () => {
     type: "setNoteAttachment", noteIds: [hub.id], fields: { pinStyle: "wax" }
   });
   const page = sharedByName("Pin Raw Attachment");
+  await page.update({ "system.-=attachment": null });
   await page.update({ "system.attachment": structuredClone(raw) });
   assert.equal(page.system.attachment.mainPinEnabled, undefined, "raw fixture has no resolved defaults");
 
@@ -2124,7 +2125,10 @@ test("the pin undo register evicts its oldest entry at 20", async () => {
 test("restoring a note with a disabled main pin does not invent a main anchor", async () => {
   const note = await createNoteAt("Restore Disabled Main", 12000, 1000);
   const layout = shared().pages.get(containers.ids.layoutPage);
-  await layout.update({ [`system.cards.${note.id}.anchors`]: {} });
+  await layout.update({
+    [`system.cards.${note.id}.anchors`]: {},
+    [`system.cards.${note.id}.anchors.-=main`]: null
+  });
   await fromPlayer({
     type: "setMainPinEnabled", noteId: note.id, enabled: false, undoId: "RestoreDisabled01"
   });
@@ -2294,7 +2298,10 @@ test("route A rejects secret, hidden, trashed, self and pin-off targets", async 
     "pin-off routing is rejected with an explanation");
 
   const layout = shared().pages.get(containers.ids.layoutPage);
-  await layout.update({ [`system.cards.${h.id}.anchors`]: {} });
+  await layout.update({
+    [`system.cards.${h.id}.anchors`]: {},
+    [`system.cards.${h.id}.anchors.-=main`]: null
+  });
   mark = env.socketLog.length;
   await fromPlayer({
     type: "routeNoteOnLink", sourceId: a.id, linkId: link.id, noteId: h.id,

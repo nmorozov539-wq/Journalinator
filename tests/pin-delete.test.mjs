@@ -174,6 +174,68 @@ test("Delete on a main pin is a no-op that cannot fall through to link deletion"
   canvas.root.remove();
 });
 
+test("deleting a board pin and its links persists on a fresh read without removing unrelated pins", async () => {
+  const a = await noteId("Persisted Pin Delete A");
+  const b = await noteId("Persisted Pin Delete B");
+  await requestWrite({ type: "boardPinAction", action: { type: "add", noteId: a, x: 0.4, y: 0.6 } });
+  await requestWrite({ type: "boardPinAction", action: { type: "add", noteId: "", x: 820, y: 430 } });
+  await requestWrite({ type: "boardPinAction", action: { type: "add", noteId: "", x: 910, y: 510 } });
+  await tick();
+  let layout = notesStore.getLayout();
+  const owned = Object.entries(layout.pins).find(([, pin]) => pin.noteId === a)[0];
+  const [keepPin, dropPin] = Object.entries(layout.pins)
+    .filter(([, pin]) => !pin.noteId).map(([id]) => id);
+  assert.ok(owned && keepPin && dropPin);
+  await requestWrite({ type: "boardPinAction", action: { type: "connect",
+    source: `p:${owned}`, target: `p:${dropPin}` } });
+  await requestWrite({ type: "boardPinAction", action: { type: "connect",
+    source: `p:${owned}`, target: `p:${keepPin}` } });
+  await requestWrite({ type: "boardPinAction", action: { type: "connect",
+    source: `p:${keepPin}`, target: `n:${b}:main` } });
+  await tick();
+  layout = notesStore.getLayout();
+  const ownedLinks = Object.entries(layout.pinLinks)
+    .filter(([, link]) => link.source === `p:${owned}` || link.target === `p:${owned}`)
+    .map(([id]) => id);
+  const unrelatedLink = Object.entries(layout.pinLinks)
+    .find(([, link]) => link.source === `p:${keepPin}` && link.target === `n:${b}:main`)?.[0];
+  assert.equal(ownedLinks.length, 2);
+  assert.ok(unrelatedLink);
+
+  await requestWrite({ type: "boardPinAction", action: { type: "delete", ref: `p:${owned}` } });
+  await tick();
+
+  // Re-read the persisted document instead of trusting the write callback or a cached object.
+  const persisted = JSON.parse(JSON.stringify(notesStore.getSharedLayout()));
+  assert.equal(persisted.pins[owned], undefined, "the deleted pin stays deleted");
+  for (const id of ownedLinks) {
+    assert.equal(persisted.pinLinks[id], undefined, "every link attached to the deleted pin is gone");
+  }
+  assert.ok(persisted.pins[keepPin], "an unrelated pin survives");
+  assert.ok(persisted.pins[dropPin], "another unrelated pin survives");
+  assert.ok(persisted.pinLinks[unrelatedLink], "an unrelated pin link survives");
+
+  const reopened = canvasFor([]);
+  reopened.update(notesStore.getAllNotes(), persisted);
+  assert.equal(reopened.root.querySelector(`[data-pin-ref="p:${owned}"]`), null);
+  assert.equal(reopened.pinLinksSvg.querySelector(`[data-pin-link="${ownedLinks[0]}"]`), null);
+  assert.equal(reopened.pinLinksSvg.querySelector(`[data-pin-link="${ownedLinks[1]}"]`), null);
+  assert.ok(reopened.root.querySelector(`[data-pin-ref="p:${keepPin}"]`));
+  assert.ok(reopened.pinLinksSvg.querySelector(`[data-pin-link="${unrelatedLink}"]`));
+
+  // The explicit deleteLink action must persist too, without taking its endpoint pins with it.
+  await requestWrite({ type: "boardPinAction", action: { type: "deleteLink", linkId: unrelatedLink } });
+  await tick();
+  const afterDeleteLink = JSON.parse(JSON.stringify(notesStore.getSharedLayout()));
+  assert.equal(afterDeleteLink.pinLinks[unrelatedLink], undefined);
+  assert.ok(afterDeleteLink.pins[keepPin], "deleting a link leaves its first pin");
+  assert.ok(afterDeleteLink.pins[dropPin], "deleting a link leaves its second pin");
+  reopened.update(notesStore.getAllNotes(), afterDeleteLink);
+  assert.equal(reopened.pinLinksSvg.querySelector(`[data-pin-link="${unrelatedLink}"]`), null);
+  reopened.disconnectGeometry();
+  reopened.root.remove();
+});
+
 test("selected pins get feedback and clear on Escape, outside click and removal", async () => {
   const a = await noteId("Delete Feedback A");
   await requestWrite({ type: "addCardAnchor", noteId: a, kind: "minor", x: 0.3, y: 0.4 });

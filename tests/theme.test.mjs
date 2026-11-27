@@ -521,18 +521,18 @@ test("applyTheme writes data attributes and custom properties for the stylized p
   assert.equal(root.style.values["--jn-sc-paper-memo"], "#ead9b4");
 });
 
-test("pin heads and hit targets keep a stable screen size through zoom", () => {
+test("pin heads keep a fixed board size and hit targets keep a screen size through zoom", () => {
   const css = readFileSync(new URL("../styles/stylized.css", import.meta.url), "utf8");
   assert.match(css,
     /\.jn-canvas \.jn-pin-layer \.jn-pin,[\s\S]*?\.jn-canvas \.jn-board-pin-control \{[^}]*width:\s*var\(--jn-main-pin-size, 14px\);[^}]*height:\s*var\(--jn-main-pin-size, 14px\);/);
+  assert.doesNotMatch(css, /--jn-main-pin-size[^;]*(?:calc|--jn-zoom-comp)/,
+    "pin heads are not inverse-scaled by zoom");
   assert.doesNotMatch(css, /\.jn-pin-minor\b/, "there is no separate minor-pin visual");
   assert.match(css,
     /\.jn-canvas \.jn-pin-layer \.jn-pin::after,[\s\S]*?\.jn-canvas \.jn-board-pin-control::after \{[^}]*width:\s*max\(var\(--jn-pin-hit-size, 20px\), 100%\);/);
 
   for (const k of [0.25, 1, 4]) {
-    const main = (14 / k) * k;
-    assert.equal(main, 14);
-    assert.equal((20 / k) * k, 20, `hit target stays 20px at k=${k}`);
+    assert.equal((20 / k) * k, 20, `hit target stays 20px on screen at k=${k}`);
   }
 });
 

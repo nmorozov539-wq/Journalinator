@@ -788,9 +788,8 @@
 .jn-canvas .jn-board-pin-control {
   --jn-pin-color: #8d8d97;
   position: absolute;
-  /* The card lives inside the zoom-scaled world. --jn-zoom-comp = 1/k, so multiplying the DOM
-     size keeps the *screen* diameter/target at 20px across k=0.5..2 (the visual pins therefore
-     stay screen-constant too). */
+  /* Pin heads keep a fixed world size so they scale with the cards. Only the transparent
+     interaction target below is zoom-compensated to stay usable on screen. */
   width: var(--jn-main-pin-size, 14px);
   height: var(--jn-main-pin-size, 14px);
   min-width: 0;
@@ -809,6 +808,9 @@
   pointer-events: auto;
   touch-action: none;
   -webkit-tap-highlight-color: transparent;
+  /* Foundry's global `a.button, button { transition: 0.5s; }` otherwise eases left/top and
+     makes every pin trail card drags. Decorative ::before hover/focus transitions remain. */
+  transition: none;
 }
 .jn-canvas .jn-pin-layer .jn-pin-main,
 .jn-canvas .jn-board-pin-control {
@@ -819,6 +821,7 @@
 .jn-canvas .jn-pin-layer .jn-moving-pin {
   will-change: transform;
   pointer-events: none;
+  transition: none;
 }
 /* The transparent pseudo-element keeps a 20px screen target at every zoom. */
 .jn-canvas .jn-pin-layer .jn-pin::after,

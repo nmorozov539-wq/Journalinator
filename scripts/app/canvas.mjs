@@ -22,6 +22,12 @@ import { MAX_ROUTE_ANCHORS } from "../route-notes.mjs";
 import { DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, STAMP_CORNERS, STAMP_IDS, stampUrl } from "../stamps.mjs";
 
 const DRAG_THRESHOLD = 5;
+// Pin heads are board objects: their world size stays fixed so they shrink/grow naturally with
+// the cards as the board zooms. Only the interaction target is compensated to remain usable on
+// screen, and the link magnet follows that same screen-space radius.
+const PIN_WORLD_SIZE = 14;
+const PIN_SCREEN_HIT_SIZE = 20;
+const PIN_SCREEN_HIT_RADIUS = PIN_SCREEN_HIT_SIZE / 2;
 // A pin pick-up and move is a double press, so the browser also emits a native dblclick at the
 // release point. That point can look like empty canvas once the pin has moved or been hidden.
 // Board menus are ignored for a short window after any pin gesture.
@@ -156,6 +162,10 @@ export default class JournalCanvas {
     this.layout = { cards: {}, labels: {}, viewport: null };
     this.cardEls = new Map();
     this.cardSizes = new Map();
+    // Cards rendered before their DOM is connected cannot be measured. They stay here until a
+    // connected refresh measures the finished card, so a decoded placeholder size is never
+    // mistaken for a real one.
+    this.unmeasuredCards = new Set();
     this.labelEls = new Map();
     this.linksById = new Map();
     this.threads = new Map();
@@ -318,6 +328,7 @@ export default class JournalCanvas {
         el.remove();
         this.cardEls.delete(id);
         this.cardSizes.delete(id);
+        this.unmeasuredCards.delete(id);
       }
     }
     for (const pin of this.pinLayer.querySelectorAll("[data-anchor-id]")) {
@@ -339,10 +350,17 @@ export default class JournalCanvas {
     }
 
     if (!deferGeometry) this.refreshGeometry();
+    else for (const id of this.cardEls.keys()) this.unmeasuredCards.add(id);
     this.#syncFloatingToolbar();
   }
 
   refreshGeometry() {
+    // A deferred render (the app builds the canvas detached, then reconnects it) must measure
+    // the finished cards on the connected pass. Do not let a detached fallback or a stale cache
+    // position pins after remount, even when an existing ResizeObserver sees no size change.
+    if (this.unmeasuredCards.size) {
+      for (const id of this.unmeasuredCards) this.cardSizes.delete(id);
+    }
     if (!this.hasCentered && this.notes.length && this.root.clientWidth && this.root.clientHeight) {
       this.#centerOnContent();
       this.hasCentered = true;
@@ -949,11 +967,24 @@ export default class JournalCanvas {
     // still read live x/y, which is all a card move changes).
     let size = this.cardSizes.get(id);
     if (!size) {
-      size = {
-        w: el?.offsetWidth || Number.parseFloat(el?.style.width) || 190,
-        h: el?.offsetHeight || Number.parseFloat(el?.style.minHeight) || 70
-      };
-      this.cardSizes.set(id, size);
+      // Measure each axis independently: a test/embedded DOM may expose a real height while a
+      // manual width supplies the other axis. Only a fully known box is cacheable.
+      const measuredW = el?.offsetWidth > 0 ? el.offsetWidth : 0;
+      const measuredH = el?.offsetHeight > 0 ? el.offsetHeight : 0;
+      const manualW = Number.parseFloat(el?.style.width);
+      const manualH = Number.parseFloat(el?.style.minHeight);
+      const knownW = measuredW || (Number.isFinite(manualW) && manualW > 0 ? manualW : 0);
+      const knownH = measuredH || (Number.isFinite(manualH) && manualH > 0 ? manualH : 0);
+      if (el?.isConnected && knownW > 0 && knownH > 0) {
+        size = { w: knownW, h: knownH };
+        this.cardSizes.set(id, size);
+        this.unmeasuredCards.delete(id);
+      } else {
+        // Detached or otherwise nonmeasurable: paint with known/manual/placeholder dimensions only.
+        // Never cache these, because the connected refresh must measure the finished card.
+        size = { w: knownW > 0 ? knownW : 190, h: knownH > 0 ? knownH : 70 };
+        if (el) this.unmeasuredCards.add(id);
+      }
     }
     return {
       x: Number.isFinite(liveX) ? liveX : data.x,
@@ -2568,16 +2599,16 @@ export default class JournalCanvas {
   }
 
   /**
-   * Pins and labels live inside the CSS-scaled world while thread strokes are
-   * non-scaling. Update in the same wheel event as the transform so a hovered pin
-   * never spends a frame at the new zoom with the old diameter.
+   * Pin heads stay a fixed world size so they keep their proportions with the cards. Only their
+   * invisible hit target is zoom-compensated, so a tiny pin at low zoom is still easy to grab and
+   * a link endpoint entering that target snaps to it.
    */
   #syncZoomComp() {
     const k = this.view.k || 1;
     const comp = 1 / k;
     this.root.style.setProperty("--jn-zoom-comp", String(comp));
-    this.root.style.setProperty("--jn-main-pin-size", `${14 / k}px`);
-    this.root.style.setProperty("--jn-pin-hit-size", `${20 / k}px`);
+    this.root.style.setProperty("--jn-main-pin-size", `${PIN_WORLD_SIZE}px`);
+    this.root.style.setProperty("--jn-pin-hit-size", `${PIN_SCREEN_HIT_SIZE / k}px`);
   }
 
   #queueZoomComp() {
@@ -2982,13 +3013,19 @@ export default class JournalCanvas {
         point: { x: anchors[directId].x, y: anchors[directId].y } };
     }
     const main = anchors[MAIN_ANCHOR_ID];
+    // A link endpoint entering the pin's visible hit target always snaps, even when the note's
+    // configured magnet radius is smaller. The target is measured in screen pixels and converted
+    // through zoom inside nearestAnchor. At high zoom the visible pin is larger than the 20px
+    // minimum target, so the magnet grows with its head instead of leaving a dead rim.
+    const pinHitRadius = Math.max(PIN_SCREEN_HIT_RADIUS, PIN_WORLD_SIZE * this.view.k / 2);
     const mainHit = main && nearestAnchor(box, { [MAIN_ANCHOR_ID]: main }, world, {
-      zoom: this.view.k, mainRadius: attachment.mainSnapRadius
+      zoom: this.view.k,
+      mainRadius: Math.max(attachment.mainSnapRadius, pinHitRadius)
     });
     const hit = mainHit ?? nearestAnchor(box, anchors, world, {
       zoom: this.view.k,
-      mainRadius: attachment.mainSnapRadius,
-      minorRadius: attachment.minorSnapRadius
+      mainRadius: Math.max(attachment.mainSnapRadius, pinHitRadius),
+      minorRadius: Math.max(attachment.minorSnapRadius, pinHitRadius)
     });
     if (!hit) return null;
     return {
@@ -3007,7 +3044,11 @@ export default class JournalCanvas {
     if (!edge || !this.#pinsOn()) return null;
     const note = this.notes.find(item => item._id === edge.id);
     const attachment = note ? resolveAttachment(note) : null;
-    const tolerance = Math.max(0, attachment?.minorSnapRadius ?? 0) / Math.max(this.view.k, 1e-6);
+    const tolerance = Math.max(
+      attachment?.minorSnapRadius ?? 0,
+      PIN_SCREEN_HIT_RADIUS / Math.max(this.view.k, 1e-6),
+      PIN_WORLD_SIZE / 2
+    );
     const hit = nearestMinorAnchor(edge.box, this.layout.cards?.[edge.id]?.anchors ?? {},
       edge.point, tolerance);
     if (!hit) return null;

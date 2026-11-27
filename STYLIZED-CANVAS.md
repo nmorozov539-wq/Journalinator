@@ -6,9 +6,9 @@ no runtime old/new switch, no old palettes/card shapes. Core data, history, lock
 private workspaces and the encrypted GM vault are preserved.
 
 - Repository branch: `stylized-canvas`
-- Module version: `0.9.4`
+- Module version: `0.9.5`
 - Foundry: v14.367 (verified locally)
-- Package: `dist/Journalinator-v0.9.4.zip` with a `fvtt-journalinator` module folder
+- Package: `dist/Journalinator-v0.9.5.zip` with a `fvtt-journalinator` module folder
   (built locally; matches the manifest download URL)
 
 ## What is in this build
@@ -57,7 +57,7 @@ testing migration; this branch is not a data backup.
 ```bash
 npm run check        # syntax check every module script
 npm test             # node --test unit/integration/jsdom suites
-tools/package-stylized.sh   # build dist/Journalinator-v0.9.4.zip
+tools/package-stylized.sh   # build dist/Journalinator-v0.9.5.zip
 ```
 
 ## Experimental settings / switches
@@ -106,7 +106,7 @@ Record pass/fail and reproduction steps; do not remove experimental options befo
 ## Verification performed for this build
 
 - `npm run check` — pass.
-- `npm test` — unit, integration, fake-Foundry, and jsdom UI suites pass for 0.9.4.
+- `npm test` — unit, integration, fake-Foundry, and jsdom UI suites pass for 0.9.5.
 - Isolated Foundry **14.367** control-mode smoke (2026-11-26, `/home/Riv/foundry-test-data`,
   disposable `journalinator-stylized` world on port 30199, Playwright/Chromium):
   - module **0.9.1** active; initial left control was `tokens`;
@@ -125,4 +125,4 @@ Record pass/fail and reproduction steps; do not remove experimental options befo
 - Production campaign world was not launched or modified. Multi-user, GM/player permission
   boundaries and live migration of a real campaign world remain **pending manual testing**.
 
-The current package checksum is generated in `dist/Journalinator-v0.9.4.zip.sha256`.
+The current package checksum is generated in `dist/Journalinator-v0.9.5.zip.sha256`.

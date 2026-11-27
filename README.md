@@ -192,9 +192,10 @@ The canvas emits `--jn-link-width`, `--jn-link-width-selected`, `--jn-link-dash`
 `--jn-link-dash-hidden`, `--jn-link-dim-opacity`, `--jn-link-shadow`, `--jn-link-arrow-scale`,
 `--jn-link-pin-radius`, `--jn-link-pin-fill`, `--jn-link-pin-stroke`, `--jn-link-label-size`,
 `--jn-link-label-color`, `--jn-link-halo`, `--jn-link-halo-width`, `--jn-link-select`,
-`--jn-link-1`, `--jn-link-2`, and `--jn-link-3`. Link CSS uses these variables; pin sizes, label
-sizes, halo widths, and arrowheads also multiply by `--jn-zoom-comp`, which the canvas updates
-while zooming so their on-screen size stays steady.
+`--jn-link-1`, `--jn-link-2`, and `--jn-link-3`. Link CSS uses these variables; label sizes,
+halo widths, arrowheads, and pin hit targets also multiply by `--jn-zoom-comp`, which the canvas
+updates while zooming. Pin heads themselves keep a fixed board size so they scale naturally with
+the cards rather than ballooning at low zoom or shrinking at high zoom.
 
 Link colors are stored as slot keys (`link1`–`link3`) or `""` for the theme's default thread.
 The three legacy toolbar hexes (`#a393f2`, `#d6a45c`, `#d77b91`) are still read and mapped to

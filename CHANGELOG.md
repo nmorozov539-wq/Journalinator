@@ -2,6 +2,19 @@
 
 These notes start with the small board and toolbar polish patches and cover the follow-up fixes and features.
 
+## 0.9.5 — Pin stability and scaling
+
+- Deleting a manually placed pin now removes the pin and all of its connected pin links from the
+  saved board, and they stay deleted after reopening. Main pins keep their protected behavior.
+- Pin conversion during a move now removes the old note anchor explicitly, and pin undo/rollback
+  restores the exact previous anchor and attachment state.
+- Pins no longer jump after save/sync rerenders or reconnection. Deferred renders measure the
+  finished card before positioning pins and thread endpoints, including auto-sized cards.
+- Pin heads keep a fixed board size so they scale naturally with the cards. Their hit targets and
+  the link magnet stay screen-sized, so links snap when they touch a pin at any zoom.
+- Pin buttons and the drag ghost no longer inherit Foundry's 500 ms button transition, so pins
+  track card movement and pin dragging immediately.
+
 ## 0.9.4 — Canvas interaction polish
 
 - Notes no longer show a player signature; authorship and permissions remain in saved data.

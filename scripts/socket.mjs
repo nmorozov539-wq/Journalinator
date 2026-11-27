@@ -206,10 +206,28 @@ function rawAttachmentState(notePage) {
 }
 
 /** Update payload that restores an attachment exactly, including removing an absent key. */
-function attachmentRestoreChanges(state) {
-  return state.attachmentPresent
-    ? { "system.attachment": deepClone(state.attachment) }
-    : { "system.-=attachment": null };
+function attachmentRestoreChanges(state, current) {
+  if (!state.attachmentPresent) return { "system.-=attachment": null };
+  return objectRestoreChanges("system.attachment", current, state.attachment);
+}
+
+/**
+ * Restores a plain object exactly under Foundry's recursive-merge update semantics: keys added
+ * since `current` are deleted explicitly before the captured value is merged back in.
+ */
+function objectRestoreChanges(prefix, current, target) {
+  const changes = {};
+  const next = target && typeof target === "object" ? target : {};
+  for (const key of Object.keys(current ?? {})) {
+    if (validAnchorId(key) && !Object.hasOwn(next, key)) changes[`${prefix}.-=${key}`] = null;
+  }
+  changes[prefix] = deepClone(target);
+  return changes;
+}
+
+/** Exact registry restore, with deletion markers for anchors created after the snapshot. */
+function anchorRestoreChanges(noteId, current, target) {
+  return objectRestoreChanges(`system.cards.${noteId}.anchors`, current, target ?? {});
 }
 
 /**
@@ -1849,8 +1867,13 @@ async function handleMessage(message, senderUserId) {
       if (action.type === "updateLink" || action.type === "deleteLink") {
         if (typeof action.linkId !== "string" || !validAnchorId(action.linkId)
             || !pinLinks[action.linkId]) return;
-        if (action.type === "deleteLink") delete pinLinks[action.linkId];
-        else pinLinks[action.linkId] = normalizePinLink(pinLinks[action.linkId], action.fields);
+        if (action.type === "deleteLink") {
+          // Foundry merges object updates; leaving the key out of a new pinLinks object would
+          // keep the old entry. Delete it explicitly, with the id validated for a dotted path.
+          await layout.update({ [`system.pinLinks.-=${action.linkId}`]: null });
+          return;
+        }
+        pinLinks[action.linkId] = normalizePinLink(pinLinks[action.linkId], action.fields);
         await layout.update({ "system.pinLinks": pinLinks });
         return;
       }
@@ -1858,22 +1881,29 @@ async function handleMessage(message, senderUserId) {
         const ref = action.ref;
         if (typeof ref !== "string" || ref.length > 200) return;
         let cardUpdate = null;
+        let deletedPinId = "";
         if (ref.startsWith("p:")) {
           const id = ref.slice(2);
-          if (!pins[id] || pins[id].isDefault) return;
+          if (!validAnchorId(id) || !pins[id] || pins[id].isDefault) return;
+          deletedPinId = id;
           delete pins[id];
         } else if (ref.startsWith("n:")) {
           const split = ref.indexOf(":", 2);
           if (split < 0) return;
           const ownerId = ref.slice(2, split), anchorId = ref.slice(split + 1);
           const card = cards[ownerId];
-          if (!live.has(ownerId) || card?.anchors?.[anchorId]?.kind !== "minor") return;
+          if (!DOCUMENT_ID_RE.test(ownerId) || !live.has(ownerId)
+              || !validAnchorId(anchorId) || card?.anchors?.[anchorId]?.kind !== "minor") return;
           const anchors = { ...card.anchors };
           delete anchors[anchorId];
           cardUpdate = { ownerId, anchorId, anchors };
         } else return;
+        const removedLinkIds = [];
         for (const [id, link] of Object.entries(pinLinks)) {
-          if (link.source === ref || link.target === ref) delete pinLinks[id];
+          if (link.source === ref || link.target === ref) {
+            if (validAnchorId(id)) removedLinkIds.push(id);
+            delete pinLinks[id];
+          }
         }
         const pageUpdates = [];
         for (const owner of allSharedNoteList(shared)) {
@@ -1885,7 +1915,9 @@ async function handleMessage(message, senderUserId) {
           });
           if (links.length !== (owner.system.links ?? []).length) pageUpdates.push([owner, links]);
         }
-        const updates = { "system.pins": pins, "system.pinLinks": pinLinks };
+        const updates = {};
+        if (deletedPinId) updates[`system.pins.-=${deletedPinId}`] = null;
+        for (const id of removedLinkIds) updates[`system.pinLinks.-=${id}`] = null;
         if (cardUpdate) {
           updates[`system.cards.${cardUpdate.ownerId}.anchors`] = cardUpdate.anchors;
           updates[`system.cards.${cardUpdate.ownerId}.anchors.-=${cardUpdate.anchorId}`] = null;
@@ -1905,7 +1937,8 @@ async function handleMessage(message, senderUserId) {
         const split = ref.indexOf(":", 2);
         if (split < 0) return;
         const oldNoteId = ref.slice(2, split), anchorId = ref.slice(split + 1);
-        if (!live.has(oldNoteId) || !validAnchorId(anchorId)) return;
+        if (!DOCUMENT_ID_RE.test(oldNoteId) || !live.has(oldNoteId)
+            || !validAnchorId(anchorId)) return;
         const card = cards[oldNoteId], anchor = card?.anchors?.[anchorId];
         if (!anchor || anchor.kind !== "minor") return;
         id = foundry.utils.randomID();
@@ -1932,8 +1965,12 @@ async function handleMessage(message, senderUserId) {
           if (link.target === ref) link.target = newRef;
         }
         pins[id] = { noteId, x: action.x, y: action.y, isDefault: false };
-        await layout.update({ [`system.cards.${oldNoteId}.anchors`]: anchors,
-          "system.pins": pins, "system.pinLinks": pinLinks });
+        await layout.update({
+          [`system.cards.${oldNoteId}.anchors`]: anchors,
+          // The converted minor is now a board pin; the old anchor key must be deleted too.
+          [`system.cards.${oldNoteId}.anchors.-=${anchorId}`]: null,
+          "system.pins": pins, "system.pinLinks": pinLinks
+        });
         for (const [ownerId, links] of pageUpdates) {
           await shared.pages.get(ownerId)?.update({ "system.links": links });
         }
@@ -2055,16 +2092,17 @@ async function handleMessage(message, senderUserId) {
         const nextAttachment = { ...storedAttachment, mainPinEnabled: true };
         try {
           if (JSON.stringify(anchors) !== JSON.stringify(originalCard.anchors ?? {})) {
-            await layout.update({ [`system.cards.${page.id}.anchors`]: anchors });
+            await layout.update(anchorRestoreChanges(
+              page.id, layout.system.cards?.[page.id]?.anchors, anchors));
           }
           if (!currentlyEnabled || page.system.attachment?.mainPinEnabled !== true) {
             await page.update({ "system.attachment": nextAttachment });
           }
         } catch (err) {
-          await layout.update({
-            [`system.cards.${page.id}.anchors`]: originalCard.anchors ?? {}
-          }).catch(() => {});
-          await page.update({ "system.attachment": storedAttachment }).catch(() => {});
+          await layout.update(anchorRestoreChanges(
+            page.id, layout.system.cards?.[page.id]?.anchors, originalCard.anchors ?? {})).catch(() => {});
+          await page.update(objectRestoreChanges(
+            "system.attachment", page.system.attachment, storedAttachment)).catch(() => {});
           console.error("Journalinator: enabling the main pin failed", err);
         }
         return;
@@ -2161,18 +2199,22 @@ async function handleMessage(message, senderUserId) {
           await page.update({ "system.attachment": nextAttachment });
         }
         if (anchorsChanged) {
-          await layout.update({ [`system.cards.${page.id}.anchors`]: hubCard.anchors });
+          await layout.update(anchorRestoreChanges(
+            page.id, layout.system.cards?.[page.id]?.anchors, hubCard.anchors));
         }
       } catch (err) {
         // Restore the exact captured shared state; no link may be lost or half-redistributed.
         for (const state of beforeNotes) {
-          await shared.pages.get(state.noteId)?.update({
+          const notePage = shared.pages.get(state.noteId);
+          await notePage?.update({
             "system.links": deepClone(state.links),
-            ...attachmentRestoreChanges(state)
+            ...attachmentRestoreChanges(state, notePage.system.attachment)
           }).catch(() => {});
         }
         await layout.update({
-          [`system.cards.${page.id}`]: deepClone(beforeCard)
+          [`system.cards.${page.id}`]: deepClone(beforeCard),
+          ...anchorRestoreChanges(
+            page.id, layout.system.cards?.[page.id]?.anchors, beforeCard.anchors ?? {})
         }).catch(() => {});
         console.error("Journalinator: disabling the main pin failed", err);
         return;
@@ -2244,12 +2286,13 @@ async function handleMessage(message, senderUserId) {
           const notePage = shared.pages.get(state.noteId);
           await notePage.update({
             "system.links": deepClone(state.links),
-            ...attachmentRestoreChanges(state)
+            ...attachmentRestoreChanges(state, notePage.system.attachment)
           });
         }
         for (const state of entry.layout) {
           // Undo restores only the anchor registry it changed; geometry/labels stay untouched.
-          await layout.update({ [`system.cards.${state.noteId}.anchors`]: deepClone(state.anchors ?? {}) });
+          await layout.update(anchorRestoreChanges(
+            state.noteId, layout.system.cards?.[state.noteId]?.anchors, state.anchors ?? {}));
         }
         pinUndoEntries.delete(message.undoId);
       } catch (err) {

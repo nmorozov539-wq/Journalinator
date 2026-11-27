@@ -20,6 +20,7 @@ foundry.applications = { api: { DialogV2: { confirm: async () => true,
 const { registerSocket, requestWrite } = await import("../scripts/socket.mjs");
 const { notesStore } = await import("../scripts/store/notes-store.mjs");
 const { default: JournalCanvas } = await import("../scripts/app/canvas.mjs");
+const { anchorWorld } = await import("../scripts/anchors.mjs");
 registerSocket();
 const tick = () => new Promise(resolve => setTimeout(resolve, 50));
 const frame = () => new Promise(resolve => dom.window.requestAnimationFrame(() => resolve()));
@@ -141,7 +142,7 @@ test("pin tool paints a pin-tipped cursor on the canvas and its descendants", ()
   assert.equal(`${hotX} ${hotY}`, "14 27", "the hotspot sits on the pin tip");
 });
 
-test("pins stay above threads and keep a fixed screen size during wheel zoom", () => {
+test("pin heads keep a fixed board size while their hit targets stay screen-sized through zoom", () => {
   const notes = notesStore.getAllNotes();
   const a = notes.find(note => note.name === "Pin A");
   const b = notes.find(note => note.name === "Pin B");
@@ -159,20 +160,88 @@ test("pins stay above threads and keep a fixed screen size during wheel zoom", (
   for (const k of [0.35, 0.8, 1.5, 2.8]) {
     canvas.view.k = k;
     canvas.refreshGeometry();
-    assert.equal(Number.parseFloat(canvas.root.style.getPropertyValue("--jn-main-pin-size")) * k, 14);
-    assert.equal(Number.parseFloat(canvas.root.style.getPropertyValue("--jn-pin-hit-size")) * k, 20);
+    assert.equal(Number.parseFloat(canvas.root.style.getPropertyValue("--jn-main-pin-size")), 14,
+      "pin heads keep their world size instead of growing at low zoom");
+    assert.equal(Number.parseFloat(canvas.root.style.getPropertyValue("--jn-pin-hit-size")) * k, 20,
+      "the hit target stays 20px on screen");
     for (const ref of refs) assert.ok(canvas.pinLayer.querySelector(`[data-pin-ref="${ref}"]`));
     const pin = canvas.pinLayer.querySelector('[data-pin-ref="p:noteExtra"]');
     pin.dispatchEvent(new dom.window.WheelEvent("wheel", {
       bubbles: true, cancelable: true, clientX: 20, clientY: 20, deltaY: 20
     }));
-    assert.ok(Math.abs(Number.parseFloat(canvas.root.style.getPropertyValue("--jn-main-pin-size")) * canvas.view.k - 14) < 1e-9,
-      "zoom compensation updates in the wheel event while the pointer is on a pin");
+    assert.equal(Number.parseFloat(canvas.root.style.getPropertyValue("--jn-main-pin-size")), 14,
+      "wheel zoom leaves the pin head at its fixed world size");
+    assert.ok(Math.abs(Number.parseFloat(canvas.root.style.getPropertyValue("--jn-pin-hit-size")) * canvas.view.k - 20) < 1e-9,
+      "zoom compensation updates the hit target in the same wheel event");
   }
   const path = canvas.pinLinksSvg.querySelector('[data-pin-link="visible"] .jn-thread-layer');
   assert.ok(path?.getAttribute("d"));
   canvas.disconnectGeometry();
   canvas.root.remove();
+});
+
+test("the link magnet snaps within the screen-space pin hitbox at every zoom", () => {
+  const id = "pinMagnet0000001";
+  const note = {
+    _id: id, name: "Magnet note",
+    system: {
+      style: "sticky", authorId: user.id, blocks: [], links: [],
+      attachment: { mainPinEnabled: true, mainSnapRadius: 1, minorSnapRadius: 1, pinStyle: "enamel" }
+    }
+  };
+  const layout = {
+    cards: {
+      [id]: {
+        x: 100, y: 100, width: 200, height: 100, rotation: 0,
+        anchors: {
+          main: { kind: "main", x: 0.5, y: 0, createdBy: user.id },
+          magnet: { kind: "minor", x: 0.5, y: 0.5, createdBy: user.id }
+        }
+      }
+    },
+    labels: {}
+  };
+  const canvas = new JournalCanvas({ onSelectNote() {} });
+  document.body.append(canvas.root);
+  canvas.pinsEnabled = true;
+  try {
+    canvas.update([note], layout);
+    canvas.toggleLinkTool();
+    const card = canvas.cardEls.get(id);
+    const pin = canvas.pinLayer.querySelector(`[data-pin-ref="n:${id}:magnet"]`);
+    const preview = () => canvas.svg.querySelector(".jn-pin-target");
+    const hover = (k, worldX, worldY) => {
+      canvas.view = { x: 0, y: 0, k };
+      canvas.refreshGeometry();
+      card.dispatchEvent(new MouseEvent("pointermove", {
+        bubbles: true, clientX: worldX * k, clientY: worldY * k
+      }));
+    };
+
+    // The pin sits at world (200, 150); its hit target is 10 screen px around that point even
+    // though this note's configured minor magnet is only 1px.
+    hover(1, 208, 150);
+    assert.equal(preview()?.dataset.anchorId, "magnet", "a link touching the hitbox snaps to the pin");
+    assert.ok(pin.classList.contains("jn-pin-snap"));
+
+    hover(0.5, 218, 150); // 18 world px = 9 screen px from the pin.
+    assert.equal(preview()?.dataset.anchorId, "magnet",
+      "the hitbox scales with the board, so the same screen distance still snaps when zoomed out");
+    assert.ok(pin.classList.contains("jn-pin-snap"));
+
+    hover(2, 218, 150); // The same world point is now 36 screen px away.
+    assert.notEqual(preview()?.dataset.anchorId, "magnet",
+      "zooming in shrinks the world-space hitbox instead of making the magnet enormous");
+    assert.equal(pin.classList.contains("jn-pin-snap"), false);
+
+    hover(4, 206.25, 150); // 25 screen px away: outside the 20px target, but on the 56px head.
+    assert.equal(preview()?.dataset.anchorId, "magnet",
+      "when the visible head grows past the minimum target, the magnet grows with it");
+  } finally {
+    canvas.cancelLinkTool();
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
 });
 
 test("double-click type menu creates once at the original panned world point", () => {
@@ -694,5 +763,111 @@ test("duplicate legacy anchors render one pin and no small endpoint dots", () =>
   } finally {
     canvas.disconnectGeometry();
     canvas.root.remove();
+  }
+});
+
+test("deferred render measures a reconnected auto-sized rotated card before placing pins", () => {
+  const noteId = "pinMeasure000001";
+  const note = {
+    _id: noteId, name: "Tall measured note",
+    system: {
+      style: "sticky", authorId: user.id, blocks: [], links: [],
+      attachment: { mainPinEnabled: true, pinStyle: "enamel" }
+    }
+  };
+  const baseCard = { x: 120, y: 80, rotation: 23, anchors: {} };
+  const anchors = {
+    main: { kind: "main", x: 0.5, y: 0, createdBy: user.id },
+    inner: { kind: "minor", x: 0.31, y: 0.62, createdBy: user.id }
+  };
+  const card = { ...baseCard, anchors };
+  const layout = {
+    cards: { [noteId]: card },
+    labels: {},
+    pins: {
+      attached: { noteId, x: 0.78, y: 0.23, isDefault: false },
+      free: { noteId: "", x: 900, y: 430, isDefault: false }
+    },
+    pinLinks: {
+      attachedWire: { source: "p:attached", target: `n:${noteId}:main` },
+      freeWire: { source: "p:free", target: `n:${noteId}:inner` }
+    }
+  };
+  const refs = {
+    main: `n:${noteId}:main`,
+    inner: `n:${noteId}:inner`,
+    attached: "p:attached",
+    free: "p:free"
+  };
+  const expectedBox = { x: baseCard.x, y: baseCard.y, w: 360, h: 420, rotation: baseCard.rotation };
+  const expectedPoint = ref => {
+    if (ref.startsWith("p:")) {
+      const data = layout.pins[ref.slice(2)];
+      if (!data.noteId) return { x: data.x, y: data.y };
+      return anchorWorld(expectedBox, { ...data, kind: "minor" });
+    }
+    return anchorWorld(expectedBox, anchors[ref.slice(ref.lastIndexOf(":") + 1)]);
+  };
+  const assertPins = (canvas, label) => {
+    for (const ref of Object.values(refs)) {
+      const el = canvas.pinLayer.querySelector(`[data-pin-ref="${ref}"]`);
+      assert.ok(el, `${label}: ${ref} renders`);
+      const actual = { left: Number.parseFloat(el.style.left), top: Number.parseFloat(el.style.top) };
+      const expected = expectedPoint(ref);
+      assert.ok(Math.abs(actual.left - expected.x) < 1e-6 && Math.abs(actual.top - expected.y) < 1e-6,
+        `${label}: ${ref} at ${actual.left},${actual.top}; expected ${expected.x},${expected.y}`);
+    }
+  };
+  const pinPaths = canvas => new Map([...canvas.pinLinksSvg.querySelectorAll("g[data-pin-link]")]
+    .map(group => [group.dataset.pinLink, group.querySelector(".jn-pin-link-hit")?.getAttribute("d")]));
+
+  const originalObserver = globalThis.ResizeObserver;
+  globalThis.ResizeObserver = class {
+    constructor(callback) { this.callback = callback; }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+  const canvas = new JournalCanvas({ onSelectNote() {} });
+  canvas.pinsEnabled = true;
+  try {
+    // Create the card element while detached, then make the real (unchanged) auto-size visible
+    // only when the canvas is connected. The initial anchor-free pass avoids inventing a size.
+    canvas.update([note], { cards: { [noteId]: baseCard }, labels: {} }, { deferGeometry: true });
+    const cardEl = canvas.cardEls.get(noteId);
+    Object.defineProperty(cardEl, "offsetWidth", {
+      configurable: true, get: () => canvas.root.isConnected ? 360 : 0
+    });
+    Object.defineProperty(cardEl, "offsetHeight", {
+      configurable: true, get: () => canvas.root.isConnected ? 420 : 0
+    });
+
+    document.body.append(canvas.root);
+    canvas.view = { x: 41, y: -27, k: 1.45 };
+    canvas.update([note], layout);
+    assertPins(canvas, "connected render");
+    assert.deepEqual(canvas.cardSizes.get(noteId), { w: 360, h: 420 });
+    const connectedPaths = pinPaths(canvas);
+    assert.equal(connectedPaths.size, 2);
+
+    canvas.root.remove();
+    canvas.update([note], layout, { deferGeometry: true });
+    assert.equal(canvas.cardSizes.has(noteId), false,
+      "a detached deferred render never caches fallback dimensions");
+    assert.equal(canvas.unmeasuredCards.has(noteId), true);
+
+    // Reconnect at exactly the same real dimensions. The existing ResizeObserver never fires,
+    // so only the refresh's own measurement can put the pins and thread endpoints back.
+    document.body.append(canvas.root);
+    canvas.refreshGeometry();
+    assertPins(canvas, "immediately after reconnect");
+    assert.deepEqual(pinPaths(canvas), connectedPaths,
+      "pin-link thread endpoints use the measured card box, not the detached placeholder");
+    assert.deepEqual(canvas.cardSizes.get(noteId), { w: 360, h: 420 });
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+    if (originalObserver) globalThis.ResizeObserver = originalObserver;
+    else delete globalThis.ResizeObserver;
   }
 });
