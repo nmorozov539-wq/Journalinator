@@ -287,7 +287,8 @@ export function countSharedTransferDrops(sharedPages, noteIds) {
  *
  * The shared journal is authoritative input here: hidden blocks and hidden links are excluded
  * before packing, so vault content can never leak into a private transfer. Only attached labels
- * and board pins of the selected notes travel; free labels, hidden labels and pin links whose
+ * and board pins of the selected notes travel, and a board pin must be referenced by a packed
+ * pin link; orphaned pins never leave their canvas. Free labels, hidden labels and pin links whose
  * endpoints fall outside the selection are omitted. `toUserId` may equal `fromUserId`: the
  * socket handler uses that shape for a direct self-import and never stores it as a pending offer.
  */
@@ -324,6 +325,24 @@ export function buildSharedTransfer(sharedPages, layout, noteIds, { fromUserId, 
   }
 
   let labelCount = 0;
+  const refOwner = ref => {
+    if (typeof ref !== "string") return "";
+    if (ref.startsWith("n:")) return ref.slice(2, ref.indexOf(":", 2));
+    if (ref.startsWith("p:")) return boardPins[ref.slice(2)]?.noteId ?? "";
+    return "";
+  };
+  const transferablePinLinks = Object.entries(boardLinks)
+    .filter(([, link]) => link && link.hidden !== true
+      && seen.has(refOwner(link.source)) && seen.has(refOwner(link.target)));
+  // A pin with no transferable connection is orphaned and stays behind, even when its note is
+  // selected. Only board pins actually referenced by a packed pin link may travel.
+  const linkedPinIds = new Set();
+  for (const [, link] of transferablePinLinks) {
+    for (const ref of [link.source, link.target]) {
+      if (typeof ref === "string" && ref.startsWith("p:")) linkedPinIds.add(ref.slice(2));
+    }
+  }
+
   const packed = selected.map(noteId => {
     const page = pages.get(noteId);
     const attached = {};
@@ -346,20 +365,13 @@ export function buildSharedTransfer(sharedPages, layout, noteIds, { fromUserId, 
         ? clone(cards[noteId]) : null,
       labels: attached,
       pins: Object.fromEntries(Object.entries(boardPins)
-        .filter(([, pin]) => pin && pin.hidden !== true && pin.noteId === noteId)
+        .filter(([id, pin]) => pin && pin.hidden !== true && pin.noteId === noteId
+          && linkedPinIds.has(id))
         .map(([id, pin]) => [id, clone(pin)]))
     };
   });
 
-  const refOwner = ref => {
-    if (typeof ref !== "string") return "";
-    if (ref.startsWith("n:")) return ref.slice(2, ref.indexOf(":", 2));
-    if (ref.startsWith("p:")) return boardPins[ref.slice(2)]?.noteId ?? "";
-    return "";
-  };
-  const packedPinLinks = Object.fromEntries(Object.entries(boardLinks)
-    .filter(([, link]) => link && link.hidden !== true
-      && seen.has(refOwner(link.source)) && seen.has(refOwner(link.target)))
+  const packedPinLinks = Object.fromEntries(transferablePinLinks
     .map(([id, link]) => [id, clone(link)]));
 
   const drops = countSharedTransferDrops(pages, selected);
@@ -422,6 +434,23 @@ export function buildPrivateTransfer(workspace, noteIds, { fromUserId, toUserId 
   }
 
   let labelCount = 0;
+  const refOwner = ref => {
+    if (typeof ref !== "string") return "";
+    if (ref.startsWith("n:")) return ref.slice(2, ref.indexOf(":", 2));
+    if (ref.startsWith("p:")) return boardPins[ref.slice(2)]?.noteId ?? "";
+    return "";
+  };
+  const transferablePinLinks = Object.entries(boardLinks)
+    .filter(([, link]) => seen.has(refOwner(link?.source)) && seen.has(refOwner(link?.target)));
+  // Orphaned board pins stay on the source canvas even when their note is selected. A pin only
+  // travels when a packed pin link actually references it.
+  const linkedPinIds = new Set();
+  for (const [, link] of transferablePinLinks) {
+    for (const ref of [link.source, link.target]) {
+      if (typeof ref === "string" && ref.startsWith("p:")) linkedPinIds.add(ref.slice(2));
+    }
+  }
+
   const packed = selected.map(noteId => {
     const attached = {};
     const usedLabelIds = new Set();
@@ -443,18 +472,12 @@ export function buildPrivateTransfer(workspace, noteIds, { fromUserId, toUserId 
         ? clone(cards[noteId]) : null,
       labels: attached,
       pins: Object.fromEntries(Object.entries(boardPins)
-        .filter(([, pin]) => pin?.noteId === noteId).map(([id, pin]) => [id, clone(pin)]))
+        .filter(([id, pin]) => pin?.noteId === noteId && linkedPinIds.has(id))
+        .map(([id, pin]) => [id, clone(pin)]))
     };
   });
 
-  const refOwner = ref => {
-    if (typeof ref !== "string") return "";
-    if (ref.startsWith("n:")) return ref.slice(2, ref.indexOf(":", 2));
-    if (ref.startsWith("p:")) return boardPins[ref.slice(2)]?.noteId ?? "";
-    return "";
-  };
-  const packedPinLinks = Object.fromEntries(Object.entries(boardLinks)
-    .filter(([, link]) => seen.has(refOwner(link?.source)) && seen.has(refOwner(link?.target)))
+  const packedPinLinks = Object.fromEntries(transferablePinLinks
     .map(([id, link]) => [id, clone(link)]));
 
   const drops = countDrops(notes, new Set(selected));

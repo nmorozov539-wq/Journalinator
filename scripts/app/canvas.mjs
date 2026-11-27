@@ -179,8 +179,12 @@ export default class JournalCanvas {
     this.pinInteraction = null;
     this.lastPinGestureAt = 0;
     this.selectedPinRef = null;
+    this.selectedPinRefs = new Set();
     this.hoverPinRef = null;
     this.pinOverride = null;
+    this.groupPinOverrides = new Map();
+    this.pendingGroupPinMoves = new Map();
+    this.groupPinDropTimer = null;
     this.pendingPinDrop = null;
     // A pin drag repaints only the threads and pin links touching the moving pin, once per
     // frame. The ghost itself is positioned in the pointer event so it never trails the cursor.
@@ -282,6 +286,24 @@ export default class JournalCanvas {
     this.notes = notes;
     this.notesById = new Map(notes.map(note => [note._id, note]));
     this.layout = layout ?? { cards: {}, labels: {} };
+    if (this.pendingGroupPinMoves.size) {
+      for (const [ref, target] of [...this.pendingGroupPinMoves]) {
+        const pin = ref.startsWith("p:") ? this.layout.pins?.[ref.slice(2)] : null;
+        const saved = pin && !pin.noteId
+          && Math.abs(pin.x - target.x) < 1e-9 && Math.abs(pin.y - target.y) < 1e-9;
+        if (saved || !pin) {
+          this.pendingGroupPinMoves.delete(ref);
+          this.groupPinOverrides.delete(ref);
+        }
+      }
+      if (!this.pendingGroupPinMoves.size) {
+        this.groupPinOverrides.clear();
+        if (this.groupPinDropTimer !== null) {
+          globalThis.clearTimeout(this.groupPinDropTimer);
+          this.groupPinDropTimer = null;
+        }
+      }
+    }
     const pending = this.pendingPinDrop;
     if (pending) {
       const id = pending.ref.startsWith("p:") ? pending.ref.slice(2) : "";
@@ -425,6 +447,12 @@ export default class JournalCanvas {
     this.cardResizeObserver?.disconnect();
     this.cardResizeObserver = null;
     this.#unbindGeometryResize();
+    if (this.groupPinDropTimer !== null) {
+      globalThis.clearTimeout(this.groupPinDropTimer);
+      this.groupPinDropTimer = null;
+    }
+    this.pendingGroupPinMoves.clear();
+    this.groupPinOverrides.clear();
     if (this.linkDrawTimer !== null) this.linkDrawCancel?.(this.linkDrawTimer);
     this.linkDrawTimer = null;
     this.#unbindToolbarDismiss();
@@ -690,13 +718,14 @@ export default class JournalCanvas {
   /** Selected pins get a persistent ring and an accessible label explaining the delete keys. */
   #syncPinSelection() {
     const pins = this.pinLayer.querySelectorAll("[data-pin-ref]");
-    let selected = null;
-    for (const pin of pins) {
-      if (pin.dataset.pinRef === this.selectedPinRef) selected = pin;
+    const valid = new Set([...pins].map(pin => pin.dataset.pinRef));
+    if (this.selectedPinRef && !valid.has(this.selectedPinRef)) this.selectedPinRef = null;
+    for (const ref of this.selectedPinRefs) {
+      if (!valid.has(ref)) this.selectedPinRefs.delete(ref);
     }
-    if (this.selectedPinRef && !selected) this.selectedPinRef = null;
     for (const pin of pins) {
-      const isSelected = pin === selected;
+      const isSelected = pin.dataset.pinRef === this.selectedPinRef
+        || this.selectedPinRefs.has(pin.dataset.pinRef);
       const main = pin.dataset.anchorKind === "main";
       const label = isSelected
         ? t(main ? "JN.Pin.SelectedMain" : "JN.Pin.SelectedMinor")
@@ -710,11 +739,19 @@ export default class JournalCanvas {
 
   #setSelectedPin(ref) {
     this.selectedPinRef = ref ?? null;
+    if (ref) this.selectedPinRefs.clear();
+    this.#syncPinSelection();
+  }
+
+  #clearPinSelection() {
+    this.selectedPinRef = null;
+    this.selectedPinRefs.clear();
     this.#syncPinSelection();
   }
 
   #pinPoint(ref, boxes = null) {
     if (this.pinOverride?.ref === ref) return this.pinOverride.point;
+    if (this.groupPinOverrides.has(ref)) return this.groupPinOverrides.get(ref);
     return resolvePin(ref, this.layout, boxes
       ?? new Map([...this.cardEls.keys()].map(id => [id, this.#cardBox(id)])));
   }
@@ -2671,11 +2708,14 @@ export default class JournalCanvas {
     this.previewPin = null;
   }
 
-  #setSelection(ids, primary = null, labelIds = []) {
+  #setSelection(ids, primary = null, labelIds = [], pinRefs = []) {
     this.#highlightLabels(labelIds);
     this.selectedNoteIds = new Set(ids);
     this.selectedNoteId = primary;
+    this.selectedPinRef = null;
+    this.selectedPinRefs = new Set(pinRefs);
     this.selectedLinkId = null;
+    this.#syncPinSelection();
     this.#syncLinkSelection();
     for (const [id, el] of this.cardEls) el.classList.toggle("selected", this.selectedNoteIds.has(id));
     this.#syncLinkToolbar();
@@ -2727,8 +2767,28 @@ export default class JournalCanvas {
     for (const [id, el] of this.labelEls) {
       if (intersects(el)) labels.add(id);
     }
+    // Pins use world positions because their DOM boxes are tiny and may be zero-sized in
+    // embedded/nonvisual environments. An attached pin selects its owning note; only free board
+    // pins join the selection as independent objects.
+    const pins = new Set(drag.additive ? drag.initialPinRefs ?? [] : []);
+    const topLeft = this.#toWorld(left, top);
+    const bottomRight = this.#toWorld(right, bottom);
+    const x0 = Math.min(topLeft.x, bottomRight.x), x1 = Math.max(topLeft.x, bottomRight.x);
+    const y0 = Math.min(topLeft.y, bottomRight.y), y1 = Math.max(topLeft.y, bottomRight.y);
+    for (const pin of this.pinLayer.querySelectorAll("[data-pin-ref]")) {
+      const ref = pin.dataset.pinRef;
+      const point = this.#pinPoint(ref);
+      if (!point || point.x < x0 || point.x > x1 || point.y < y0 || point.y > y1) continue;
+      if (ref.startsWith("p:")) {
+        const data = this.layout.pins?.[ref.slice(2)];
+        if (data?.noteId && this.cardEls.has(data.noteId)) notes.add(data.noteId);
+        else if (data && !data.noteId) pins.add(ref);
+      } else if (ref.startsWith("n:") && pin.dataset.noteId) {
+        notes.add(pin.dataset.noteId);
+      }
+    }
     const ids = [...notes];
-    this.#setSelection(ids, ids.length === 1 && !labels.size ? ids[0] : null, labels);
+    this.#setSelection(ids, ids.length === 1 && !labels.size ? ids[0] : null, labels, [...pins]);
   }
 
   #closeContextMenu() {
@@ -3438,10 +3498,10 @@ export default class JournalCanvas {
         this.#setSelectedPin(null);
         return;
       }
-      if (ev.key === "Escape" && this.selectedPinRef) {
+      if (ev.key === "Escape" && (this.selectedPinRef || this.selectedPinRefs.size)) {
         ev.preventDefault();
         ev.stopPropagation();
-        this.#setSelectedPin(null);
+        this.#clearPinSelection();
         return;
       }
       // Inline card text is opened by a deliberate double click below.
@@ -3576,10 +3636,22 @@ export default class JournalCanvas {
         }));
         if (!this.selectedNoteIds.has(id)) {
           this.selectedNoteIds = new Set([id]);
+          this.selectedPinRefs.clear();
+          this.#syncPinSelection();
           for (const [noteId, el] of this.cardEls) el.classList.toggle("selected", noteId === id);
         }
+        // Free pins selected with this note group move by the same world delta. Attached pins
+        // already follow their card and are never tracked as independent pin selections.
+        const pinOrigins = new Map();
+        for (const ref of this.selectedPinRefs) {
+          const pinId = ref.startsWith("p:") ? ref.slice(2) : "";
+          const data = pinId ? this.layout.pins?.[pinId] : null;
+          if (!data || data.noteId) continue;
+          const point = this.#pinPoint(ref);
+          if (point) pinOrigins.set(ref, { x: point.x, y: point.y });
+        }
         drag = {
-          type: "card", id, ids: selected, origins,
+          type: "card", id, ids: selected, origins, pinOrigins,
           toggle: ev.ctrlKey || ev.metaKey, initialIds, initialLabelIds,
           text: ev.target.closest("[data-card-text]"),
           sx: ev.clientX, sy: ev.clientY, moved: 0, readOnly: this.readOnly
@@ -3598,7 +3670,7 @@ export default class JournalCanvas {
         drag = {
           type: "selection", sx: ev.clientX, sy: ev.clientY, moved: 0,
           additive: ev.ctrlKey || ev.metaKey, initialIds: [...this.selectedNoteIds],
-          initialLabelIds: [...this.selectedLabelIds]
+          initialLabelIds: [...this.selectedLabelIds], initialPinRefs: [...this.selectedPinRefs]
         };
       }
     });
@@ -3660,6 +3732,12 @@ export default class JournalCanvas {
           const origin = drag.origins.get(id);
           el.style.left = `${origin.x + dx / this.view.k}px`;
           el.style.top = `${origin.y + dy / this.view.k}px`;
+        }
+        if (drag.pinOrigins?.size) {
+          this.groupPinOverrides = new Map([...drag.pinOrigins].map(([ref, origin]) => [
+            ref, { x: origin.x + dx / this.view.k, y: origin.y + dy / this.view.k,
+              nx: 0, ny: 0, movable: true }
+          ]));
         }
         // This redraw is deliberately local-only. The GM write is sent after pointerup, so
         // other clients see one final movement while the dragging client gets a fluid preview.
@@ -3776,6 +3854,42 @@ export default class JournalCanvas {
           for (const id of drag.ids) {
             const el = this.cardEls.get(id);
             this.callbacks.onMoveCard(id, parseFloat(el.style.left), parseFloat(el.style.top));
+          }
+          if (drag.pinOrigins?.size) {
+            const pinDx = (ev.clientX - drag.sx) / this.view.k;
+            const pinDy = (ev.clientY - drag.sy) / this.view.k;
+            const targets = new Map([...drag.pinOrigins].map(([ref, origin]) => [
+              ref, { x: origin.x + pinDx, y: origin.y + pinDy }
+            ]));
+            this.groupPinOverrides = new Map([...targets].map(([ref, point]) => [
+              ref, { ...point, nx: 0, ny: 0, movable: true }
+            ]));
+            this.pendingGroupPinMoves = targets;
+            if (this.groupPinDropTimer !== null) globalThis.clearTimeout(this.groupPinDropTimer);
+            this.groupPinDropTimer = globalThis.setTimeout(() => {
+              this.groupPinDropTimer = null;
+              if (!this.pendingGroupPinMoves.size) return;
+              this.pendingGroupPinMoves.clear();
+              this.groupPinOverrides.clear();
+              this.#flushLinkDraw();
+            }, 2000);
+            const writes = [];
+            for (const [ref, point] of targets) {
+              writes.push(this.callbacks.onBoardPinAction?.({
+                type: "move", ref, noteId: "", x: point.x, y: point.y
+              }));
+            }
+            Promise.allSettled(writes).then(results => {
+              if (!results.some(result => result.status === "rejected" || result.value === false)) return;
+              for (const ref of targets.keys()) {
+                this.pendingGroupPinMoves.delete(ref);
+                this.groupPinOverrides.delete(ref);
+              }
+              if (this.pendingGroupPinMoves.size) return;
+              if (this.groupPinDropTimer !== null) globalThis.clearTimeout(this.groupPinDropTimer);
+              this.groupPinDropTimer = null;
+              this.#flushLinkDraw();
+            });
           }
           // The note move is committed exactly as before. Only after that does an explicit
           // drop chooser appear; without a confirmed choice, route topology is never touched.
@@ -3940,6 +4054,12 @@ export default class JournalCanvas {
   getSelectedNoteIds() {
     const ids = this.selectedNoteIds.size ? this.selectedNoteIds : [this.selectedNoteId];
     return [...ids].filter(id => this.cardEls.has(id));
+  }
+
+  /** Free board pins selected independently of a note; attached pins travel with their card. */
+  getSelectedPinRefs() {
+    return [...this.selectedPinRefs].filter(ref =>
+      ref.startsWith("p:") && this.layout.pins?.[ref.slice(2)]);
   }
 
   getSelectedLabelIds() {

@@ -244,6 +244,108 @@ test("the link magnet snaps within the screen-space pin hitbox at every zoom", (
   }
 });
 
+test("box selection includes free pins and moves them with the selected notes", async () => {
+  const noteId = "pinSelect0000001";
+  const note = {
+    _id: noteId, name: "Selection note",
+    system: {
+      style: "sticky", authorId: user.id, blocks: [], links: [],
+      attachment: { mainPinEnabled: true, pinStyle: "enamel" }
+    }
+  };
+  const layout = {
+    cards: {
+      [noteId]: {
+        x: 100, y: 100, width: 200, height: 100, rotation: 0,
+        anchors: { main: { kind: "main", x: 0.5, y: 0, createdBy: user.id } }
+      }
+    },
+    labels: {},
+    pins: { free: { noteId: "", x: 350, y: 150, isDefault: false } },
+    pinLinks: {}
+  };
+  const movedCards = [];
+  const pinActions = [];
+  const canvas = new JournalCanvas({
+    onSelectNote() {},
+    onMoveCard: (...args) => movedCards.push(args),
+    onBoardPinAction: action => { pinActions.push(action); }
+  });
+  document.body.append(canvas.root);
+  canvas.pinsEnabled = true;
+  try {
+    canvas.update([note], layout);
+    const card = canvas.cardEls.get(noteId);
+    card.getBoundingClientRect = () => ({
+      left: 100, top: 100, right: 300, bottom: 200, width: 200, height: 100
+    });
+    const pointer = (type, x, y) => canvas.root.dispatchEvent(new MouseEvent(type, {
+      bubbles: true, button: 0, clientX: x, clientY: y
+    }));
+
+    pointer("pointerdown", 90, 90);
+    pointer("pointermove", 400, 250);
+    pointer("pointerup", 400, 250);
+    assert.deepEqual(canvas.getSelectedNoteIds(), [noteId]);
+    assert.deepEqual(canvas.getSelectedPinRefs(), ["p:free"]);
+    assert.ok(card.classList.contains("selected"));
+    assert.ok(canvas.pinLayer.querySelector('[data-pin-ref="p:free"]').classList.contains("jn-pin-selected"));
+
+    event(card, "pointerdown", 150, 150);
+    event(canvas.root, "pointermove", 200, 180);
+    await frame();
+    const freePin = canvas.pinLayer.querySelector('[data-pin-ref="p:free"]');
+    assert.equal(Number.parseFloat(freePin.style.left), 400,
+      "the selected free pin follows the note group before release");
+    assert.equal(Number.parseFloat(freePin.style.top), 180);
+    event(canvas.root, "pointerup", 200, 180);
+
+    assert.deepEqual(movedCards.at(-1), [noteId, 150, 130]);
+    assert.deepEqual(pinActions.at(-1), { type: "move", ref: "p:free", noteId: "", x: 400, y: 180 });
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("box-selecting an attached pin selects its owning note, not an independent pin", () => {
+  const noteId = "pinAttachSelect01";
+  const note = {
+    _id: noteId, name: "Attached selection",
+    system: {
+      style: "sticky", authorId: user.id, blocks: [], links: [],
+      attachment: { mainPinEnabled: true, pinStyle: "enamel" }
+    }
+  };
+  const layout = {
+    cards: {
+      [noteId]: {
+        x: 100, y: 100, width: 200, height: 100, rotation: 0,
+        anchors: { main: { kind: "main", x: 0.5, y: 0, createdBy: user.id } }
+      }
+    },
+    labels: {}, pins: {}, pinLinks: {}
+  };
+  const canvas = new JournalCanvas({ onSelectNote() {} });
+  document.body.append(canvas.root);
+  canvas.pinsEnabled = true;
+  try {
+    canvas.update([note], layout);
+    const pointer = (type, x, y) => canvas.root.dispatchEvent(new MouseEvent(type, {
+      bubbles: true, button: 0, clientX: x, clientY: y
+    }));
+    pointer("pointerdown", 195, 95);
+    pointer("pointermove", 205, 105);
+    pointer("pointerup", 205, 105);
+    assert.deepEqual(canvas.getSelectedNoteIds(), [noteId]);
+    assert.deepEqual(canvas.getSelectedPinRefs(), [],
+      "the attached pin is part of its note, not a separate board object");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
 test("double-click type menu creates once at the original panned world point", () => {
   const a = notesStore.getAllNotes().find(note => note.name === "Pin A");
   const calls = [];

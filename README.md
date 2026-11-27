@@ -71,7 +71,9 @@ The release contains both the Foundry manifest and a ready-to-install ZIP.
 Open the journal from the sticky-note button in the scene controls.
 
 - **Add things:** right-click the canvas and choose a note, location or label.
-- **Select:** left-click a card, or drag a selection rectangle across several cards.
+- **Select:** left-click a card, or drag a selection rectangle across several cards. The
+  rectangle also selects free board pins; dragging a selected card moves selected free pins with
+  the note group. Attached pins belong to their note and are selected with it.
 - **Stamps:** right-click a note to choose a color, corner, and seal. Choosing a new seal replaces the current one. Right-click an existing seal to move it to another corner, change its color, or remove it. For a movable stamp, right-click the board and choose **Place a stamp**. Stamps placed on secret notes stay private.
 - **Actor status (prototype):** as a GM, right-click a shared note and choose **Link actor…**. While the linked actor has the core **Dead** status, a small skull appears on the card. Link a scene as well to follow that scene's tokens, so the same unlinked actor can read as dead in one scene and alive in another. The badge is derived per client from documents that client can already see; it is not stored in the journal.
 - **Themes:** Classic, Warm, Parchment, **From scene**, and any themes other modules register. A theme can restyle the board background, every note type's surface and typography, and all shared colors. Your choice is saved for your client.

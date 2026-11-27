@@ -19,16 +19,25 @@ test("private transfers copy note pins and remap connection identities", () => {
   source.notes[second.note.id] = second.note;
   source.layout.cards[second.note.id] = second.card;
   source.layout.pins.manual = { noteId: first.note.id, x: 0.25, y: 0.75, isDefault: false };
+  source.layout.pins.orphan = { noteId: first.note.id, x: 0.5, y: 0.5, isDefault: false };
+  source.layout.pins.freeOrphan = { noteId: "", x: 700, y: 300, isDefault: false };
   source.layout.pinLinks.connection = {
     source: "p:manual", target: `n:${second.note.id}:main`
+  };
+  source.layout.pinLinks.orphanLink = {
+    source: "p:orphan", target: "p:freeOrphan"
   };
   const transfer = buildPrivateTransfer(source, [first.note.id, second.note.id], {
     fromUserId: sender.id, toUserId: "PinTarget00000001"
   });
+  assert.deepEqual(transfer.notes.flatMap(entry => Object.keys(entry.pins ?? {})),
+    ["manual"], "a pin with no link inside the transfer is orphaned and stays behind");
   const imported = importPrivateTransfer({ notes: {}, layout: { cards: {}, labels: {},
     pins: {}, pinLinks: {} }, trash: [] }, transfer, "PinTarget00000001");
   const [newFirst, newSecond] = imported.imported;
   const [newPinId, newPin] = Object.entries(imported.workspace.layout.pins)[0];
+  assert.equal(Object.keys(imported.workspace.layout.pins).length, 1,
+    "orphaned pins are not recreated on the destination canvas");
   assert.notEqual(newPinId, "manual");
   assert.deepEqual([newPin.noteId, newPin.x, newPin.y], [newFirst, 0.25, 0.75]);
   assert.deepEqual(Object.values(imported.workspace.layout.pinLinks)[0], {

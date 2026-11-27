@@ -2,6 +2,16 @@
 
 These notes start with the small board and toolbar polish patches and cover the follow-up fixes and features.
 
+## 0.9.6 — Pin selection
+
+- Box selection now includes free board pins. Selecting an attached pin selects its owning note,
+  because attached pins are handles for the note rather than separate board objects.
+- Selected free pins move with the selected note group during card dragging, and their final
+  positions are saved with the notes.
+- Pins with no transferable connection are treated as orphaned and never cross canvases. A
+  note-owned pin only travels when a packed pin link references it, even when its note is
+  selected; free pins and pins connected only to unselected objects stay behind.
+
 ## 0.9.5 — Pin stability and scaling
 
 - Deleting a manually placed pin now removes the pin and all of its connected pin links from the

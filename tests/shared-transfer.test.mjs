@@ -79,11 +79,15 @@ test("shared transfer packaging copies only visible content of the selected note
     "system.pins": {
       alphaPin: { noteId: alpha.id, x: 0.25, y: 0.75, isDefault: false },
       betaPin: { noteId: beta.id, x: 0.5, y: 0.5, isDefault: false },
-      outsidePin: { noteId: outside.id, x: 0.5, y: 0.5, isDefault: false }
+      outsidePin: { noteId: outside.id, x: 0.5, y: 0.5, isDefault: false },
+      alphaOrphan: { noteId: alpha.id, x: 0.4, y: 0.4, isDefault: false },
+      betaExternalOnly: { noteId: beta.id, x: 0.6, y: 0.6, isDefault: false }
     },
     "system.pinLinks": {
       internal: { source: "p:alphaPin", target: "p:betaPin" },
-      external: { source: "p:alphaPin", target: "p:outsidePin" }
+      external: { source: "p:alphaPin", target: "p:outsidePin" },
+      orphan: { source: "p:alphaOrphan", target: "p:outsidePin" },
+      betaExternal: { source: "p:betaExternalOnly", target: "p:outsidePin" }
     }
   });
 
@@ -99,6 +103,8 @@ test("shared transfer packaging copies only visible content of the selected note
   assert.ok(!serialized.includes("GM SECRET"), "hidden blocks, links and labels never enter the pack");
   assert.ok(!serialized.includes("Free board label"), "free board labels never travel");
   assert.equal(Object.keys(packed.pinLinks).length, 1, "only the pin link between selected notes survives");
+  assert.deepEqual(packed.notes.flatMap(entry => Object.keys(entry.pins)).sort(),
+    ["alphaPin", "betaPin"], "orphaned and externally linked pins stay on the source canvas");
 
   const alphaEntry = packed.notes.find(entry => entry.note.id === alpha.id);
   assert.deepEqual(alphaEntry.note.blocks.map(block => block.text), ["visible alpha"]);
