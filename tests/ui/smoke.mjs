@@ -3161,6 +3161,78 @@ test("private anchors are capped, strictly named, reference-safe and main-pin gu
   }
 });
 
+test("private link creation reuses one minor pin for a repeated edge point", async () => {
+  const user = makeUser("Player000000014", { name: "Private Reuse" });
+  const page = await privateStore.createFor(user);
+  const workspace = new PrivateWorkspace({ onChange() {} });
+  workspace.setPage(page);
+  try {
+    const sourceId = await workspace.createNoteAt({ title: "Private Reuse Source", x: 0, y: 0 });
+    const firstTarget = await workspace.createNoteAt({ title: "Private Reuse One", x: 400, y: 0 });
+    const secondTarget = await workspace.createNoteAt({ title: "Private Reuse Two", x: 800, y: 0 });
+    const spec = { kind: "minor", x: 1, y: 0.5 };
+    await workspace.createLink(sourceId, firstTarget, {
+      sourceAnchor: spec, targetAnchor: { kind: "minor", x: 0, y: 0.5 }
+    });
+    const first = workspace.workspace.notes[sourceId].links.find(link => link.targetId === firstTarget);
+    const anchorId = first.sourceAnchorId;
+    assert.ok(anchorId);
+    await workspace.createLink(sourceId, secondTarget, {
+      sourceAnchor: spec, targetAnchor: { kind: "minor", x: 0, y: 0.5 }
+    });
+    const second = workspace.workspace.notes[sourceId].links.find(link => link.targetId === secondTarget);
+    assert.equal(second.sourceAnchorId, anchorId, "the same body point shares the existing pin id");
+    const minors = Object.entries(workspace.workspace.layout.cards[sourceId].anchors)
+      .filter(([, anchor]) => anchor.kind === "minor");
+    assert.equal(minors.length, 1, "no stacked duplicate minor is materialized");
+  } finally {
+    workspace.destroy();
+    await privateStore.remove(page);
+  }
+});
+
+test("private saves merge stacked minors and repoint links and pin links", async () => {
+  const user = makeUser("Player000000015", { name: "Private Merge" });
+  const page = await privateStore.createFor(user);
+  const workspace = new PrivateWorkspace({ onChange() {} });
+  workspace.setPage(page);
+  try {
+    const sourceId = await workspace.createNoteAt({ title: "Private Merge Source", x: 0, y: 0 });
+    const targetId = await workspace.createNoteAt({ title: "Private Merge Target", x: 400, y: 0 });
+    const card = workspace.workspace.layout.cards[sourceId];
+    Object.assign(card.anchors, {
+      m1: { kind: "minor", x: 1, y: 0.5, createdBy: user.id },
+      m2: { kind: "minor", x: 1, y: 0.5015, createdBy: user.id },
+      distinct: { kind: "minor", x: 0, y: 0.5, createdBy: user.id }
+    });
+    workspace.workspace.notes[sourceId].links.push({
+      id: "private-merge-link", targetId, sourceAnchorId: "m2", targetAnchorId: "main",
+      sourcePoint: { x: 1, y: 0.5015 }, targetPoint: { x: 0.5, y: 0 },
+      routeAnchors: [{ noteId: sourceId, anchorId: "m2" }]
+    });
+    workspace.workspace.layout.pinLinks = {
+      mergePin: { source: `n:${sourceId}:m2`, target: `n:${targetId}:main`, label: "kept" }
+    };
+
+    // A normal save-triggering mutation runs the private normalization pass.
+    await workspace.moveCard(sourceId, 12, 8);
+    const mergedCard = workspace.workspace.layout.cards[sourceId];
+    assert.equal(mergedCard.anchors.m2, undefined);
+    assert.ok(mergedCard.anchors.m1, "the first sorted id is canonical");
+    assert.ok(mergedCard.anchors.distinct, "distinct minors and the main pin are untouched");
+    assert.ok(mergedCard.anchors.main);
+    const mergedLink = workspace.workspace.notes[sourceId].links.find(link => link.id === "private-merge-link");
+    assert.equal(mergedLink.sourceAnchorId, "m1");
+    assert.deepEqual(mergedLink.routeAnchors, [{ noteId: sourceId, anchorId: "m1" }]);
+    assert.equal(workspace.workspace.layout.pinLinks.mergePin.source, `n:${sourceId}:m1`);
+    assert.equal(workspace.workspace.layout.pinLinks.mergePin.target, `n:${targetId}:main`);
+    assert.equal(workspace.workspace.layout.pinLinks.mergePin.label, "kept");
+  } finally {
+    workspace.destroy();
+    await privateStore.remove(page);
+  }
+});
+
 test("private link creation does not materialize new minors while pins are disabled", async () => {
   const user = makeUser("Player000000012", { name: "Private Pin Gate" });
   const page = await privateStore.createFor(user);
@@ -3319,12 +3391,17 @@ test("attachment pins render author colour, all candidate styles, and transform 
     const main = pinFor(aId, "main");
     const minor = pinFor(aId, "m1");
     assert.ok(main, "main pin rendered when attachment.mainPinEnabled and a main anchor exists");
+    assert.ok(main.classList.contains("jn-pin-main"), "main anchors render with the main pin class");
+    assert.equal(main.classList.contains("jn-pin-minor"), false);
     assert.ok(main.classList.contains("jn-pin-style-brass"), "pin style class comes from the attachment");
     assert.equal(main.style.getPropertyValue("--jn-pin-color"), gmUser.color,
       "the main pin uses the creator/author colour");
     assert.equal(main.style.left, "100px");
     assert.equal(main.style.top, "0px");
     assert.ok(minor, "minor anchors render their own pin");
+    assert.ok(minor.classList.contains("jn-pin-minor"), "minor anchors use the minor pin class");
+    assert.equal(minor.classList.contains("jn-pin-main"), false);
+    assert.ok(minor.classList.contains("jn-pin-style-brass"), "minor pins keep the note's style tokens");
     assert.equal(minor.style.left, "40px", "legacy interior anchors keep their local position");
     assert.equal(minor.style.top, "30px");
     assert.equal(main.closest(".jn-card-main"), null, "pins live outside the clipped paper wrapper");
@@ -3394,6 +3471,85 @@ test("attachment pins render author colour, all candidate styles, and transform 
     assert.equal(pinFor(aId, "main"), null,
       "a disabled main pin renders nothing and is never synthesized on the client");
     assert.ok(pinFor(aId, "m1"), "minor pins remain visible");
+  } finally {
+    canvas.disconnectGeometry();
+    canvas.root.remove();
+  }
+});
+
+test("link tool prioritizes a direct minor pin and reuses the projected edge pin", () => {
+  const calls = [];
+  const canvas = new JournalCanvas({ onCreateLink: (...args) => calls.push(args) });
+  document.body.appendChild(canvas.root);
+  canvas.pinsEnabled = true;
+  const ids = ["reusecardA000001", "reusecardB000002", "reusecardC000003", "reusecardD000004"];
+  const note = id => ({
+    _id: id, name: id,
+    system: {
+      style: "sticky", authorId: gmUser.id, blocks: [], links: [],
+      attachment: { mainPinEnabled: true, mainSnapRadius: 24, minorSnapRadius: 6, pinStyle: "enamel" }
+    }
+  });
+  const makeLayout = () => ({
+    cards: {
+      [ids[0]]: {
+        x: 0, y: 0, width: 200, height: 100, rotation: 0,
+        anchors: {
+          main: { kind: "main", x: 0.5, y: 0, createdBy: gmUser.id },
+          // Ten world px from the main handle: inside its magnet radius, but the rendered
+          // minor pin itself must win a direct click.
+          nearMain: { kind: "minor", x: 0.55, y: 0, createdBy: gmUser.id }
+        }
+      },
+      [ids[1]]: {
+        x: 400, y: 0, width: 200, height: 100, rotation: 0,
+        anchors: { main: { kind: "main", x: 0.5, y: 0, createdBy: gmUser.id } }
+      },
+      [ids[2]]: {
+        x: 800, y: 0, width: 200, height: 100, rotation: 0,
+        anchors: { main: { kind: "main", x: 0.5, y: 0, createdBy: gmUser.id } }
+      },
+      [ids[3]]: {
+        x: 1200, y: 0, width: 200, height: 100, rotation: 0,
+        anchors: { main: { kind: "main", x: 0.5, y: 0, createdBy: gmUser.id } }
+      }
+    },
+    labels: {}
+  });
+  const pick = (selector, x, y) => canvas.root.querySelector(selector).dispatchEvent(
+    new MouseEvent("click", { bubbles: true, button: 0, clientX: x, clientY: y }));
+  const pin = (noteId, anchorId) =>
+    `.jn-pin-layer [data-note-id="${noteId}"][data-anchor-id="${anchorId}"]`;
+  const layout = makeLayout();
+  try {
+    canvas.update(ids.map(note), layout);
+    canvas.toggleLinkTool();
+    pick(pin(ids[0], "nearMain"), 110, 0);
+    pick(pin(ids[1], "main"), 500, 0);
+    let created = calls.at(-1);
+    assert.equal(created[2].sourceAnchorId, "nearMain",
+      "a direct click on a minor pin is not hijacked by the nearby main magnet");
+    assert.equal(created[2].targetAnchorId, "main");
+
+    // First body click projects to the right edge and proposes a new minor spec.
+    canvas.toggleLinkTool();
+    pick(`.jn-card[data-id="${ids[0]}"]`, 150, 50);
+    pick(pin(ids[2], "main"), 900, 0);
+    created = calls.at(-1);
+    assert.deepEqual(created[2].sourceAnchor, { kind: "minor", x: 1, y: 0.5 });
+    assert.equal(created[2].sourceAnchorId, "", "a fresh projected point has no id yet");
+
+    // Apply the created anchor (as the server refresh would), then click the same body point.
+    layout.cards[ids[0]].anchors.edge = { kind: "minor", x: 1, y: 0.5, createdBy: gmUser.id };
+    canvas.update(ids.map(note), layout);
+    canvas.toggleLinkTool();
+    pick(`.jn-card[data-id="${ids[0]}"]`, 150, 50);
+    pick(pin(ids[3], "main"), 1300, 0);
+    created = calls.at(-1);
+    assert.equal(created[2].sourceAnchorId, "edge",
+      "the second body click reuses the existing projected-edge anchor id");
+    assert.equal(Object.hasOwn(created[2], "sourceAnchor"), false,
+      "no duplicate minor spec is sent when an existing pin covers the edge point");
   } finally {
     canvas.disconnectGeometry();
     canvas.root.remove();

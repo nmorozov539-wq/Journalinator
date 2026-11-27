@@ -3,7 +3,10 @@ import PrivateNoteEditor from "./private-editor.mjs";
 import { privateStore, MAX_TITLE_LENGTH } from "../store/private-store.mjs";
 import { CARD_STYLES } from "../styles/registry.mjs";
 import { linkAnchors, moveThreadPin } from "../card-ports.mjs";
-import { anchorSide, minorOnEdge, pruneAnchorRegistry, validAnchorId } from "../anchors.mjs";
+import {
+  anchorSide, mergeNearbyMinorAnchors, minorOnEdge, nearestMinorAnchor, pruneAnchorRegistry,
+  validAnchorId
+} from "../anchors.mjs";
 import { boardPinRef, normalizePinLink, resolvePin, validPinPosition } from "../board-pins.mjs";
 import { isLinkColor, normalizeLinkColor } from "../link-colors.mjs";
 import {
@@ -188,6 +191,27 @@ export default class PrivateWorkspace {
     const data = foundry.utils.deepClone(this.workspace);
     try {
       mutator(data);
+      // Every private mutation is a safe normalization point: stacked duplicate minors left by
+      // older link creation fold into one pin, and their links/pin links follow the canonical id.
+      const owners = [
+        ...Object.values(data.notes ?? {}),
+        ...(data.trash ?? []).map(entry => entry?.note).filter(Boolean)
+      ];
+      const merged = mergeNearbyMinorAnchors(data.layout?.cards ?? {}, owners, {
+        pinLinks: data.layout?.pinLinks ?? {}
+      });
+      if (merged.changed.length) data.layout.cards = merged.cards;
+      if (merged.links.length || merged.pinLinks.length) {
+        const byId = new Map(owners.filter(note => note?.id).map(note => [note.id, note]));
+        for (const { noteId, links } of merged.links) {
+          const owner = byId.get(noteId);
+          if (owner) owner.links = links;
+        }
+        for (const { id, source, target } of merged.pinLinks) {
+          const pinLink = data.layout.pinLinks?.[id];
+          if (pinLink) Object.assign(pinLink, { source, target });
+        }
+      }
       const result = await privateStore.save(this.page, data, rev);
       this.workspace = result.workspace;
       this.onChange();
@@ -484,7 +508,8 @@ export default class PrivateWorkspace {
   /**
    * Applies one anchor reference/spec pair from a canvas link gesture. Existing ids win; a new
    * minor spec is materialized locally because private workspaces have no GM write authority
-   * round-trip. Returns the anchor id (or "" when neither is usable).
+   * round-trip. A spec landing on an existing minor reuses that pin instead of stacking another.
+   * Returns the anchor id (or "" when neither is usable).
    */
   #linkAnchor(data, noteId, anchorId, spec) {
     const card = data.layout.cards[noteId];
@@ -494,6 +519,9 @@ export default class PrivateWorkspace {
     // silently materialize a new minor. The plain point/side fallback is used instead.
     if (!this.#pinsEnabled()) return "";
     if (spec?.kind !== "minor" || !Number.isFinite(spec.x) || !Number.isFinite(spec.y)) return "";
+    const box = { ...card, w: card.width ?? 190, h: card.height ?? 90 };
+    const reuse = nearestMinorAnchor(box, card.anchors ?? {}, spec);
+    if (reuse) return reuse.id;
     const anchors = { ...(card.anchors ?? {}) };
     if (Object.keys(anchors).length >= MAX_CARD_ANCHORS) return "";
     const id = `minor-${foundry.utils.randomID()}`;
@@ -628,6 +656,9 @@ export default class PrivateWorkspace {
     if (!card) return null;
     if (anchor.kind !== "minor" || !Number.isFinite(anchor.x) || !Number.isFinite(anchor.y)) return null;
     if (Object.keys(card.anchors ?? {}).length >= MAX_CARD_ANCHORS) return null;
+    const reuse = nearestMinorAnchor({ ...card, w: card.width ?? 190, h: card.height ?? 90 },
+      card.anchors ?? {}, minorOnEdge(anchor, { w: card.width ?? 190, h: card.height ?? 90 }));
+    if (reuse) return reuse.id;
     const id = `minor-${foundry.utils.randomID()}`;
     const ok = await this.#save(data => {
       const target = data.layout.cards[noteId];

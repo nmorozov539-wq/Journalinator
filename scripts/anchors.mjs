@@ -10,6 +10,8 @@ import { MAIN_PIN } from "./presentation.mjs";
 
 export const MAIN_ANCHOR_ID = "main";
 export const MAX_ANCHOR_ID_LENGTH = 100;
+/** World-pixel tolerance for treating separately placed minor anchors as the same pin. */
+export const ANCHOR_MERGE_TOLERANCE = 2;
 const ANCHOR_ID_RE = /^[A-Za-z0-9_-]{1,100}$/;
 const RESERVED_ANCHOR_IDS = new Set(["__proto__", "prototype", "constructor"]);
 
@@ -89,6 +91,30 @@ export function nearestAnchor(box, anchors, world, { zoom = 1, mainRadius = 24, 
     const limit = isMainAnchor(anchor) ? mainRadius : minorRadius;
     if (distance > limit) continue;
     if (!best || distance < best.distance) best = { id, anchor, point, distance };
+  }
+  return best;
+}
+
+/**
+ * Closest existing minor anchor to a normalized card point, in world pixels. This is the single
+ * reuse rule for both UI gestures and data creation: a click on an edge that already carries a
+ * minor pin must share that pin id instead of minting a stacked duplicate. Mains are excluded so a
+ * newly requested minor can never collapse into the note handle.
+ */
+export function nearestMinorAnchor(box, anchors, point, tolerance = ANCHOR_MERGE_TOLERANCE) {
+  if (!box || !point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return null;
+  const target = cardPointAnchor(box, point);
+  const limit = Number.isFinite(tolerance) && tolerance >= 0 ? tolerance : ANCHOR_MERGE_TOLERANCE;
+  let best = null;
+  for (const [id, anchor] of Object.entries(anchors ?? {})) {
+    if (!validAnchorId(id) || anchor?.kind !== "minor") continue;
+    const world = anchorWorld(box, anchor);
+    if (!world) continue;
+    const distance = Math.hypot(world.x - target.x, world.y - target.y);
+    if (distance > limit) continue;
+    if (!best || distance < best.distance || (distance === best.distance && id < best.id)) {
+      best = { id, anchor, point: world, distance };
+    }
   }
   return best;
 }
@@ -187,6 +213,134 @@ export function canonicalizeMainAnchors(cards, notes) {
     }
   }
   return { cards: next, changed, links };
+}
+
+/**
+ * Folds minor anchors that occupy the same physical point on one card into a single canonical
+ * pin. Link creation used to mint a fresh minor for every edge click, so boards can already
+ * carry several stacked anchors at one spot. Merging is deliberately conservative: only minor
+ * anchors within `tolerance` world pixels (measured through width/height/rotation) are folded,
+ * the lexicographically first id wins for determinism, and every reference is rewritten.
+ *
+ * Returns the next card map, changed cards, rewritten note link arrays, and changed pin-link
+ * refs. Nothing is deleted except the duplicate registry entries; links keep their connections.
+ */
+export function mergeNearbyMinorAnchors(cards, notes, {
+  tolerance = ANCHOR_MERGE_TOLERANCE, pinLinks = {}
+} = {}) {
+  const next = { ...(cards ?? {}) };
+  const aliases = new Map();
+  const changed = [];
+  const boxFor = card => ({
+    x: Number.isFinite(card?.x) ? card.x : 0,
+    y: Number.isFinite(card?.y) ? card.y : 0,
+    w: Number.isFinite(card?.width) && card.width > 0 ? card.width : 190,
+    h: Number.isFinite(card?.height) && card.height > 0 ? card.height : 90,
+    rotation: Number.isFinite(card?.rotation) ? card.rotation : 0
+  });
+
+  for (const [noteId, card] of Object.entries(next)) {
+    const entries = Object.entries(card?.anchors ?? {})
+      .filter(([id, anchor]) => validAnchorId(id) && anchor?.kind === "minor"
+        && Number.isFinite(anchor.x) && Number.isFinite(anchor.y))
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+    if (entries.length < 2) continue;
+    const box = boxFor(card);
+    const points = new Map();
+    for (const [id, anchor] of entries) {
+      const world = anchorWorld(box, anchor);
+      if (world) points.set(id, world);
+    }
+    const ids = [...points.keys()];
+    if (ids.length < 2) continue;
+    const parent = new Map(ids.map(id => [id, id]));
+    const find = id => {
+      let root = id;
+      while (parent.get(root) !== root) root = parent.get(root);
+      while (parent.get(id) !== root) {
+        const up = parent.get(id);
+        parent.set(id, root);
+        id = up;
+      }
+      return root;
+    };
+    const union = (left, right) => {
+      const a = find(left), b = find(right);
+      if (a === b) return;
+      // The smallest id is the component root, so the canonical pin is deterministic.
+      if (a < b) parent.set(b, a); else parent.set(a, b);
+    };
+    const limit = Number.isFinite(tolerance) && tolerance >= 0 ? tolerance : ANCHOR_MERGE_TOLERANCE;
+    for (let i = 0; i < ids.length; i++) {
+      for (let j = i + 1; j < ids.length; j++) {
+        const a = points.get(ids[i]), b = points.get(ids[j]);
+        if (Math.hypot(a.x - b.x, a.y - b.y) <= limit) union(ids[i], ids[j]);
+      }
+    }
+    const anchors = { ...card.anchors };
+    let touched = false;
+    for (const id of ids) {
+      const canonical = find(id);
+      if (canonical === id) continue;
+      delete anchors[id];
+      aliases.set(`${noteId}\u0000${id}`, canonical);
+      touched = true;
+    }
+    if (!touched) continue;
+    next[noteId] = { ...card, anchors };
+    changed.push({ noteId, anchors });
+  }
+
+  const links = [];
+  if (aliases.size) {
+    const aliasFor = (noteId, anchorId) => noteId && anchorId
+      ? aliases.get(`${noteId}\u0000${anchorId}`) : undefined;
+    for (const note of notes ?? []) {
+      const noteId = note?._id ?? note?.id ?? note?.noteId;
+      const current = note?.system?.links ?? note?.links ?? [];
+      let touched = false;
+      const rewritten = current.map(link => {
+        let nextLink = link;
+        const source = aliasFor(noteId, link.sourceAnchorId);
+        if (source) nextLink = { ...nextLink, sourceAnchorId: source };
+        const target = aliasFor(link.targetId, link.targetAnchorId);
+        if (target) nextLink = { ...nextLink, targetAnchorId: target };
+        if (Array.isArray(link.routeAnchors)) {
+          const routes = link.routeAnchors.map(entry => {
+            const canonical = aliasFor(entry?.noteId, entry?.anchorId);
+            return canonical ? { ...entry, anchorId: canonical } : entry;
+          });
+          if (routes.some((entry, index) => entry !== link.routeAnchors[index])) {
+            nextLink = { ...nextLink, routeAnchors: routes };
+          }
+        }
+        if (nextLink !== link) touched = true;
+        return nextLink;
+      });
+      if (touched) links.push({ noteId, links: rewritten });
+    }
+  }
+
+  const rewiredPinLinks = [];
+  if (aliases.size) {
+    const repoint = ref => {
+      if (typeof ref !== "string" || !ref.startsWith("n:")) return undefined;
+      const split = ref.indexOf(":", 2);
+      if (split < 0) return undefined;
+      const noteId = ref.slice(2, split);
+      const canonical = aliases.get(`${noteId}\u0000${ref.slice(split + 1)}`);
+      return canonical ? `n:${noteId}:${canonical}` : undefined;
+    };
+    for (const [id, link] of Object.entries(pinLinks ?? {})) {
+      const source = repoint(link?.source);
+      const target = repoint(link?.target);
+      if (source || target) {
+        rewiredPinLinks.push({ id, source: source ?? link.source, target: target ?? link.target });
+      }
+    }
+  }
+
+  return { cards: next, changed, links, pinLinks: rewiredPinLinks };
 }
 
 /**

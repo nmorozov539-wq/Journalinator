@@ -1,7 +1,10 @@
 import {
   CARD_SIDES, MAX_THREAD_PINS, THREAD_PIN_RADIUS, cardEdgeAt, cardPointAnchor, moveThreadPin, threadAttachment, validThreadPin
 } from "../card-ports.mjs";
-import { MAIN_ANCHOR_ID, anchorWorld, cardNormalizedPoint, isMainAnchor, minorOnEdge, nearestAnchor, validAnchorId } from "../anchors.mjs";
+import {
+  MAIN_ANCHOR_ID, anchorWorld, cardNormalizedPoint, isMainAnchor, minorOnEdge, nearestAnchor,
+  nearestMinorAnchor, validAnchorId
+} from "../anchors.mjs";
 import { boardPinRef, pinRef, resolvePin } from "../board-pins.mjs";
 import { looseTails, pinnedThreadPath, threadLayerSpecs, ThreadMotion, THREAD_PRESETS } from "../link-thread.mjs";
 import { LINK_COLOR_SLOTS, normalizeLinkColor } from "../link-colors.mjs";
@@ -586,7 +589,7 @@ export default class JournalCanvas {
       const style = styleKey === "default" ? "enamel" : styleKey;
       const pin = document.createElement("button");
       pin.type = "button";
-      pin.className = `jn-pin jn-pin-main jn-pin-style-${style}`
+      pin.className = `jn-pin ${main ? "jn-pin-main" : "jn-pin-minor"} jn-pin-style-${style}`
         + (styleKey === "default" ? " jn-pin-style-default" : "");
       pin.dataset.noteId = note._id;
       pin.dataset.anchorId = anchorId;
@@ -2682,6 +2685,11 @@ export default class JournalCanvas {
   }
 
   #linkCardAt(ev) {
+    // An attachment pin lives in `.jn-pin-layer`, outside its card, so DOM ancestry can never
+    // find the owning card. Its dataset is the authoritative note identity.
+    const pin = ev.target.closest?.(".jn-pin[data-anchor-id]");
+    const pinCard = pin?.dataset.noteId ? this.cardEls.get(pin.dataset.noteId) : null;
+    if (pinCard && this.world.contains(pinCard)) return pinCard;
     return ev.target.closest?.(".jn-card") ?? document.elementsFromPoint?.(ev.clientX, ev.clientY)
       .map(element => element.closest(".jn-card")).find(element => element && this.world.contains(element)) ?? null;
   }
@@ -2724,8 +2732,11 @@ export default class JournalCanvas {
     }
     if (!Object.keys(anchors).length) return null;
     // A click on a rendered pin is an exact anchor choice. Proximity math is only for clicks
-    // beside a pin; it must never create a minor anchor through the visible main pin.
-    const directId = directPin?.closest?.(".jn-card") === card ? directPin.dataset.anchorId : null;
+    // beside a pin; it must never create a minor anchor through the visible main pin. Pins are
+    // outside the card element, so match the pin's owning note id rather than DOM ancestry.
+    const directId = directPin?.dataset?.anchorId
+      && (directPin.dataset.noteId === card.dataset.id || directPin.closest?.(".jn-card") === card)
+      ? directPin.dataset.anchorId : null;
     if (directId && anchors[directId]) {
       return { id, box, anchorId: directId, anchor: anchors[directId],
         point: { x: anchors[directId].x, y: anchors[directId].y } };
@@ -2746,12 +2757,33 @@ export default class JournalCanvas {
     };
   }
 
+  /**
+   * A previously placed minor sitting at the projected edge point. Link clicks in the card
+   * interior are projected to the boundary first, so proximity must be measured against that
+   * projected point. Reusing the id here is what stops repeated clicks on one body spot from
+   * stacking a fresh pin every time.
+   */
+  #reusableEdgeAnchor(edge) {
+    if (!edge || !this.#pinsOn()) return null;
+    const note = this.notes.find(item => item._id === edge.id);
+    const attachment = note ? resolveAttachment(note) : null;
+    const tolerance = Math.max(0, attachment?.minorSnapRadius ?? 0) / Math.max(this.view.k, 1e-6);
+    const hit = nearestMinorAnchor(edge.box, this.layout.cards?.[edge.id]?.anchors ?? {},
+      edge.point, tolerance);
+    if (!hit) return null;
+    return {
+      id: edge.id, box: edge.box, anchorId: hit.id, anchor: hit.anchor,
+      point: { x: hit.anchor.x, y: hit.anchor.y }
+    };
+  }
+
   #pickLinkPoint(ev) {
     const world = this.#toWorld(ev.clientX, ev.clientY);
     const card = this.#linkCardAt(ev);
     const anchorHit = this.#linkAnchorAt(card, world, ev.target.closest?.(".jn-pin"));
     const edge = anchorHit ? null : this.#linkEdgeAt(card, world);
-    const target = anchorHit ?? (edge && this.#pinsOn()
+    const reusable = edge ? this.#reusableEdgeAnchor(edge) : null;
+    const target = anchorHit ?? reusable ?? (edge && this.#pinsOn()
       ? { ...edge, anchor: { kind: "minor", ...edge.point } } : edge);
     const { source, pins } = this.linkPlacement;
     if (!target) {
@@ -2846,31 +2878,33 @@ export default class JournalCanvas {
     const card = this.#linkCardAt(ev);
     const anchorHit = this.#linkAnchorAt(card, world, ev.target.closest?.(".jn-pin"));
     const edge = anchorHit ? null : this.#linkEdgeAt(card, world);
+    const reusable = edge ? this.#reusableEdgeAnchor(edge) : null;
     if (!anchorHit && !edge) {
       this.pinTarget.style.display = "none";
       this.#highlightSnappedPin(null, null);
       return;
     }
-    const hit = anchorHit ?? edge;
+    const hit = anchorHit ?? reusable ?? edge;
     const worldPoint = anchorHit
       ? anchorWorld(anchorHit.box, anchorHit.anchor)
-      : cardPointAnchor(hit.box, hit.point);
+      : reusable ? anchorWorld(reusable.box, reusable.anchor) : cardPointAnchor(hit.box, hit.point);
     if (!worldPoint) {
       this.pinTarget.style.display = "none";
       this.#highlightSnappedPin(null, null);
       return;
     }
     const main = !!anchorHit && isMainAnchor(anchorHit.anchor);
+    const minor = !main && !!(anchorHit || reusable);
     this.pinTarget.style.display = "";
     this.pinTarget.classList.toggle("jn-pin-target-main", main);
-    this.pinTarget.classList.toggle("jn-pin-target-minor", !!anchorHit && !main);
-    this.pinTarget.classList.toggle("jn-pin-target-new", !anchorHit);
+    this.pinTarget.classList.toggle("jn-pin-target-minor", minor);
+    this.pinTarget.classList.toggle("jn-pin-target-new", !anchorHit && !reusable);
     this.pinTarget.setAttribute("cx", worldPoint.x);
     this.pinTarget.setAttribute("cy", worldPoint.y);
-    this.pinTarget.setAttribute("r", String((main ? 12 : anchorHit ? 7 : 6) / this.view.k));
-    if (anchorHit) this.pinTarget.dataset.anchorId = anchorHit.anchorId;
+    this.pinTarget.setAttribute("r", String((main ? 12 : minor ? 7 : 6) / this.view.k));
+    if (hit.anchorId) this.pinTarget.dataset.anchorId = hit.anchorId;
     else delete this.pinTarget.dataset.anchorId;
-    this.#highlightSnappedPin(anchorHit ? hit.id : null, anchorHit?.anchorId ?? null);
+    this.#highlightSnappedPin(hit.id ?? null, hit.anchorId ?? null);
   }
 
   #stampColor(color) {

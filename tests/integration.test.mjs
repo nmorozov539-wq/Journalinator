@@ -1180,6 +1180,75 @@ test("createLink stores validated new anchors on both cards and reuses existing 
   assert.equal(second.sourceAnchorId, first.sourceAnchorId);
 });
 
+test("createLink reuses a minor anchor when the same edge point is requested twice", async () => {
+  const a = await createNoteAt("Pin Reuse A", 2400, 100);
+  const b = await createNoteAt("Pin Reuse B", 2700, 100);
+  const c = await createNoteAt("Pin Reuse C", 3000, 100);
+  const spec = { kind: "minor", x: 1, y: 0.5 };
+
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: b.id,
+    sourceAnchor: spec, targetAnchor: { kind: "minor", x: 0, y: 0.5 }
+  });
+  const first = sharedByName("Pin Reuse A").system.links.find(link => link.targetId === b.id);
+  const sourceId = first.sourceAnchorId;
+  assert.ok(sourceId && sourceId !== "main");
+  assert.equal(minorAnchors(a.id).length, 1);
+
+  // A second request carrying the same normalized spec (as a not-yet-updated client would send)
+  // must reuse the existing pin rather than mint a duplicate at the same edge point.
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: c.id,
+    sourceAnchor: spec, targetAnchor: { kind: "minor", x: 0, y: 0.5 }
+  });
+  const second = sharedByName("Pin Reuse A").system.links.find(link => link.targetId === c.id);
+  assert.equal(second.sourceAnchorId, sourceId);
+  assert.equal(minorAnchors(a.id).length, 1, "one physical pin is shared by both links");
+});
+
+test("shared anchor pruning merges stacked minors and repoints links and pin links", async () => {
+  const a = await createNoteAt("Pin Merge A", 3300, 100);
+  const b = await createNoteAt("Pin Merge B", 3600, 100);
+  const layout = shared().pages.get(containers.ids.layoutPage);
+  const cardA = sharedCard(a.id);
+  // Two minors one world pixel apart plus one deliberately distinct minor.
+  const anchors = {
+    ...cardA.anchors,
+    m1: { kind: "minor", x: 1, y: 0.5, createdBy: player.id },
+    m2: { kind: "minor", x: 1, y: 0.5015, createdBy: player.id },
+    distinct: { kind: "minor", x: 0, y: 0.5, createdBy: player.id }
+  };
+  await layout.update({ [`system.cards.${a.id}.anchors`]: anchors });
+  await fromPlayer({
+    type: "createLink", sourceId: a.id, targetId: b.id,
+    sourceAnchorId: "m2", targetPoint: { x: 0, y: 0.5 }
+  });
+  const link = sharedByName("Pin Merge A").system.links.find(item => item.targetId === b.id);
+  assert.equal(link.sourceAnchorId, "m2");
+  await layout.update({
+    [`system.pinLinks.mergeLink.source`]: `n:${a.id}:m2`,
+    [`system.pinLinks.mergeLink.target`]: `n:${b.id}:main`,
+    [`system.pinLinks.mergeLink.label`]: "merged"
+  });
+
+  // Any pruning pass normalizes the whole layout, including existing stacked anchors.
+  await fromPlayer({
+    type: "updateLink", noteId: a.id, linkId: link.id,
+    fields: { label: "merged", sourceAnchorId: "m2" }
+  });
+  const mergedCard = sharedCard(a.id);
+  assert.equal(mergedCard.anchors.m2, undefined, "the duplicate entry is gone");
+  assert.ok(mergedCard.anchors.m1, "the lexicographically first id is canonical");
+  assert.ok(mergedCard.anchors.distinct, "a distinct minor is untouched");
+  assert.ok(mergedCard.anchors.main, "the main anchor is untouched");
+  const mergedLink = sharedByName("Pin Merge A").system.links.find(item => item.id === link.id);
+  assert.equal(mergedLink.sourceAnchorId, "m1");
+  const pinLink = notesStore.getSharedLayout().pinLinks.mergeLink;
+  assert.equal(pinLink.source, `n:${a.id}:m1`);
+  assert.equal(pinLink.target, `n:${b.id}:main`);
+  assert.equal(pinLink.label, "merged", "cosmetics survive the reference rewrite");
+});
+
 test("updateLink accepts only existing anchors on the correct cards", async () => {
   const a = await createNoteAt("Pin Update A", 1400, 400);
   const b = await createNoteAt("Pin Update B", 1700, 400);

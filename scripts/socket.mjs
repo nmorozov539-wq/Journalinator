@@ -5,8 +5,9 @@ import {
   CARD_SIDES, cardPointAnchor, cardPorts, linkAnchors, moveThreadPin, validCardPorts, validLinkPoint
 } from "./card-ports.mjs";
 import {
-  MAIN_ANCHOR_ID, anchorSide, anchorWorld, canonicalizeMainAnchors, collectAnchorRefs,
-  defaultMainAnchor, minorOnEdge, pruneAnchorRegistry, projectToEdge, redistributionAnchor, validAnchorId
+  ANCHOR_MERGE_TOLERANCE, MAIN_ANCHOR_ID, anchorSide, anchorWorld, canonicalizeMainAnchors,
+  collectAnchorRefs, defaultMainAnchor, mergeNearbyMinorAnchors, minorOnEdge, nearestMinorAnchor,
+  pruneAnchorRegistry, projectToEdge, redistributionAnchor, validAnchorId
 } from "./anchors.mjs";
 import { isLinkColor, normalizeLinkColor } from "./link-colors.mjs";
 import { boardPinRef, normalizePinLink, resolvePin, validPinPosition } from "./board-pins.mjs";
@@ -489,6 +490,12 @@ function planAnchorEndpoint({ card, note, anchorId, spec, senderUserId, allowCre
     if (!allowCreate || !card) return null;
     const clean = cleanMinorAnchorSpec(spec);
     if (!clean) return null;
+    // Reuse an existing minor at the same physical point before allocating a new id. A client
+    // can legitimately send the normalized spec again when its canvas has not caught up with a
+    // previous anchor write, and repeated body clicks must share one pin.
+    const reuse = nearestMinorAnchor(cardBox(note, card), card.anchors ?? {}, clean,
+      ANCHOR_MERGE_TOLERANCE);
+    if (reuse) return { anchorId: reuse.id, anchor: reuse.anchor, created: false };
     if (Object.keys(card.anchors ?? {}).length >= MAX_CARD_ANCHORS) return null;
     return {
       anchorId: freshAnchorId(card.anchors),
@@ -749,14 +756,40 @@ async function pruneSharedAnchors(shared, layout = layoutPage(shared), linkOverr
   // exact array we just wrote when pruning after a link edit or deletion.
   const notes = allSharedNoteList(shared).map(page => page.id === linkOverride?.noteId
     ? { _id: page.id, system: { links: linkOverride.links } } : page);
-  // Fold any legacy non-canonical main first and move its links to the canonical id. Otherwise
+  // Fold duplicate minors left by an older link-creation bug before any pruning. The rewritten
+  // links are written first; canonicalizing mains below then works from the merged arrays so it
+  // never rewrites a stale reference back.
+  const merged = mergeNearbyMinorAnchors(layout.system.cards ?? {}, notes, {
+    pinLinks: layout.system.pinLinks ?? {}
+  });
+  const mergedLinks = new Map(merged.links.map(entry => [entry.noteId, entry.links]));
+  const mergedNotes = mergedLinks.size
+    ? notes.map(note => {
+      const noteId = note?._id ?? note?.id;
+      const links = mergedLinks.get(noteId);
+      return links ? { ...note, system: { ...(note.system ?? {}), links } } : note;
+    })
+    : notes;
+  for (const { noteId, links } of merged.links) {
+    const page = shared.pages.get(noteId);
+    if (page?.type === `${MODULE_ID}.note`) await page.update({ "system.links": links });
+  }
+  // Fold any legacy non-canonical main next and move its links to the canonical id. Otherwise
   // pruning would remove the referenced main and leave the link dangling on an unknown anchor.
-  const canonical = canonicalizeMainAnchors(layout.system.cards ?? {}, notes);
+  const canonical = canonicalizeMainAnchors(merged.cards, mergedNotes);
+  const canonicalLinks = new Map(canonical.links.map(entry => [entry.noteId, entry.links]));
+  const finalNotes = canonicalLinks.size
+    ? mergedNotes.map(note => {
+      const noteId = note?._id ?? note?.id;
+      const links = canonicalLinks.get(noteId);
+      return links ? { ...note, system: { ...(note.system ?? {}), links } } : note;
+    })
+    : mergedNotes;
   for (const { noteId, links } of canonical.links) {
     const page = shared.pages.get(noteId);
     if (page?.type === `${MODULE_ID}.note`) await page.update({ "system.links": links });
   }
-  const changed = pruneAnchorRegistry(canonical.cards, notes);
+  const changed = pruneAnchorRegistry(canonical.cards, finalNotes);
   const updates = {};
   const setRegistry = (noteId, anchors) => {
     updates[`system.cards.${noteId}.anchors`] = anchors;
@@ -768,11 +801,16 @@ async function pruneSharedAnchors(shared, layout = layoutPage(shared), linkOverr
       }
     }
   };
+  for (const { noteId, anchors } of merged.changed) setRegistry(noteId, anchors);
   for (const { noteId, anchors } of canonical.changed) {
     setRegistry(noteId, anchors);
   }
   for (const { noteId, anchors } of changed) {
     setRegistry(noteId, anchors);
+  }
+  for (const { id, source, target } of merged.pinLinks) {
+    updates[`system.pinLinks.${id}.source`] = source;
+    updates[`system.pinLinks.${id}.target`] = target;
   }
   if (Object.keys(updates).length) await layout.update(updates);
 }

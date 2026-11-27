@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  MAIN_ANCHOR_ID, anchorWorld, canonicalizeMainAnchors, cardNormalizedPoint, collectAnchorRefs,
-  defaultMainAnchor, nearestAnchor, projectToEdge, pruneAnchorRegistry, redistributionAnchor,
-  validAnchorId
+  ANCHOR_MERGE_TOLERANCE, MAIN_ANCHOR_ID, anchorWorld, canonicalizeMainAnchors, cardNormalizedPoint,
+  collectAnchorRefs, defaultMainAnchor, mergeNearbyMinorAnchors, nearestAnchor, nearestMinorAnchor,
+  projectToEdge, pruneAnchorRegistry, redistributionAnchor, validAnchorId
 } from "../scripts/anchors.mjs";
 import { sanitizeCardAnchors } from "../scripts/presentation.mjs";
 
@@ -295,4 +295,91 @@ test("canonicalizeMainAnchors folds referenced non-canonical mains and rewrites 
   assert.deepEqual(direct[0].anchors, {
     main: { kind: "main", x: 0.5, y: 0, createdBy: "u" }
   });
+});
+
+test("nearestMinorAnchor reuses only nearby minors, never the main pin", () => {
+  const anchors = {
+    main: { kind: "main", x: 0.5, y: 0, createdBy: "u" },
+    right: { kind: "minor", x: 1, y: 0.5, createdBy: "u" },
+    far: { kind: "minor", x: 0, y: 0.5, createdBy: "u" }
+  };
+  const hit = nearestMinorAnchor(box(), anchors, { x: 1, y: 0.52 }, 4);
+  assert.equal(hit.id, "right");
+  assert.deepEqual(hit.point, { x: 100, y: 25, nx: 1, ny: 0, side: "right", index: 1 });
+  assert.equal(nearestMinorAnchor(box(), anchors, { x: 1, y: 0.7 }, 4), null);
+  assert.equal(nearestMinorAnchor(box(), anchors, { x: 0.5, y: 0 }, 4), null,
+    "the main handle is never reused as a minor");
+  assert.equal(nearestMinorAnchor(null, anchors, { x: 1, y: 0.5 }, 4), null);
+});
+
+test("mergeNearbyMinorAnchors folds stacked minors and rewrites every reference", () => {
+  const cards = {
+    a: {
+      x: 0, y: 0, width: 100, height: 50, rotation: 0,
+      anchors: {
+        main: { kind: "main", x: 0.5, y: 0, createdBy: "u" },
+        m1: { kind: "minor", x: 1, y: 0.5, createdBy: "u" },
+        m2: { kind: "minor", x: 1, y: 0.52, createdBy: "u" },
+        // 2 world px from m1: deliberately distinct at this tolerance.
+        m3: { kind: "minor", x: 0.98, y: 0.5, createdBy: "u" }
+      }
+    },
+    b: {
+      x: 400, y: 0, width: 100, height: 50, rotation: 90,
+      anchors: {
+        main: { kind: "main", x: 0.5, y: 0, createdBy: "u" },
+        t1: { kind: "minor", x: 0, y: 0.5, createdBy: "u" },
+        t2: { kind: "minor", x: 0, y: 0.52, createdBy: "u" }
+      }
+    },
+    c: {
+      x: 800, y: 0, width: 100, height: 50, rotation: 0,
+      anchors: { main: { kind: "main", x: 0.5, y: 0, createdBy: "u" } }
+    }
+  };
+  const notes = [{
+    id: "a",
+    system: {
+      links: [
+        { id: "l1", sourceAnchorId: "m2", targetId: "b", targetAnchorId: "t2" },
+        {
+          id: "l2", sourceAnchorId: "m3", targetId: "b", targetAnchorId: "t2",
+          routeAnchors: [{ noteId: "a", anchorId: "m2" }, { noteId: "b", anchorId: "t2" }]
+        }
+      ]
+    }
+  }, { id: "b", system: { links: [] } }];
+  const pinLinks = {
+    tied: { source: "n:a:m2", target: "n:b:t2" },
+    "free-to-distinct": { source: "p:free", target: "n:a:m3" }
+  };
+
+  const result = mergeNearbyMinorAnchors(cards, notes, { tolerance: 1.5, pinLinks });
+  assert.deepEqual(Object.keys(result.cards.a.anchors).sort(), ["m1", "m3", "main"],
+    "only the stacked minor folds; the distinct minor and main survive");
+  assert.deepEqual(Object.keys(result.cards.b.anchors).sort(), ["main", "t1"],
+    "rotation still measures the real world distance");
+  assert.deepEqual(result.changed.map(entry => entry.noteId).sort(), ["a", "b"]);
+
+  const [first, second] = result.links.find(entry => entry.noteId === "a").links;
+  assert.equal(first.sourceAnchorId, "m1");
+  assert.equal(first.targetAnchorId, "t1");
+  assert.equal(second.sourceAnchorId, "m3", "a distinct pin reference is untouched");
+  assert.equal(second.targetAnchorId, "t1");
+  assert.deepEqual(second.routeAnchors, [{ noteId: "a", anchorId: "m1" }, { noteId: "b", anchorId: "t1" }]);
+  assert.equal(result.links.find(entry => entry.noteId === "a").links.length, 2,
+    "no link is dropped while references are repointed");
+
+  assert.deepEqual(result.pinLinks, [
+    { id: "tied", source: "n:a:m1", target: "n:b:t1" }
+  ], "board pin links follow the canonical refs; unrelated refs stay untouched");
+
+  // A second pass over the merged data is a no-op.
+  const mergedNotes = result.links.find(entry => entry.noteId === "a").links;
+  const again = mergeNearbyMinorAnchors(result.cards,
+    [{ id: "a", system: { links: mergedNotes } }], { tolerance: 1.5, pinLinks });
+  assert.deepEqual(again.changed, []);
+  assert.deepEqual(again.links, []);
+  assert.deepEqual(again.pinLinks, []);
+  assert.equal(ANCHOR_MERGE_TOLERANCE, 2);
 });
