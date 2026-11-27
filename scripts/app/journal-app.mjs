@@ -5,7 +5,7 @@ import NoteEditor from "./editor.mjs";
 import PrivateWorkspace from "./private-workspace.mjs";
 import { openPrivateAdmin } from "./private-admin.mjs";
 import { privateStore } from "../store/private-store.mjs";
-import { countTransferDrops } from "../private-transfer.mjs";
+import { countSharedTransferDrops, countTransferDrops } from "../private-transfer.mjs";
 import { defaultNoteTitle, noteCreationPresentation, noteCreationStyle, promptNewNote } from "./note-dialog.mjs";
 import { noteFilterKey, noteMatchesQuery, notePresentationLabelKey, noteSearchLabel } from "./note-search.mjs";
 import { computeJournalStats, deriveSessions, selectLiveSharedNotes } from "../stats.mjs";
@@ -164,7 +164,8 @@ export default class JournalApp extends ApplicationV2 {
     onFocusNote: id => this.#canvas.focusNote(id),
     onSelectNote: id => { this.#selectedNoteId = id; this.#editor.open(id); this.#editor.render(); },
     onSetMainPinEnabled: (id, enabled) => this.#setMainPinEnabled(id, enabled),
-    onStamp: (id, trigger) => this.#canvas.openStampPicker(id, trigger)
+    onStamp: (id, trigger) => this.#canvas.openStampPicker(id, trigger),
+    onSend: id => this.#openSendPanel(this.element, null, id, "shared")
   });
   // Every canvas action is routed by what it touches: GM-only things go to the vault in this
   // client, everything else is a normal shared write request (spec §14).
@@ -281,7 +282,7 @@ export default class JournalApp extends ApplicationV2 {
   #private = new PrivateWorkspace({
     onChange: () => this.render(),
     onSelectionChange: () => this.#syncSelectionControls(),
-    onSend: noteId => this.#openSendPanel(this.element, null, noteId),
+    onSend: noteId => this.#openSendPanel(this.element, null, noteId, "private"),
     onStamp: (noteId, trigger) => this.#private.canvas.openStampPicker(noteId, trigger),
     onPinToolChange: active => {
       const button = this.element?.querySelector(".journalinator-private-add-pin");
@@ -770,8 +771,9 @@ export default class JournalApp extends ApplicationV2 {
 
   /**
    * Selection changes are canvas-local (no app re-render), so the fit/send controls are updated
-   * in place. The fit label switches between "all" and "selection"; Send stays disabled until a
-   * private page exists and at least one private note is selected.
+   * in place. The fit label switches between "all" and "selection". Each Send button stays
+   * disabled until its source canvas has a sendable selection, an active GM is online and at
+   * least one destination exists for that source.
    */
   #syncSelectionControls() {
     const root = this.element;
@@ -788,17 +790,43 @@ export default class JournalApp extends ApplicationV2 {
       this.#setIconLabel(privateFit, t(privateSelected
         ? "JN.TopBar.FitSelection" : "JN.TopBar.FitAll"));
     }
-    const send = root.querySelector(".journalinator-private-send");
-    if (!send) return;
     const offline = !game.users?.activeGM;
-    const canSend = !offline && !!this.#private?.page && privateSelected > 0;
-    send.disabled = !canSend;
-    send.classList.toggle("disabled", !canSend);
-    this.#setIconLabel(send, offline
-      ? t("JN.Private.NeedGM")
-      : (!this.#private?.page
-        ? t("JN.Transfer.NoPrivateSpace")
-        : (privateSelected ? t("JN.Transfer.SendTo") : t("JN.Transfer.SelectNotes"))));
+    const privateSend = root.querySelector(".journalinator-private-send");
+    if (privateSend) {
+      const canSend = !offline && !!this.#private?.page && privateSelected > 0;
+      privateSend.disabled = !canSend;
+      privateSend.classList.toggle("disabled", !canSend);
+      this.#setIconLabel(privateSend, offline
+        ? t("JN.Private.NeedGM")
+        : (!this.#private?.page
+          ? t("JN.Transfer.NoPrivateSpace")
+          : (privateSelected ? t("JN.Transfer.SendTo") : t("JN.Transfer.SelectNotes"))));
+    }
+
+    const sharedSend = root.querySelector(".journalinator-shared-send");
+    if (sharedSend) {
+      const selection = this.#canvas?.getSelectedNoteIds?.() ?? [];
+      const sendable = this.#sharedSendableIds(selection);
+      const hasOtherUser = [...(game.users ?? [])].some(user => user && user.id !== game.user.id);
+      const hasDestination = hasOtherUser || !!privateStore.findActive(game.user.id);
+      const canSend = !offline && sendable.length > 0 && hasDestination;
+      sharedSend.disabled = !canSend;
+      sharedSend.classList.toggle("disabled", !canSend);
+      this.#setIconLabel(sharedSend, offline
+        ? t("JN.Private.NeedGM")
+        : (!sendable.length
+          ? t(selection.length ? "JN.Transfer.VisibleOnly" : "JN.Transfer.SelectNotes")
+          : (!hasDestination ? t("JN.Transfer.NoRecipients") : t("JN.Transfer.SendTo"))));
+    }
+  }
+
+  /** Live, non-secret shared note ids from a selection; vault notes are never sendable. */
+  #sharedSendableIds(ids) {
+    return (Array.isArray(ids) ? ids : []).filter(id => {
+      if (typeof id !== "string" || !id || notesStore.isSecretNote(id)) return false;
+      const page = notesStore.getSharedPage(id);
+      return !!page && !page.system.deleted;
+    });
   }
 
   /** Minimal, payload-free view of this client's pending incoming transfers. */
@@ -843,6 +871,12 @@ export default class JournalApp extends ApplicationV2 {
       if (dropped) ui.notifications?.warn(dropped);
       return;
     }
+    if (message.action === "imported") {
+      ui.notifications?.info(t("JN.Transfer.ImportedSelf", { count }));
+      if (dropped) ui.notifications?.warn(dropped);
+      if (this.#view === "private") this.render();
+      return;
+    }
     if (message.action === "accepted") {
       ui.notifications?.info(t("JN.Transfer.Accepted", { count }));
       if (dropped) ui.notifications?.warn(dropped);
@@ -859,7 +893,8 @@ export default class JournalApp extends ApplicationV2 {
   #closeTransferPanels(root = this.element) {
     for (const panel of root?.querySelectorAll?.(".jn-transfer-popover") ?? []) panel.hidden = true;
     for (const button of root?.querySelectorAll?.(
-      ".journalinator-private-send, .journalinator-private-inbox, .journalinator-transfer-banner"
+      ".journalinator-private-send, .journalinator-shared-send, .jn-shared-send, "
+      + ".journalinator-private-inbox, .journalinator-transfer-banner"
     ) ?? []) button.setAttribute("aria-expanded", "false");
     this.#transferDismiss?.();
     this.#transferDismiss = null;
@@ -894,31 +929,75 @@ export default class JournalApp extends ApplicationV2 {
     focusTarget?.focus?.();
   }
 
-  /** Sender popover: recipient (never self), selected count and copy-only/link warnings. */
-  #openSendPanel(root, trigger = null, noteId = null) {
+  /**
+   * Sender popover, source-aware: the private workspace offers the Main Canvas plus other users,
+   * while the shared canvas offers each user's private canvas (including the sender's own when an
+   * active private page exists). Every path creates an independent copy and leaves the source.
+   */
+  #openSendPanel(root, trigger = null, noteId = null, sourceView = this.#view) {
     const panel = root.querySelector(".journalinator-transfer-send");
     if (!panel) return;
     if (!game.users?.activeGM) return ui.notifications?.warn(t("JN.Private.NeedGM"));
     if (!panel.hidden) return this.#closeTransferPanels(root);
-    if (!this.#private.page) return ui.notifications?.warn(t("JN.Transfer.NoPrivateSpace"));
-    const selected = (noteId ? [noteId] : this.#private.getSelectedNoteIds())
-      .filter(id => this.#private.workspace?.notes?.[id]);
-    if (!selected.length) return ui.notifications?.warn(t("JN.Transfer.None"));
-    const recipients = [...(game.users ?? [])]
-      .filter(user => user && user.id !== game.user.id)
-      .sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")));
-    const details = user => [
-      user.isGM ? t("JN.Transfer.GM") : "",
-      user.active === false ? t("JN.Transfer.Offline") : ""
-    ].filter(Boolean).join(", ");
-    const options = `<option value="__main__">${t("JN.Private.MainCanvas")}</option>`
-      + recipients.map(user => `<option value="${foundry.utils.escapeHTML(user.id)}">${
-        foundry.utils.escapeHTML(user.name ?? user.id)
-      }${details(user) ? ` (${foundry.utils.escapeHTML(details(user))})` : ""}</option>`).join("");
-    const titles = selected
-      .map(id => this.#private.workspace?.notes?.[id]?.title ?? "")
-      .filter(Boolean);
-    const drops = countTransferDrops(this.#private.workspace, selected);
+
+    const sharedSource = sourceView === "shared";
+    const requested = noteId
+      ? [noteId]
+      : (sharedSource ? this.#canvas.getSelectedNoteIds() : this.#private.getSelectedNoteIds());
+    let selected;
+    let titles;
+    let drops;
+    let options;
+
+    if (sharedSource) {
+      selected = this.#sharedSendableIds(requested);
+      if (!selected.length) {
+        return ui.notifications?.warn(requested.length
+          ? t("JN.Transfer.VisibleOnly") : t("JN.Transfer.None"));
+      }
+      if (selected.length < requested.length) {
+        ui.notifications?.warn(t("JN.Transfer.HiddenExcluded"));
+      }
+      const ownPage = privateStore.findActive(game.user.id);
+      const recipients = [...(game.users ?? [])]
+        .filter(user => user && user.id !== game.user.id)
+        .sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")));
+      const details = user => [
+        user.isGM ? t("JN.Transfer.GM") : "",
+        user.active === false ? t("JN.Transfer.Offline") : ""
+      ].filter(Boolean).join(", ");
+      const selfOption = ownPage
+        ? `<option value="__self__">${t("JN.Transfer.MyPrivateCanvas")}</option>` : "";
+      options = selfOption + recipients.map(user => `<option value="${
+        foundry.utils.escapeHTML(user.id)
+      }">${foundry.utils.escapeHTML(user.name ?? user.id)}${
+        details(user) ? ` (${foundry.utils.escapeHTML(details(user))})` : ""}</option>`).join("");
+      if (!options) return ui.notifications?.warn(t("JN.Transfer.NoRecipients"));
+      titles = selected
+        .map(id => notesStore.getSharedPage(id)?.name ?? "")
+        .filter(Boolean);
+      drops = countSharedTransferDrops(notesStore.getSharedNotes(), selected);
+    } else {
+      if (!this.#private.page) return ui.notifications?.warn(t("JN.Transfer.NoPrivateSpace"));
+      selected = requested.filter(id => this.#private.workspace?.notes?.[id]);
+      if (!selected.length) return ui.notifications?.warn(t("JN.Transfer.None"));
+      const recipients = [...(game.users ?? [])]
+        .filter(user => user && user.id !== game.user.id)
+        .sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")));
+      const details = user => [
+        user.isGM ? t("JN.Transfer.GM") : "",
+        user.active === false ? t("JN.Transfer.Offline") : ""
+      ].filter(Boolean).join(", ");
+      options = `<option value="__main__">${t("JN.Private.MainCanvas")}</option>`
+        + recipients.map(user => `<option value="${foundry.utils.escapeHTML(user.id)}">${
+          foundry.utils.escapeHTML(user.name ?? user.id)
+        }${details(user) ? ` (${foundry.utils.escapeHTML(details(user))})` : ""}</option>`).join("");
+      titles = selected
+        .map(id => this.#private.workspace?.notes?.[id]?.title ?? "")
+        .filter(Boolean);
+      drops = countTransferDrops(this.#private.workspace, selected);
+    }
+
     const dropParts = [];
     if (drops.droppedLinks > 0) {
       dropParts.push(t("JN.Transfer.LinksDropped", { count: drops.droppedLinks }));
@@ -928,6 +1007,10 @@ export default class JournalApp extends ApplicationV2 {
     }
     const dropWarning = dropParts.length
       ? `<p class="jn-transfer-warning jn-transfer-drops">${dropParts.join(" ")}</p>` : "";
+    const copyHint = sharedSource
+      ? t("JN.Transfer.SharedCopyHint") : t("JN.Transfer.CopyHint");
+    const copyOnly = sharedSource
+      ? t("JN.Transfer.SharedCopyOnly") : t("JN.Transfer.CopyOnly");
     panel.innerHTML = `
       <div class="jn-transfer-head">
         <h4 id="jn-transfer-send-title">${t("JN.Transfer.Title")}</h4>
@@ -938,8 +1021,8 @@ export default class JournalApp extends ApplicationV2 {
       </label>
       <p class="jn-transfer-count">${t("JN.Transfer.SelectedCount", { count: selected.length })}</p>
       ${titles.length ? `<p class="jn-transfer-titles">${titles.map(foundry.utils.escapeHTML).join(", ")}</p>` : ""}
-      <p class="jn-transfer-hint">${t("JN.Transfer.CopyHint")}</p>
-      <p class="jn-transfer-hint">${t("JN.Transfer.CopyOnly")}</p>
+      <p class="jn-transfer-hint">${copyHint}</p>
+      <p class="jn-transfer-hint">${copyOnly}</p>
       <p class="jn-transfer-warning">${t("JN.Transfer.LinksWarning")}</p>
       ${dropWarning}
       <div class="jn-transfer-actions">
@@ -951,6 +1034,16 @@ export default class JournalApp extends ApplicationV2 {
     panel.querySelector(".jn-transfer-confirm")?.addEventListener("click", () => {
       const toUserId = panel.querySelector(".jn-transfer-recipient")?.value;
       if (!toUserId) return;
+      if (sharedSource) {
+        // The active GM's writeApplied acknowledgement is the only success signal.
+        requestWrite({
+          type: "sendSharedToPrivate",
+          toUserId: toUserId === "__self__" ? game.user.id : toUserId,
+          noteIds: selected
+        });
+        this.#closeTransferPanels(root);
+        return;
+      }
       if (toUserId === "__main__") {
         for (const id of selected) this.#publishPrivateNote(id);
         this.#closeTransferPanels(root);
@@ -960,7 +1053,10 @@ export default class JournalApp extends ApplicationV2 {
       requestWrite({ type: "sendPrivateTransfer", toUserId, noteIds: selected });
       this.#closeTransferPanels(root);
     });
-    this.#showTransferPanel(panel, trigger ?? root.querySelector(".jn-private-send"));
+    const fallbackTrigger = sharedSource
+      ? (root.querySelector(".jn-shared-send") ?? root.querySelector(".journalinator-shared-send"))
+      : root.querySelector(".jn-private-send");
+    this.#showTransferPanel(panel, trigger ?? fallbackTrigger);
   }
 
   async #publishPrivateNote(id) {
@@ -969,7 +1065,7 @@ export default class JournalApp extends ApplicationV2 {
     if (!note || !card || !game.users.activeGM) return;
     await requestWrite({
       type: "pasteNote", title: note.name?.trim() || t("JN.Private.NewNoteTitle"),
-      blocks: (note.system.blocks ?? []).map(block => block.text),
+      blocks: (note.system.blocks ?? []).filter(block => !block.hidden).map(block => block.text),
       style: cardStyleKey(note.system.style), kind: note.system.kind,
       targetHeading: note.system.targetHeading ?? "", label: note.system.label ?? "",
       presentation: note.system.presentation, attachment: note.system.attachment,
@@ -1149,6 +1245,7 @@ export default class JournalApp extends ApplicationV2 {
       <div class="jn-toolbar-group">
         ${toolbarButton("journalinator-trash", "fa-trash", trashLabel)}
         ${toolbarButton("journalinator-stats", "fa-chart-column", t("JN.TopBar.Stats"))}
+        ${toolbarButton("journalinator-shared-send", "fa-paper-plane", t("JN.Transfer.SelectNotes"), true)}
         ${toolbarButton("journalinator-fit", "fa-expand", t("JN.TopBar.FitAll"))}
       </div>`;
     const incomingLabel = incomingCount
@@ -1177,6 +1274,7 @@ export default class JournalApp extends ApplicationV2 {
       <div class="jn-toolbar-group">
         ${privatePage ? toolbarButton("journalinator-private-stats", "fa-chart-column", t("JN.TopBar.Stats")) : ""}
         ${privatePage ? toolbarButton("journalinator-trash", "fa-trash", trashLabel) : ""}
+        ${privatePage ? toolbarButton("journalinator-private-send", "fa-paper-plane", t("JN.Transfer.SelectNotes"), true) : ""}
         ${privatePage ? toolbarButton("journalinator-private-fit", "fa-expand", t("JN.TopBar.FitAll")) : ""}
         ${inboxButton}
         ${context.canManagePrivate ? `<button type="button" class="jn-toolbar-icon journalinator-private-admin"
@@ -1219,9 +1317,9 @@ export default class JournalApp extends ApplicationV2 {
         <div class="journalinator-canvas-slot"></div>
         <aside class="journalinator-editor"></aside>
       </div>`}
+      <div class="jn-transfer-popover journalinator-transfer-send" role="dialog"
+        aria-labelledby="jn-transfer-send-title" hidden></div>
       ${privateView ? `
-        <div class="jn-transfer-popover journalinator-transfer-send" role="dialog"
-          aria-labelledby="jn-transfer-send-title" hidden></div>
         <div class="jn-transfer-popover journalinator-transfer-inbox-panel" role="dialog"
           aria-labelledby="jn-transfer-inbox-title" hidden></div>` : ""}
     `;
@@ -1491,7 +1589,10 @@ export default class JournalApp extends ApplicationV2 {
       this.#syncSelectionControls();
     });
     root.querySelector(".journalinator-private-send")?.addEventListener("click", event => {
-      this.#openSendPanel(root, event.currentTarget);
+      this.#openSendPanel(root, event.currentTarget, null, "private");
+    });
+    root.querySelector(".journalinator-shared-send")?.addEventListener("click", event => {
+      this.#openSendPanel(root, event.currentTarget, null, "shared");
     });
     root.querySelector(".journalinator-private-inbox")?.addEventListener("click", event => {
       this.#openInboxPanel(root, event.currentTarget);

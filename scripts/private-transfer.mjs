@@ -29,6 +29,7 @@ const MAX_BLOCK_TEXT_LENGTH = MAX_TRANSFER_TEXT;
 const MAX_ID_LENGTH = 64;
 const SAFE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const RESERVED_IDS = new Set(["__proto__", "prototype", "constructor"]);
+const NOTE_TYPE = "fvtt-journalinator.note";
 
 const ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -208,6 +209,173 @@ export function countTransferDrops(workspace, noteIds) {
   const selected = new Set((Array.isArray(noteIds) ? noteIds : [])
     .filter(id => typeof id === "string" && own(notes, id)));
   return countDrops(notes, selected);
+}
+
+/** Reads shared pages from a Foundry PageCollection, a Map, an array or an id-keyed object. */
+function sharedPageMap(sharedPages) {
+  const pages = new Map();
+  if (!sharedPages || typeof sharedPages !== "object") return pages;
+  let entries;
+  if (Array.isArray(sharedPages)) entries = sharedPages.map(page => [page?.id ?? page?._id, page]);
+  else if (typeof sharedPages.entries === "function") entries = [...sharedPages.entries()];
+  else entries = Object.entries(sharedPages);
+  for (const [id, page] of entries) {
+    if (typeof id === "string" && id && page && typeof page === "object") pages.set(id, page);
+  }
+  return pages;
+}
+
+function liveSharedPage(page) {
+  if (!page || typeof page !== "object") return false;
+  if (page.type && page.type !== NOTE_TYPE) return false;
+  const system = page.system;
+  return !!system && typeof system === "object" && !system.deleted;
+}
+
+/** Visible shared blocks only: GM-hidden paragraphs live in the vault and never travel. */
+function sharedVisibleBlocks(system) {
+  return (Array.isArray(system?.blocks) ? system.blocks : [])
+    .filter(block => block && typeof block.text === "string" && block.hidden !== true)
+    .map(block => {
+      const clean = { text: block.text };
+      if (typeof block.authorId === "string") clean.authorId = block.authorId;
+      return clean;
+    });
+}
+
+/** Visible shared links only: GM-hidden links are vault data and must never be copied. */
+function sharedVisibleLinks(system) {
+  return (Array.isArray(system?.links) ? system.links : [])
+    .filter(link => link && typeof link === "object" && link.hidden !== true)
+    .map(link => clone(link));
+}
+
+/** Converts one shared note page into the note shape `importPrivateTransfer` expects. */
+function sharedTransferNote(page) {
+  const system = page?.system && typeof page.system === "object" ? page.system : {};
+  return {
+    id: typeof page?.id === "string" ? page.id : page?._id,
+    title: typeof page?.name === "string" ? page.name : "",
+    kind: system.kind === "location" ? "location" : "note",
+    style: system.style,
+    targetHeading: system.targetHeading,
+    label: typeof system.label === "string" ? system.label : "",
+    schemaVersion: system.schemaVersion,
+    presentation: system.presentation,
+    attachment: system.attachment,
+    image: system.image,
+    backgroundImage: system.backgroundImage,
+    blocks: sharedVisibleBlocks(system),
+    links: sharedVisibleLinks(system),
+    createdAt: system.createdAt,
+    updatedAt: system.updatedAt
+  };
+}
+
+/** External-link/waypoint accounting for a shared→private copy, for the sender UI warning. */
+export function countSharedTransferDrops(sharedPages, noteIds) {
+  const pages = sharedPageMap(sharedPages);
+  const selected = new Set((Array.isArray(noteIds) ? noteIds : [])
+    .filter(id => typeof id === "string" && liveSharedPage(pages.get(id))));
+  const notes = {};
+  for (const id of selected) notes[id] = { links: sharedVisibleLinks(pages.get(id).system) };
+  return countDrops(notes, selected);
+}
+
+/**
+ * Packs a bounded, self-contained private copy of selected *visible shared* notes.
+ *
+ * The shared journal is authoritative input here: hidden blocks and hidden links are excluded
+ * before packing, so vault content can never leak into a private transfer. Only attached labels
+ * and board pins of the selected notes travel; free labels, hidden labels and pin links whose
+ * endpoints fall outside the selection are omitted. `toUserId` may equal `fromUserId`: the
+ * socket handler uses that shape for a direct self-import and never stores it as a pending offer.
+ */
+export function buildSharedTransfer(sharedPages, layout, noteIds, { fromUserId, toUserId } = {}) {
+  if (typeof fromUserId !== "string" || !fromUserId
+      || typeof toUserId !== "string" || !toUserId) {
+    throw new Error(t("JN.Transfer.UserMissing"));
+  }
+  if (!Array.isArray(noteIds) || !noteIds.length) throw new Error(t("JN.Transfer.None"));
+  if (noteIds.length > MAX_TRANSFER_NOTES) {
+    throw new Error(t("JN.Transfer.TooMany", { max: MAX_TRANSFER_NOTES }));
+  }
+
+  const pages = sharedPageMap(sharedPages);
+  const cards = layout?.cards && typeof layout.cards === "object" ? layout.cards : {};
+  const labels = layout?.labels && typeof layout.labels === "object" ? layout.labels : {};
+  const boardPins = layout?.pins && typeof layout.pins === "object" ? layout.pins : {};
+  const boardLinks = layout?.pinLinks && typeof layout.pinLinks === "object" ? layout.pinLinks : {};
+
+  const selected = [];
+  const seen = new Set();
+  let totalText = 0;
+  for (const noteId of noteIds) {
+    if (typeof noteId !== "string" || !noteId || seen.has(noteId)
+        || !liveSharedPage(pages.get(noteId))) {
+      throw new Error(t("JN.Transfer.Stale"));
+    }
+    seen.add(noteId);
+    totalText += noteTextLength({ blocks: sharedVisibleBlocks(pages.get(noteId).system) });
+    if (totalText > MAX_TRANSFER_TEXT) {
+      throw new Error(t("JN.Transfer.TooLarge", { max: MAX_TRANSFER_TEXT }));
+    }
+    selected.push(noteId);
+  }
+
+  let labelCount = 0;
+  const packed = selected.map(noteId => {
+    const page = pages.get(noteId);
+    const attached = {};
+    const usedLabelIds = new Set();
+    for (const [labelId, label] of Object.entries(labels)) {
+      if (!label || typeof label !== "object" || label.hidden === true || label.noteId !== noteId) continue;
+      labelCount += 1;
+      if (labelCount > MAX_TRANSFER_LABELS) {
+        throw new Error(t("JN.Transfer.TooManyLabels", { max: MAX_TRANSFER_LABELS }));
+      }
+      let safeLabelId = typeof labelId === "string"
+        && SAFE_ID_RE.test(labelId) && !RESERVED_IDS.has(labelId) ? labelId : "";
+      if (!safeLabelId || usedLabelIds.has(safeLabelId)) safeLabelId = freshId(usedLabelIds);
+      else usedLabelIds.add(safeLabelId);
+      attached[safeLabelId] = clone(label);
+    }
+    return {
+      note: sharedTransferNote(page),
+      card: own(cards, noteId) && cards[noteId] && typeof cards[noteId] === "object"
+        ? clone(cards[noteId]) : null,
+      labels: attached,
+      pins: Object.fromEntries(Object.entries(boardPins)
+        .filter(([, pin]) => pin && pin.hidden !== true && pin.noteId === noteId)
+        .map(([id, pin]) => [id, clone(pin)]))
+    };
+  });
+
+  const refOwner = ref => {
+    if (typeof ref !== "string") return "";
+    if (ref.startsWith("n:")) return ref.slice(2, ref.indexOf(":", 2));
+    if (ref.startsWith("p:")) return boardPins[ref.slice(2)]?.noteId ?? "";
+    return "";
+  };
+  const packedPinLinks = Object.fromEntries(Object.entries(boardLinks)
+    .filter(([, link]) => link && link.hidden !== true
+      && seen.has(refOwner(link.source)) && seen.has(refOwner(link.target)))
+    .map(([id, link]) => [id, clone(link)]));
+
+  const drops = countSharedTransferDrops(pages, selected);
+  return {
+    fromUserId,
+    toUserId,
+    createdAt: Date.now(),
+    notes: packed,
+    pinLinks: packedPinLinks,
+    summary: {
+      count: packed.length,
+      titles: packed.map(entry => String(entry.note?.title ?? "").slice(0, MAX_TITLE_LENGTH)),
+      droppedLinks: drops.droppedLinks,
+      droppedWaypoints: drops.droppedWaypoints
+    }
+  };
 }
 
 /**

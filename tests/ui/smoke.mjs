@@ -5169,6 +5169,162 @@ test("send is disabled and warns when the player has no private page", async () 
   }
 });
 
+test("shared toolbar and right-panel send offer private destinations for a visible selection", async () => {
+  const recipient = makeUser("SharedSendPip0001", { name: "Shared Pip" });
+  const restoreUsers = installExtraUsers([recipient]);
+  await requestWrite({ type: "createNote", title: "Shared Send Fixture", x: 7000, y: 0 });
+  await settle();
+
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  try {
+    await redraw();
+    const note = sharedByName("Shared Send Fixture");
+    const toolbarSend = host.querySelector(".journalinator-shared-send");
+    assert.ok(toolbarSend, "the shared toolbar renders a send control");
+    assert.equal(toolbarSend.disabled, true, "send is disabled with no selection");
+    assert.equal(host.querySelector(".jn-shared-send"), null,
+      "the right-panel send only appears for a selected shared note");
+
+    clickCanvasCard({ root: host.querySelector(".jn-canvas") }, note.id);
+    await settle();
+    assert.equal(toolbarSend.disabled, false, "the toolbar send enables for a visible shared note");
+    const panelSend = host.querySelector(".jn-shared-send");
+    assert.ok(panelSend, "the shared right panel offers Send to for the selected note");
+    assert.equal(panelSend.disabled, false);
+
+    toolbarSend.click();
+    const panel = host.querySelector(".journalinator-transfer-send");
+    assert.equal(panel.hidden, false, "the shared send popover opens");
+    const options = [...panel.querySelectorAll("option")].map(option => option.value);
+    assert.ok(options.includes(recipient.id), "another user's private canvas is a destination");
+    assert.ok(!options.includes("__main__"), "the shared source is not offered as its own destination");
+    assert.match(panel.textContent, /shared note stays on the Main Canvas/i,
+      "the shared copy boundary is explained");
+
+    panel.querySelector(".jn-transfer-recipient").value = recipient.id;
+    const infoBefore = env.notifications.filter(([level]) => level === "info").length;
+    panel.querySelector(".jn-transfer-confirm").click();
+    assert.equal(panel.hidden, true, "the popover closes on send");
+    assert.equal(env.notifications.filter(([level]) => level === "info").length, infoBefore,
+      "no optimistic success notice");
+    await settle();
+
+    const record = privateStore.pendingTransfers(recipient.id).at(-1);
+    assert.ok(record, "the active GM stored the pending copy");
+    assert.deepEqual(record.summary.titles, ["Shared Send Fixture"]);
+    assert.ok(sharedByName("Shared Send Fixture"), "the shared source remains after sending");
+    assert.ok(env.notifications.some(([level, text]) =>
+      level === "info" && text.includes("Sent 1 note(s) to Shared Pip")));
+
+    host.querySelector(".jn-shared-send").click();
+    assert.equal(panel.hidden, false, "the right-panel send opens the same destination panel");
+    panel.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    assert.equal(panel.hidden, true, "Escape closes the shared send popover");
+  } finally {
+    restoreUsers();
+    app._onClose();
+    host.remove();
+  }
+});
+
+test("shared send stays disabled offline even with a selected note", async () => {
+  await requestWrite({ type: "createNote", title: "Shared Offline Fixture", x: 7300, y: 0 });
+  await settle();
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  const descriptor = Object.getOwnPropertyDescriptor(game.users, "activeGM");
+  Object.defineProperty(game.users, "activeGM", { configurable: true, get: () => null });
+  try {
+    await redraw();
+    clickCanvasCard({ root: host.querySelector(".jn-canvas") }, sharedByName("Shared Offline Fixture").id);
+    await settle();
+    const send = host.querySelector(".journalinator-shared-send");
+    assert.equal(send.disabled, true, "send is disabled without an active GM");
+    send.click();
+    assert.equal(host.querySelector(".journalinator-transfer-send").hidden, true,
+      "a disabled shared send cannot open its popover");
+  } finally {
+    Object.defineProperty(game.users, "activeGM", descriptor);
+    app._onClose();
+    host.remove();
+  }
+});
+
+test("private toolbar send enables for a multi-selection and supports both destinations", async () => {
+  const recipient = makeUser("ToolbarPip000001", { name: "Toolbar Pip" });
+  const restoreUsers = installExtraUsers([recipient]);
+  const { page, ids } = await addPrivateFixtureNotes(gmUser, ["Toolbar Copy One", "Toolbar Copy Two"]);
+  const app = new JournalApp();
+  const host = document.createElement("div");
+  app.element = host;
+  document.body.appendChild(host);
+  const redraw = async () => {
+    app._replaceHTML(await app._renderHTML(await app._prepareContext()), host);
+    app._onRender();
+  };
+  app._onFirstRender();
+  try {
+    await redraw();
+    await openPrivateView(app, host, redraw);
+    const toolbarSend = host.querySelector(".journalinator-private-send");
+    assert.ok(toolbarSend, "the private toolbar renders a send control");
+    assert.equal(toolbarSend.disabled, true, "send starts disabled without a selection");
+
+    const canvasRoot = host.querySelector(".jn-canvas");
+    clickCanvasCard({ root: canvasRoot }, ids[0]);
+    clickCanvasCard({ root: canvasRoot }, ids[1], { ctrlKey: true });
+    await settle();
+    assert.equal(toolbarSend.disabled, false, "send enables for a multi-selection");
+
+    toolbarSend.click();
+    const panel = host.querySelector(".journalinator-transfer-send");
+    assert.equal(panel.hidden, false, "the private toolbar opens the destination panel");
+    const options = [...panel.querySelectorAll("option")].map(option => option.value);
+    assert.ok(options.includes("__main__"), "the Main Canvas remains a destination");
+    assert.ok(options.includes(recipient.id), "another user's private canvas is a destination");
+    assert.equal(panel.querySelector(".jn-transfer-count").textContent, "2 note(s) selected");
+
+    panel.querySelector(".jn-transfer-recipient").value = recipient.id;
+    panel.querySelector(".jn-transfer-confirm").click();
+    await settle();
+    const record = privateStore.pendingTransfers(recipient.id).at(-1);
+    assert.ok(record, "the multi-selection became one pending offer");
+    assert.deepEqual(record.summary.titles, ["Toolbar Copy One", "Toolbar Copy Two"]);
+    const workspace = privateStore.read(page);
+    assert.ok(workspace.notes[ids[0]] && workspace.notes[ids[1]],
+      "the private source notes remain after sending");
+
+    toolbarSend.click();
+    panel.querySelector(".jn-transfer-recipient").value = "__main__";
+    panel.querySelector(".jn-transfer-confirm").click();
+    await settle();
+    assert.ok(sharedByName("Toolbar Copy One") && sharedByName("Toolbar Copy Two"),
+      "the toolbar can still publish the selection to the Main Canvas");
+    const after = privateStore.read(page);
+    assert.ok(after.notes[ids[0]] && after.notes[ids[1]],
+      "publishing to the Main Canvas leaves the private sources in place");
+  } finally {
+    restoreUsers();
+    app._onClose();
+    host.remove();
+  }
+});
+
 test("private transfer acknowledgements surface dropped links and waypoints", () => {
   const app = new JournalApp();
   const host = document.createElement("div");

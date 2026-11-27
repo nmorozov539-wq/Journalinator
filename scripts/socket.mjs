@@ -1,5 +1,5 @@
 import { getContainerIds } from "./store/containers.mjs";
-import { privateStore } from "./store/private-store.mjs";
+import { MAX_TRANSFER_STORAGE, privateStore } from "./store/private-store.mjs";
 import { CARD_STYLES, seedTilt } from "./styles/registry.mjs";
 import {
   CARD_SIDES, cardPointAnchor, cardPorts, linkAnchors, moveThreadPin, validCardPorts, validLinkPoint
@@ -20,7 +20,9 @@ import {
   authoritativeHolds, authoritativeSnapshot, receiveLockBroadcast, authoritativeLockHolder
 } from "./locks.mjs";
 import { t } from "./i18n.mjs";
-import { MAX_TRANSFER_NOTES, buildPrivateTransfer } from "./private-transfer.mjs";
+import {
+  MAX_TRANSFER_NOTES, MAX_TRANSFER_TEXT, buildPrivateTransfer, buildSharedTransfer, importPrivateTransfer
+} from "./private-transfer.mjs";
 import { attachedStampIds, DEFAULT_STAMP_CORNER, isStampCorner, stampUrl } from "./stamps.mjs";
 import {
   LINK_ENDS, LINK_MATERIALS, LINK_PATTERNS, LINK_SLACK, LINK_THICKNESS,
@@ -1246,11 +1248,103 @@ async function handlePrivateTransferMessage(message, senderUserId) {
   }
 }
 
+/**
+ * Copies visible shared notes into a private workspace. The active GM reads only the shared
+ * journal (never the vault or notesStore's merged view), so hidden blocks/links cannot leak even
+ * when the sender is a GM with secrets unlocked. Another user's copy goes through the existing
+ * pending-offer inbox; a self-copy imports directly into the sender's active private page.
+ */
+async function handleSharedTransferMessage(message, senderUserId) {
+  const ids = getContainerIds();
+  if (!ids) return;
+  const shared = game.journal.get(ids.shared);
+  if (!shared) return;
+
+  const toUserId = message.toUserId;
+  if (typeof toUserId !== "string" || !toUserId) {
+    notifyUser(senderUserId, t("JN.Transfer.UserMissing"));
+    return;
+  }
+  if (!game.users.get(senderUserId)) return;
+  if (!game.users.get(toUserId)) {
+    notifyUser(senderUserId, t("JN.Transfer.UserMissing"));
+    return;
+  }
+  if (!Array.isArray(message.noteIds) || !message.noteIds.length) {
+    notifyUser(senderUserId, t("JN.Transfer.None"));
+    return;
+  }
+  if (message.noteIds.length > MAX_TRANSFER_NOTES) {
+    notifyUser(senderUserId, t("JN.Transfer.TooMany", { max: MAX_TRANSFER_NOTES }));
+    return;
+  }
+
+  const layout = layoutPage(shared)?.system ?? {};
+  let transfer;
+  try {
+    transfer = buildSharedTransfer(shared.pages, layout, message.noteIds, {
+      fromUserId: senderUserId,
+      toUserId
+    });
+  } catch (err) {
+    notifyUser(senderUserId, err.message);
+    return;
+  }
+
+  const payload = {
+    kind: "privateTransfer",
+    count: transfer.summary.count,
+    droppedLinks: transfer.summary.droppedLinks ?? 0,
+    droppedWaypoints: transfer.summary.droppedWaypoints ?? 0,
+    toUserId
+  };
+
+  if (toUserId === senderUserId) {
+    const page = privateStore.findActive(senderUserId);
+    if (!page) {
+      notifyUser(senderUserId, t("JN.Transfer.NoPrivateSpace"));
+      return;
+    }
+    let serialized;
+    try {
+      serialized = JSON.stringify(transfer);
+    } catch {
+      notifyUser(senderUserId, t("JN.Transfer.TooLarge", { max: MAX_TRANSFER_TEXT }));
+      return;
+    }
+    if (serialized.length > MAX_TRANSFER_STORAGE) {
+      notifyUser(senderUserId, t("JN.Transfer.TooLarge", { max: MAX_TRANSFER_TEXT }));
+      return;
+    }
+    try {
+      const result = importPrivateTransfer(privateStore.read(page), transfer, senderUserId);
+      await privateStore.save(page, result.workspace, privateStore.flags(page).rev ?? 0);
+      acknowledgeWriteApplied(senderUserId, { ...payload, action: "imported", count: result.imported.length });
+    } catch (err) {
+      notifyUser(senderUserId, err.message);
+    }
+    return;
+  }
+
+  const transferId = freshTransferId();
+  try {
+    await privateStore.addTransfer({ id: transferId, ...transfer });
+  } catch (err) {
+    notifyUser(senderUserId, err.message);
+    return;
+  }
+  acknowledgeWriteApplied(senderUserId, { ...payload, action: "sent", transferId });
+}
+
 async function handleMessage(message, senderUserId) {
   if (message.type === "sendPrivateTransfer"
       || message.type === "acceptPrivateTransfer"
       || message.type === "declinePrivateTransfer") {
     await handlePrivateTransferMessage(message, senderUserId);
+    return;
+  }
+  if (message.type === "sendSharedToPrivate") {
+    await handleSharedTransferMessage(message, senderUserId);
     return;
   }
 

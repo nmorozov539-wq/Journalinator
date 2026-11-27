@@ -1,4 +1,5 @@
 import { notesStore } from "../store/notes-store.mjs";
+import { privateStore } from "../store/private-store.mjs";
 import { requestWrite } from "../socket.mjs";
 import { requestLock, releaseLock, sendHeartbeat, requestLockState, getLock, isHeldByMe } from "../locks.mjs";
 import { NOTE_FONT_KEYS, PIN_STYLES, PICTURE_LAYOUTS, resolveAttachment, resolvePresentation } from "../presentation.mjs";
@@ -278,6 +279,14 @@ export default class NoteEditor {
     }
   }
 
+  /** Empty when a shared note can be sent; otherwise the localized reason to disable the action. */
+  #sharedSendBlockedReason() {
+    if (!game.users.activeGM) return t("JN.Private.NeedGM");
+    const hasOtherUser = [...(game.users ?? [])].some(user => user && user.id !== game.user.id);
+    if (!hasOtherUser && !privateStore.findActive(game.user.id)) return t("JN.Transfer.NoRecipients");
+    return "";
+  }
+
   #attachmentPanel(note) {
     const attachment = resolveAttachment(note);
     const styleOptions = PIN_STYLES.map(key => {
@@ -423,6 +432,7 @@ export default class NoteEditor {
         <input type="checkbox" class="journalinator-torn" ${presentation.torn ? "checked" : ""}>
         ${t("JN.Editor.Torn")}
       </label>`;
+    const sharedSendBlocked = note.secret ? "" : this.#sharedSendBlockedReason();
     const gmTools = note.secret ? `
       <div class="jn-gm-banner">
         <button type="button" class="journalinator-delete" title="${t("JN.Editor.DeletePermanentTitle")}">&#128465;</button>
@@ -452,7 +462,11 @@ export default class NoteEditor {
             ${this.#gmBlockActions(note, block, !block.hidden && !!getLock(note._id, block.blockId))}</div>`).join("") : "")) : ""}
       </div>
       <div class="jn-editor-note-actions">
-        ${note.secret ? `<button type="button" class="journalinator-declassify">${t("JN.Transfer.SendTo")}</button>` : ""}
+        ${note.secret
+          ? `<button type="button" class="journalinator-declassify">${t("JN.Transfer.SendTo")}</button>`
+          : `<button type="button" class="jn-shared-send"${sharedSendBlocked ? " disabled" : ""}${
+            sharedSendBlocked ? ` title="${esc(sharedSendBlocked)}"` : ""
+          }>${t("JN.Transfer.SendTo")}</button>`}
         <button type="button" class="jn-edit-background">${t("JN.Editor.ChangeBackground")}</button>
         <button type="button" class="jn-edit-stamp">${t("JN.Stamp.Add")}</button>
       </div>
@@ -558,6 +572,7 @@ export default class NoteEditor {
     });
 
     this.root.querySelector(".journalinator-declassify")?.addEventListener("click", () => this.#declassifyNote(note));
+    this.root.querySelector(".jn-shared-send")?.addEventListener("click", () => this.callbacks.onSend?.(note._id));
     this.root.querySelector(".jn-edit-background")?.addEventListener("click", () => this.editNoteImage(note._id, true));
     this.root.querySelector(".jn-edit-stamp")?.addEventListener("click", event =>
       this.callbacks.onStamp?.(note._id, event.currentTarget));
