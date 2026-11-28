@@ -4,7 +4,7 @@ import ActivityModel from "./data/activity-model.mjs";
 import HistoryModel from "./data/history-model.mjs";
 import { registerContainerSettings, ensureContainers, registerSidebarHiding } from "./store/containers.mjs";
 import { registerSocket } from "./socket.mjs";
-import { startExpirySweep, startLockResync } from "./locks.mjs";
+import { startEditExpiry, startEditResync } from "./edit-session.mjs";
 import JournalApp, { isRestoringSceneControl } from "./app/journal-app.mjs";
 import { shouldOpenSceneControl } from "./app/scene-control.mjs";
 import { privateStore } from "./store/private-store.mjs";
@@ -110,8 +110,8 @@ Hooks.once("ready", async () => {
     await privateStore.orphanMissingUsers();
   }
   registerSocket();
-  startExpirySweep();
-  startLockResync();
+  startEditExpiry();
+  startEditResync();
   Hooks.callAll("journalinatorRegisterThemes", game.journalinator?.themes);
   Hooks.on("deleteUser", user => {
     if (!game.user.isGM) return;

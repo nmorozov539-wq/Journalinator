@@ -1,6 +1,5 @@
 import { getContainerIds } from "./store/containers.mjs";
 import { MAX_TRANSFER_STORAGE, privateStore } from "./store/private-store.mjs";
-import { CARD_STYLES, seedTilt } from "./styles/registry.mjs";
 import {
   CARD_SIDES, cardPointAnchor, cardPorts, linkAnchors, moveThreadPin, validCardPorts, validLinkPoint
 } from "./card-ports.mjs";
@@ -12,13 +11,15 @@ import {
 import { isLinkColor, normalizeLinkColor } from "./link-colors.mjs";
 import { boardPinRef, normalizePinLink, resolvePin, validPinPosition } from "./board-pins.mjs";
 import { noteImagePath } from "./image-url.mjs";
-import { reconcileTypedLinks } from "./wikilinks.mjs";
-import { maybeSnapshot } from "./snapshots.mjs";
-import { recordActivity, addSessionMarker } from "./stats.mjs";
+import { getLayout, isLayout } from "./layouts/registry.mjs";
+import { isFont, isPaper, seededSkin, tiltForSkin } from "./skins/registry.mjs";
+import { noteSchemaProblem, worldSchemaStatus } from "./store/schema-guard.mjs";
 import {
-  authoritativeRequestLock, authoritativeReleaseLock, authoritativeHeartbeat,
-  authoritativeHolds, authoritativeSnapshot, receiveLockBroadcast, authoritativeLockHolder
-} from "./locks.mjs";
+  applyEditState, applyLeaseChanged, applyPreview, applyRevoked, assertUnlocked, authorityEpoch,
+  authoritySnapshot, broadcastLeaseChanged, broadcastPreview, broadcastRevoked, clientSessionId,
+  consumeLease, getAuthorityPreview, grantLease, heartbeat as heartbeatLease, initializeAuthority,
+  isLeaseValid, leaseFor, noteBodyHash, releaseLease, setAuthorityRevision, setPreview
+} from "./edit-session.mjs";
 import { t } from "./i18n.mjs";
 import {
   MAX_TRANSFER_NOTES, MAX_TRANSFER_TEXT, buildPrivateTransfer, buildSharedTransfer, importPrivateTransfer
@@ -26,9 +27,8 @@ import {
 import { attachedStampIds, DEFAULT_STAMP_CORNER, isStampCorner, stampUrl } from "./stamps.mjs";
 import {
   LINK_ENDS, LINK_MATERIALS, LINK_PATTERNS, LINK_SLACK, LINK_THICKNESS,
-  MAIN_PIN, MAX_CARD_ANCHORS, NOTE_FONT_KEYS, PICTURE_LAYOUTS, PIN_STYLES, PRESENTATION_STYLES,
-  classifyNote, defaultLinkCosmetics, isGeneratedTitle, legacyPresentation, legacyStylePresentation,
-  resolveAttachment, resolvePresentation, sanitizeCardAnchors, stripSecretPrefix
+  MAIN_PIN, MAX_CARD_ANCHORS, PIN_STYLES,
+  defaultLinkCosmetics, resolveAttachment, sanitizeCardAnchors
 } from "./presentation.mjs";
 import {
   MAX_ROUTE_ANCHORS, ROUTE_UNDO_LIMIT, endpointFields, hasBoardPins, hasRouteWaypoints,
@@ -39,11 +39,9 @@ export { sanitizeCardAnchors };
 
 const MODULE_ID = "fvtt-journalinator";
 const CHANNEL = `module.${MODULE_ID}`;
-const CONTRIBUTION_CAP = 2000;
-const MAX_TITLE_LENGTH = 200;
 const MAX_LABEL_LENGTH = 200;
 const MAX_LABEL_TEXT_LENGTH = 500;
-const MAX_BLOCK_LENGTH = 200000;
+const MAX_NOTE_BODY_LENGTH = 200000;
 const MAX_COORDINATE = 1000000;
 const MIN_LABEL_SIZE = 8;
 const MAX_LABEL_SIZE = 96;
@@ -52,25 +50,41 @@ const LINK_LINE_STYLES = new Set(["solid", "dashed"]);
 const LINK_MATERIAL_SET = new Set(LINK_MATERIALS);
 const LINK_PATTERN_SET = new Set(LINK_PATTERNS);
 const LINK_END_SET = new Set(LINK_ENDS);
-const PRESENTATION_STYLE_SET = new Set(PRESENTATION_STYLES);
-const PICTURE_LAYOUT_SET = new Set(PICTURE_LAYOUTS);
-const NOTE_FONT_SET = new Set(NOTE_FONT_KEYS);
 const PIN_STYLE_SET = new Set(PIN_STYLES);
-const PRESENTATION_KEYS = new Set([
-  "extendedStyle", "forceExtended", "font", "pictureLayout", "torn", "heading", "nameGenerated"
-]);
 // `mainPinEnabled` is deliberately absent: the generic attachment batch path must never bypass
 // destructive main-pin redistribution. Shared enabling/disabling goes through setMainPinEnabled.
 const ATTACHMENT_KEYS = new Set(["mainSnapRadius", "minorSnapRadius", "pinStyle"]);
 const DOCUMENT_ID_RE = /^[a-zA-Z0-9]{16}$/;
-const MAX_DECLASSIFIED_BLOCKS = 500;
-const MAX_DECLASSIFIED_LINKS = 200;
 const MAX_NOTE_BATCH = 50;
 const MAX_ANCHOR_ID_LENGTH = 100;
-const MAX_HEADING_LENGTH = 80;
-const MAX_FORMER_NAMES = 20;
+const MAX_REQUEST_ID_LENGTH = 100;
+const MAX_SESSION_ID_LENGTH = 100;
+const MAX_EVENT_IDS = 32;
+const SIZING_WIDTH_MIN = 160;
+const SIZING_WIDTH_MAX = 800;
+const SIZING_MIN_HEIGHT_MIN = 80;
+const SIZING_MIN_HEIGHT_MAX = 1600;
+const SKIN_KEYS = new Set(["paper", "font", "torn", "backgroundImage", "tiltSeed"]);
+const GEOMETRY_KEYS = new Set(["sizing", "autoSizeOrigin", "x", "y"]);
+const SIZING_KEYS = new Set(["mode", "width", "minHeight"]);
+const ORIGIN_KEYS = new Set(["x", "y"]);
 const PIN_UNDO_LIMIT = 20;
 const PIN_REDISTRIBUTION_SNAP = 12;
+
+/** Mutating whole-note protocol commands; all serialized through the GM write queue. */
+const EDIT_COMMAND_TYPES = new Set([
+  "createNote", "beginNoteEdit", "noteEditHeartbeat", "previewNoteBody", "saveNoteBody",
+  "saveNoteAppearance", "endNoteEdit", "forceUnlockNote", "requestNoteEditState"
+]);
+
+/** Targeted reply types resolved by `requestEditReply` before the GM-only gate. */
+const EDIT_REPLY_TYPES = new Set([
+  "noteCreated", "noteCreateRejected", "noteEditGranted", "noteEditDenied",
+  "noteEditHeartbeatAck", "noteSaveAck", "noteSaveRejected", "noteAppearanceAck",
+  "noteAppearanceRejected", "noteEditEnded", "noteEditForced", "noteEditState"
+]);
+
+const pendingEditReplies = new Map();
 
 /**
  * In-memory, per-active-GM undo register for one atomic main-pin redistribution.
@@ -116,15 +130,19 @@ let writeQueue = Promise.resolve();
 let offlineNoticeAt = 0;
 
 function enqueueWrite(message, senderUserId) {
-  writeQueue = writeQueue
+  const task = writeQueue
     .then(() => {
       // A job can outlive the sender's active-GM status during a failover. Dropping it is
       // safer than letting a former GM apply world writes after the new GM takes over.
-      if (game.users.activeGM?.id !== game.user.id) return;
+      if (game.users.activeGM?.id !== game.user.id) return null;
       return handleMessage(message, senderUserId);
     })
-    .catch(err => console.error("Journalinator: write failed", err));
-  return writeQueue;
+    .catch(err => {
+      console.error("Journalinator: write failed", err);
+      return null;
+    });
+  writeQueue = task.then(() => undefined, () => undefined);
+  return task;
 }
 
 /** Tell the user once in a while why their edit did not apply while the board is read-only. */
@@ -135,33 +153,6 @@ function warnNoGM() {
   ui.notifications?.warn(t("JN.TopBar.Offline"));
 }
 
-/**
- * Case-insensitive lookup among live (non-deleted) notes.
- *
- * Everything in this file reads the *shared* journal only — never notesStore, never the vault —
- * even when this client is a GM with secrets unlocked. That is what keeps a player from probing
- * secret titles (a duplicate-title rejection, a typed [[link]] resolving to a hidden note, a
- * free-spot search that avoids hidden cards would each leak one).
- */
-function findNoteByTitle(shared, title, excludeId = null) {
-  const normalized = (title ?? "").trim().toLowerCase();
-  if (!normalized) return null;
-  return shared.pages.find(p =>
-    p.type === `${MODULE_ID}.note` &&
-    p.id !== excludeId &&
-    !p.system.deleted &&
-    (p.name ?? "").trim().toLowerCase() === normalized
-  ) ?? null;
-}
-
-/** `Untitled`, then `Untitled 2`, `Untitled 3`, ... — used when the title is generated, not typed. */
-function uniqueTitle(shared, base) {
-  const stem = (base ?? "").trim() || t("JN.Note.Untitled");
-  if (!findNoteByTitle(shared, stem)) return stem;
-  let suffix = 2;
-  while (findNoteByTitle(shared, `${stem} ${suffix}`)) suffix++;
-  return `${stem} ${suffix}`;
-}
 
 /** Shows a rejection to the requesting user. Socket broadcasts don't echo to the sender. */
 function notifyUser(userId, reason) {
@@ -290,45 +281,6 @@ function cardAnchor(card, id) {
 }
 
 /**
- * Presentation patches are strict: an unknown or malformed key rejects the whole patch instead of
- * silently storing a partially applied style change. Content, label and permissions are untouched.
- */
-export function sanitizePresentationFields(fields) {
-  if (!fields || typeof fields !== "object" || Array.isArray(fields)) return null;
-  if (Object.keys(fields).some(key => !PRESENTATION_KEYS.has(key))) return null;
-  const clean = {};
-  if ("extendedStyle" in fields) {
-    if (!PRESENTATION_STYLE_SET.has(fields.extendedStyle)) return null;
-    clean.extendedStyle = fields.extendedStyle;
-  }
-  if ("forceExtended" in fields) {
-    if (typeof fields.forceExtended !== "boolean") return null;
-    clean.forceExtended = fields.forceExtended;
-  }
-  if ("font" in fields) {
-    if (!NOTE_FONT_SET.has(fields.font)) return null;
-    clean.font = fields.font;
-  }
-  if ("pictureLayout" in fields) {
-    if (!PICTURE_LAYOUT_SET.has(fields.pictureLayout)) return null;
-    clean.pictureLayout = fields.pictureLayout;
-  }
-  if ("torn" in fields) {
-    if (typeof fields.torn !== "boolean") return null;
-    clean.torn = fields.torn;
-  }
-  if ("heading" in fields) {
-    if (typeof fields.heading !== "string" || fields.heading.length > MAX_HEADING_LENGTH) return null;
-    clean.heading = fields.heading.trim();
-  }
-  if ("nameGenerated" in fields) {
-    if (typeof fields.nameGenerated !== "boolean") return null;
-    clean.nameGenerated = fields.nameGenerated;
-  }
-  return Object.keys(clean).length ? clean : null;
-}
-
-/**
  * Attachment patches use the same reject-unknown rule; radii are clamped to their bounds.
  * `mainPinEnabled` is rejected here on purpose: it has a destructive, undoable operation of its
  * own and must not be toggled through the non-transactional generic path.
@@ -448,20 +400,26 @@ function isLiveSharedNotePage(page) {
   return !!page && page.type === `${MODULE_ID}.note` && !page.system.deleted;
 }
 
-/** Layout card plus sensible compact/extended fallback dimensions for redistribution. */
+/**
+ * Layout card plus fallback dimensions for pin/thread projection.
+ *
+ * T10 owns full measured geometry. Until then this reads the v2 manual sizing override,
+ * the legacy stored width/height when present, and otherwise the smallest Plain card.
+ */
 function cardBox(note, card) {
-  const compact = classifyNote(note).mode === "compact";
-  const style = resolvePresentation(note).extendedStyle;
-  const defaults = style === "document"
-    ? { w: 248, h: 320 }
-    : style === "target" ? { w: 250, h: 290 } : { w: 360, h: 240 };
+  const manualWidth = card?.sizing?.mode === "manual" ? card.sizing.width : null;
+  const manualHeight = card?.sizing?.mode === "manual" ? card.sizing.minHeight : null;
+  const width = Number.isFinite(manualWidth) && manualWidth > 0
+    ? manualWidth
+    : Number.isFinite(card?.width) && card.width > 0 ? card.width : 220;
+  const height = Number.isFinite(manualHeight) && manualHeight > 0
+    ? manualHeight
+    : Number.isFinite(card?.height) && card.height > 0 ? card.height : 120;
   return {
     x: Number.isFinite(card?.x) ? card.x : 0,
     y: Number.isFinite(card?.y) ? card.y : 0,
-    w: Number.isFinite(card?.width) && card.width > 0
-      ? card.width : (compact ? 190 : defaults.w),
-    h: Number.isFinite(card?.height) && card.height > 0
-      ? card.height : (compact ? 90 : defaults.h),
+    w: width,
+    h: height,
     rotation: Number.isFinite(card?.rotation) ? card.rotation : 0
   };
 }
@@ -908,35 +866,76 @@ function clampLabelSize(value) {
  */
 export function registerSocket() {
   game.socket.on(CHANNEL, (message, senderUserId) => {
-    if (message.type === "lockUpdate" || message.type === "lockState") {
-      // Only the current active GM owns lock truth. This also rejects a late broadcast from a
-      // former GM arriving just after a failover, which would otherwise resurrect stale locks.
-      if (senderUserId !== game.users.activeGM?.id) return;
-      receiveLockBroadcast(message);
+    const activeGM = game.users.activeGM?.id ?? null;
+
+    // Targeted protocol replies are resolved before the GM-only gate: a player never
+    // handles writes, but it does receive its own acknowledgement.
+    if (EDIT_REPLY_TYPES.has(message.type)) {
+      if (senderUserId !== activeGM) return;
+      if (message.forUserId !== game.user.id) return;
+      if (message.type === "noteEditState") applyEditState(message.notes, message.gmEpoch);
+      resolvePendingEditReply(message);
       return;
     }
+
+    // Authority broadcasts are meaningful only from the current active GM. A late packet
+    // from a former GM must not resurrect a lease or preview after failover.
+    if (message.type === "notePreview") {
+      if (senderUserId !== activeGM) return;
+      applyPreview(message);
+      return;
+    }
+    if (message.type === "noteEditLeaseChanged") {
+      if (senderUserId !== activeGM) return;
+      applyLeaseChanged(message);
+      return;
+    }
+    if (message.type === "noteEditRevoked") {
+      if (senderUserId !== activeGM) return;
+      applyRevoked(message);
+      return;
+    }
+
     if (message.type === "writeRejected") {
-      if (senderUserId !== game.users.activeGM?.id) return;
+      if (senderUserId !== activeGM) return;
       if (message.forUserId === game.user.id) ui.notifications?.warn(message.reason);
       return;
     }
     if (message.type === "writeApplied") {
       // Only the active GM may confirm a write, and only to the requester it names. The local
       // client uses this to commit undo entries; a rejected/rolled-back write sends no such ack.
-      if (senderUserId !== game.users.activeGM?.id) return;
+      if (senderUserId !== activeGM) return;
       if (message.forUserId && message.forUserId !== game.user.id) return;
       Hooks.callAll("journalinatorWriteApplied", message);
       return;
     }
+
     if (!game.user.isGM) return;
-    if (game.users.activeGM?.id !== game.user.id) return;
-    enqueueWrite(message, senderUserId);
+    if (activeGM !== game.user.id) return;
+    const task = enqueueWrite(message, senderUserId);
+    if (EDIT_COMMAND_TYPES.has(message.type) && message.type !== "previewNoteBody") {
+      task.then(reply => sendTargetedReply(reply, senderUserId));
+    }
   });
 }
 
 function layoutPage(shared) {
   const ids = getContainerIds();
   return ids ? shared.pages.get(ids.layoutPage) : null;
+}
+
+/**
+ * UI-SPEC write gate for incompatible stored data.
+ *
+ * One legacy/corrupt note or layout page makes the whole shared journal read-only, not just
+ * the offending page. Reads and state requests stay available. A missing layout page is an
+ * uninitialized fresh world, which `worldSchemaStatus` treats as compatible.
+ */
+function sharedWorldWritable(shared) {
+  return worldSchemaStatus({
+    notes: allSharedNoteList(shared),
+    layout: layoutPage(shared)
+  }).current;
 }
 
 /** Spiral search for a free spot near `(x,y)` that doesn't overlap any existing card (prototype's `free()`). */
@@ -955,220 +954,177 @@ function findFreeSpot(cards, w, h, nearX, nearY) {
   return { x: nearX, y: nearY };
 }
 
-async function createNotePage(shared, {
-  title, kind, style, x, y, authorId, autoTitle = false, presentation, label, attachment, targetHeading
-}) {
-  kind = kind === "location" ? "location" : "note";
-  const styleProvided = typeof style === "string" && Object.hasOwn(CARD_STYLES, style);
-  const defaultStyle = kind === "location" ? "document" : "memo";
-  style = styleProvided ? style : defaultStyle;
-  const defaultTitle = kind === "location" ? t("JN.Note.NewLocationTitle") : t("JN.Note.NewNoteTitle");
-  const typedTitle = (title ?? "").trim();
-  const requestedTitle = typedTitle || defaultTitle;
-  const finalTitle = autoTitle ? uniqueTitle(shared, requestedTitle) : requestedTitle;
+function requestIdOf(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_REQUEST_ID_LENGTH
+    ? value : null;
+}
 
-  if (finalTitle.length > MAX_TITLE_LENGTH) {
-    notifyUser(authorId, t("JN.Socket.TitleTooLong", { max: MAX_TITLE_LENGTH }));
-    return null;
+function sessionIdOf(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_SESSION_ID_LENGTH
+    ? value : null;
+}
+
+/** Stable, non-displayable Foundry page name. Set once at creation and never title-derived. */
+export function notePageName(noteId) {
+  return `jn-note-${String(noteId ?? "")}`;
+}
+
+/** Validates a v2 appearance skin; an invalid value rejects the whole write. */
+function cleanNoteSkin(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (Object.keys(value).some(key => !SKIN_KEYS.has(key))) return null;
+  if (!isPaper(value.paper) || !isFont(value.font)) return null;
+  if (typeof value.torn !== "boolean") return null;
+  if (!Number.isInteger(value.tiltSeed) || value.tiltSeed < 0) return null;
+  let backgroundImage = null;
+  if (value.backgroundImage !== null && value.backgroundImage !== undefined
+      && value.backgroundImage !== "") {
+    if (typeof value.backgroundImage !== "string") return null;
+    backgroundImage = noteImagePath(value.backgroundImage);
+    if (!backgroundImage) return null;
   }
-  if (!autoTitle && findNoteByTitle(shared, finalTitle)) {
-    notifyUser(authorId, t("JN.Socket.TitleTaken", { title: finalTitle }));
-    return null;
-  }
-
-  const layout = layoutPage(shared);
-  const existingCards = layout?.system.cards ?? {};
-  const cardWidth = CARD_STYLES[style]?.defaultWidth ?? 190;
-  const nearX = Number.isFinite(x) ? x : 0;
-  const nearY = Number.isFinite(y) ? y : 0;
-  const spot = findFreeSpot(existingCards, cardWidth, CARD_STYLES[style]?.defaultHeight ?? 90, nearX, nearY);
-
-  // New records start at schema 1, but keep legacy `style`/`targetHeading` so old editor calls and
-  // wikilink/rename logic keep working. A plain new note defaults to automatic Memo (force false);
-  // an explicit style is a creation preset and stays extended. Location is always Document/extended.
-  const baseStyle = styleProvided ? style : "sticky";
-  const presentationPatch = sanitizePresentationFields(presentation) ?? {};
-  const nextPresentation = {
-    ...legacyPresentation({ style: baseStyle, targetHeading }),
-    ...presentationPatch,
-    nameGenerated: "nameGenerated" in presentationPatch
-      ? presentationPatch.nameGenerated
-      : (autoTitle || !typedTitle)
+  return {
+    paper: value.paper,
+    font: value.font,
+    torn: value.torn,
+    backgroundImage,
+    tiltSeed: value.tiltSeed
   };
-  if (kind === "location") {
-    nextPresentation.extendedStyle = "document";
-    nextPresentation.forceExtended = true;
-  }
-  const nextLabel = typeof label === "string" ? label.trim().slice(0, MAX_LABEL_LENGTH) : "";
-  const nextAttachment = resolveAttachment({ system: { attachment } });
-
-  const page = await JournalEntryPage.create({
-    name: finalTitle,
-    type: `${MODULE_ID}.note`,
-    system: {
-      kind,
-      style,
-      schemaVersion: 1,
-      label: nextLabel,
-      presentation: nextPresentation,
-      attachment: nextAttachment,
-      blocks: [{ blockId: foundry.utils.randomID(), text: "", authorId }],
-      authorId,
-      createdAt: Date.now(),
-      updatedAt: Date.now()
-    }
-  }, { parent: shared });
-
-  if (layout) {
-    await layout.update({
-      [`system.cards.${page.id}`]: {
-        x: spot.x,
-        y: spot.y,
-        rotation: seedTilt(style),
-        anchors: {
-          main: { kind: "main", x: MAIN_PIN.x, y: MAIN_PIN.y, createdBy: authorId }
-        }
-      }
-    });
-  }
-  await recordActivity(authorId, { notes: 1 });
-  return page;
-}
-
-/** Re-runs typed-wikilink resolution against `blocks` and saves both blocks and links together. */
-async function reconcileAndSave(shared, page, blocks, senderUserId, extraSystemUpdates = {}) {
-  const layout = layoutPage(shared);
-  const sourceCard = layout?.system.cards[page.id] ?? { x: 0, y: 0 };
-  const existingLinkIds = new Set((page.system.links ?? []).map(link => link.id));
-  const links = await reconcileTypedLinks(page, blocks, {
-    senderUserId,
-    findNoteByTitle: {
-      byId: id => shared.pages.get(id),
-      byTitle: title => findNoteByTitle(shared, title)
-    },
-    createNoteNear: async title => {
-      const existing = findNoteByTitle(shared, title);
-      if (existing) return existing;
-      const page = await createNotePage(shared, {
-        title, style: "sticky", x: sourceCard.x + 220, y: sourceCard.y, authorId: senderUserId
-      });
-      const fallback = page ?? findNoteByTitle(shared, title);
-      if (!fallback) throw new Error(`Journalinator: could not create or resolve "${title}"`);
-      return fallback;
-    }
-  });
-
-  const addedTypedLinks = links.filter(link => link.origin === "typed" && !existingLinkIds.has(link.id)).length;
-  await page.update({
-    "system.blocks": blocks,
-    "system.links": links,
-    "system.updatedAt": Date.now(),
-    ...extraSystemUpdates
-  });
-  await maybeSnapshot(page);
-  if (addedTypedLinks) await recordActivity(senderUserId, { links: addedTypedLinks });
-}
-
-/** Credits added characters (capped per save, spec §12) to whoever just saved. */
-function creditContribution(page, senderUserId, oldText, newText) {
-  const added = Math.max(0, newText.length - oldText.length);
-  const credited = Math.min(CONTRIBUTION_CAP, added);
-  const contributions = { ...(page.system.contributions ?? {}) };
-  contributions[senderUserId] = (contributions[senderUserId] ?? 0) + credited;
-  return { contributions, credited };
 }
 
 /**
- * Validates a declassified note sent by a GM (gmCreateNote). The GM client already knows the
- * content is going public, so this is ordinary hostile-payload validation, not secrecy.
+ * Validates an optional geometry patch. Returns `undefined` when absent, `null` when
+ * invalid, or a normalized object. Invalid geometry must reject before any body write.
  */
-function cleanDeclassifiedNote(shared, message) {
-  if (typeof message.noteId !== "string" || !DOCUMENT_ID_RE.test(message.noteId)) return null;
-  if (shared.pages.get(message.noteId)) return null; // already declassified (idempotent)
-  const title = (message.title ?? "").trim();
-  if (!title || title.length > MAX_TITLE_LENGTH) return null;
-  const kind = message.kind === "location" ? "location" : "note";
-  const style = typeof message.style === "string" && Object.hasOwn(CARD_STYLES, message.style) ? message.style : "sticky";
-  const image = noteImagePath(message.image);
-  const backgroundImage = noteImagePath(message.backgroundImage);
-  const targetHeading = typeof message.targetHeading === "string"
-    ? message.targetHeading.trim().slice(0, MAX_HEADING_LENGTH) : "";
-  const label = typeof message.label === "string"
-    ? message.label.trim().slice(0, MAX_LABEL_LENGTH) : "";
-  const presentation = {
-    ...legacyPresentation({ style, targetHeading }),
-    ...(sanitizePresentationFields(message.presentation) ?? {})
-  };
-  const attachment = resolveAttachment({ system: { attachment: message.attachment } });
-  const formerNames = (Array.isArray(message.formerNames) ? message.formerNames : [])
-    .filter(name => typeof name === "string")
-    .slice(-MAX_FORMER_NAMES)
-    .map(name => name.trim().slice(0, MAX_TITLE_LENGTH))
-    .filter(Boolean);
-
-  if (!Array.isArray(message.blocks) || !message.blocks.length || message.blocks.length > MAX_DECLASSIFIED_BLOCKS) return null;
-  const blocks = [];
-  const blockIds = new Set();
-  for (const block of message.blocks) {
-    if (!block || typeof block.text !== "string" || block.text.length > MAX_BLOCK_LENGTH) return null;
-    const blockId = typeof block.blockId === "string" && DOCUMENT_ID_RE.test(block.blockId) && !blockIds.has(block.blockId)
-      ? block.blockId : foundry.utils.randomID();
-    blockIds.add(blockId);
-    blocks.push({ blockId, text: block.text });
+function cleanGeometry(value) {
+  if (value === undefined || value === null) return undefined;
+  if (!isObject(value) || Object.keys(value).some(key => !GEOMETRY_KEYS.has(key))) return null;
+  const clean = {};
+  if (value.sizing !== undefined) {
+    if (!isObject(value.sizing)
+        || Object.keys(value.sizing).some(key => !SIZING_KEYS.has(key))) return null;
+    const mode = value.sizing.mode;
+    if (mode !== "auto" && mode !== "manual") return null;
+    const width = value.sizing.width ?? null;
+    const minHeight = value.sizing.minHeight ?? null;
+    if (width !== null && (!Number.isFinite(width)
+        || width < SIZING_WIDTH_MIN || width > SIZING_WIDTH_MAX)) return null;
+    if (minHeight !== null && (!Number.isFinite(minHeight)
+        || minHeight < SIZING_MIN_HEIGHT_MIN || minHeight > SIZING_MIN_HEIGHT_MAX)) return null;
+    if (mode === "manual" && (width === null || minHeight === null)) return null;
+    if (mode === "auto" && (width !== null || minHeight !== null)) return null;
+    clean.sizing = { mode, width, minHeight };
   }
-
-  // Link ids are stable data, so keep a declassified link's id when it does not collide with an
-  // id already present anywhere in the shared journal. Collisions regenerate rather than
-  // overwriting another link's identity; declassification is otherwise additive.
-  const existingLinkIds = new Set();
-  for (const page of shared.pages) {
-    if (page.type !== `${MODULE_ID}.note`) continue;
-    for (const link of page.system.links ?? []) existingLinkIds.add(link.id);
+  if (value.autoSizeOrigin !== undefined) {
+    const origin = value.autoSizeOrigin;
+    if (!isObject(origin) || Object.keys(origin).some(key => !ORIGIN_KEYS.has(key))) return null;
+    if (!Number.isFinite(origin.x) || !Number.isFinite(origin.y)) return null;
+    clean.autoSizeOrigin = { x: origin.x, y: origin.y };
   }
-
-  const links = [];
-  for (const link of (Array.isArray(message.links) ? message.links : []).slice(0, MAX_DECLASSIFIED_LINKS)) {
-    const target = shared.pages.get(link?.targetId);
-    if (!target || target.type !== `${MODULE_ID}.note` || target.system.deleted) continue;
-    if (link.targetId === message.noteId || links.some(l => l.targetId === link.targetId)) continue;
-    const preservedId = typeof link.id === "string" && DOCUMENT_ID_RE.test(link.id)
-      && !existingLinkIds.has(link.id) ? link.id : foundry.utils.randomID();
-    existingLinkIds.add(preservedId);
-    const fields = { ...(sanitizeLinkFields(link) ?? {}) };
-    // A declassified payload may originate from legacy vault data. Shared anchor ids and route
-    // waypoints cannot be trusted there (shared pruning is vault-blind), so publish only the
-    // validated point/side fallback.
-    fields.sourceAnchorId = "";
-    fields.targetAnchorId = "";
-    links.push({
-      id: preservedId,
-      targetId: link.targetId,
-      label: "", direction: "one", color: "", lineStyle: "solid",
-      ...defaultLinkCosmetics(),
-      ...fields,
-      ...linkAnchors(link),
-      routeAnchors: [],
-      origin: "drawn",
-      edited: link.edited === true,
-      createdBy: "",
-      hint: link.hint === true
-    });
+  for (const field of ["x", "y"]) {
+    if (value[field] === undefined) continue;
+    if (!Number.isFinite(value[field])) return null;
+    clean[field] = clampCoordinate(value[field]);
   }
+  return clean;
+}
 
-  const card = message.card ?? {};
-  const num = (value, fallback) => Number.isFinite(value) ? value : fallback;
-  const size = value => Number.isFinite(value) && value > 0 ? value : null;
-  return {
-    noteId: message.noteId, title, kind, style, image, backgroundImage, blocks, links,
-    targetHeading, label, presentation, attachment, formerNames,
-    card: {
-      x: clampCoordinate(num(card.x, 0)), y: clampCoordinate(num(card.y, 0)),
-      width: size(card.width), height: size(card.height),
-      rotation: Math.max(-10, Math.min(10, num(card.rotation, 0))),
-      ports: cardPorts(card),
-      anchors: sanitizeCardAnchors(card.anchors)
+function cleanEventIds(value) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > MAX_EVENT_IDS) return null;
+  if (value.some(id => typeof id !== "string" || !id || id.length > 100)) return null;
+  return [...new Set(value)];
+}
+
+/**
+ * Creates a fresh v2 note and its layout card. Body/layout/skin/coordinate validation
+ * happens before any document write. If the card cannot be created, the just-created
+ * page is deleted again so no orphan note survives.
+ */
+async function createV2NotePage(shared, fields, senderUserId, { noteId, source = "create" } = {}) {
+  const id = typeof noteId === "string" && DOCUMENT_ID_RE.test(noteId)
+    ? noteId : foundry.utils.randomID();
+  const body = typeof fields?.body === "string" ? fields.body : null;
+  if (body === null || body.length > MAX_NOTE_BODY_LENGTH) return { error: "invalid" };
+  if (!isLayout(fields?.layout)) return { error: "invalid" };
+  const skin = cleanNoteSkin(fields?.skin);
+  if (!skin) return { error: "invalid" };
+  if (!Number.isFinite(fields?.x) || !Number.isFinite(fields?.y)) return { error: "invalid" };
+
+  const layout = layoutPage(shared);
+  if (!layout) return { error: "invalid" };
+
+  const seeded = seededSkin(skin, id);
+  const now = Date.now();
+  let page;
+  try {
+    page = await JournalEntryPage.create({
+      _id: id,
+      name: notePageName(id),
+      type: `${MODULE_ID}.note`,
+      system: {
+        schemaVersion: 2,
+        body,
+        revision: 0,
+        layout: fields.layout,
+        skin: seeded,
+        attachment: {
+          mainPinEnabled: true,
+          mainSnapRadius: 24,
+          minorSnapRadius: 6,
+          pinStyle: "default"
+        },
+        links: [],
+        authorId: senderUserId,
+        createdAt: now,
+        updatedAt: now,
+        deleted: null,
+        lastSave: null
+      }
+    }, { parent: shared, keepId: true });
+  } catch (err) {
+    console.error("Journalinator: note creation failed", err);
+    return { error: "invalid" };
+  }
+  if (!page) return { error: "invalid" };
+
+  const initialWidth = getLayout(fields.layout).widths[0];
+  const x = clampCoordinate(fields.x);
+  const y = clampCoordinate(fields.y);
+  const card = {
+    x,
+    y,
+    sizing: { mode: "auto", width: null, minHeight: null },
+    // Initial top-center world point. T10 may recompute this on first measurement for
+    // rotated cards; until then the main pin stays stable at this origin.
+    autoSizeOrigin: { x: x + initialWidth / 2, y },
+    rotation: tiltForSkin(seeded),
+    ports: ["right"],
+    anchors: {
+      main: { kind: "main", x: MAIN_PIN.x, y: MAIN_PIN.y, createdBy: senderUserId }
     }
   };
+  try {
+    await layout.update({ [`system.cards.${page.id}`]: card });
+  } catch (err) {
+    console.error("Journalinator: note card creation failed", err);
+    await page.delete().catch(() => {});
+    return { error: "invalid" };
+  }
+
+  // Fired only after both the page and its card exist, so activity can count a real creation.
+  Hooks.callAll("journalinatorNoteCreated", {
+    noteId: page.id,
+    authorId: senderUserId,
+    body,
+    previousBody: "",
+    layout: fields.layout,
+    skin: seeded,
+    revision: 0,
+    source: source === "paste" ? "paste" : "create",
+    createdAt: now
+  });
+  return { page, card, skin: seeded };
 }
 
 /** A pending-transfer id that is not already stored on the private container. */
@@ -1390,16 +1346,11 @@ async function handleMessage(message, senderUserId) {
   const shared = game.journal.get(ids.shared);
   if (!shared) return;
 
-  switch (message.type) {
-    case "createNote": {
-      await createNotePage(shared, {
-        title: message.title, kind: message.kind, style: message.style, x: message.x, y: message.y,
-        authorId: senderUserId, autoTitle: message.autoTitle === true,
-        presentation: message.presentation, label: message.label
-      });
-      return;
-    }
+  if (EDIT_COMMAND_TYPES.has(message.type)) {
+    return handleEditCommand(shared, message, senderUserId);
+  }
 
+  switch (message.type) {
     case "privateCreate": {
       const user = game.users.get(senderUserId);
       if (!user) return;
@@ -1434,211 +1385,24 @@ async function handleMessage(message, senderUserId) {
     }
 
     case "pasteNote": {
-      const title = typeof message.title === "string" ? message.title.trim() : "";
-      if (!title || title.length > MAX_TITLE_LENGTH) {
-        notifyUser(senderUserId, title ? t("JN.Socket.TitleTooLong", { max: MAX_TITLE_LENGTH }) : t("JN.Socket.TitleEmpty"));
+      // Clipboard/publish carries the current v2 payload only. Fresh page, fresh card,
+      // revision 0; no legacy block arrays and no source identity are accepted.
+      if (!sharedWorldWritable(shared)) {
+        notifyUser(senderUserId, "Incompatible note data.");
         return;
       }
-      const texts = Array.isArray(message.blocks) ? message.blocks.slice(0, MAX_DECLASSIFIED_BLOCKS) : [];
-      if (texts.some(text => typeof text !== "string" || text.length > MAX_BLOCK_LENGTH)) return;
-      const kind = message.kind === "location" ? "location" : "note";
-      const style = typeof message.style === "string" && Object.hasOwn(CARD_STYLES, message.style)
-        ? message.style : undefined;
-      const targetHeading = typeof message.targetHeading === "string"
-        ? message.targetHeading.trim().slice(0, 80) : "";
-      const page = await createNotePage(shared, {
-        title, kind, style, x: message.x, y: message.y,
-        authorId: senderUserId, autoTitle: message.autoTitle !== false,
-        presentation: message.presentation, label: message.label,
-        attachment: message.attachment, targetHeading
-      });
-      if (!page) return;
-      const blocks = texts.length
-        ? texts.map(text => ({ blockId: foundry.utils.randomID(), text, authorId: senderUserId }))
-        : [{ blockId: foundry.utils.randomID(), text: "", authorId: senderUserId }];
-      await page.update({
-        "system.blocks": blocks,
-        "system.updatedAt": Date.now(),
-        ...(targetHeading ? { "system.targetHeading": targetHeading } : {})
-      });
-      // A future clipboard may carry the source card's anchor registry. Sanitize it, fold any
-      // legacy/non-canonical main into `main`, and stamp the main creator from the sender rather
-      // than trusting the pasted value. Copied minors may keep their original creator.
-      const pastedAnchors = addMainAnchor(message.card?.anchors ?? message.anchors, senderUserId);
-      const layout = layoutPage(shared);
-      if (layout) {
-        await layout.update({
-          [`system.cards.${page.id}.anchors`]: pastedAnchors
-        });
-      }
-      return;
-    }
-
-    case "renameNote": {
-      const page = shared.pages.get(message.noteId);
-      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
-      const title = (message.title ?? "").trim();
-      if (!title) {
-        notifyUser(senderUserId, t("JN.Socket.TitleEmpty"));
+      const created = await createV2NotePage(shared, {
+        body: message.body, layout: message.layout, skin: message.skin, x: message.x, y: message.y
+      }, senderUserId, { source: "paste" });
+      if (created.error) {
+        notifyUser(senderUserId, "Invalid note payload.");
         return;
       }
-      if (title.length > MAX_TITLE_LENGTH) {
-        notifyUser(senderUserId, t("JN.Socket.TitleTooLong", { max: MAX_TITLE_LENGTH }));
-        return;
-      }
-      if (findNoteByTitle(shared, title, page.id)) {
-        notifyUser(senderUserId, t("JN.Socket.TitleTaken", { title }));
-        return;
-      }
-
-      const oldTitle = (page.name ?? "").trim();
-      const resolved = resolvePresentation(page);
-      const formerNames = [...(page.system.formerNames ?? [])];
-      if (oldTitle && !formerNames.some(name => name.trim().toLowerCase() === oldTitle.toLowerCase())) {
-        formerNames.push(oldTitle);
-      }
-      // Keep former names bounded and never list the current title twice.
-      const nextFormerNames = formerNames
-        .filter(name => name.trim().toLowerCase() !== title.toLowerCase())
-        .slice(-20);
-      const updates = { name: title, "system.formerNames": nextFormerNames, "system.updatedAt": Date.now() };
-      if (!isGeneratedTitle(title)) {
-        const oldBare = stripSecretPrefix(oldTitle).trim();
-        const { label: resolvedLabel, ...presentationFields } = resolved;
-        updates["system.presentation"] = { ...presentationFields, nameGenerated: false };
-        // A meaningful rename also migrates the record. NoteModel defaults schemaVersion to 0,
-        // so reading `page.system.schemaVersion` here would write 0 back on a legacy page.
-        updates["system.schemaVersion"] = 1;
-        if (!resolvedLabel || resolvedLabel === oldBare) {
-          updates["system.label"] = stripSecretPrefix(title).trim();
-        }
-      }
-      await page.update(updates);
+      acknowledgeWriteApplied(senderUserId, { kind: "paste", noteId: created.page.id });
       return;
     }
 
-    case "setNoteKind": {
-      const page = shared.pages.get(message.noteId);
-      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
-      if (!new Set(["note", "location"]).has(message.kind)) return;
-      await page.update({ "system.kind": message.kind, "system.updatedAt": Date.now() });
-      return;
-    }
 
-    case "saveBlock": {
-      const page = shared.pages.get(message.noteId);
-      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
-      if (typeof message.text !== "string" || message.text.length > MAX_BLOCK_LENGTH) return;
-      if (!authoritativeHolds(message.noteId, message.blockId, senderUserId)) return; // doesn't hold the lock — ignore
-      const blocks = page.system.blocks ?? [];
-      const index = blocks.findIndex(b => b.blockId === message.blockId);
-      if (index === -1) return;
-
-      const oldText = blocks[index].text;
-      const nextBlocks = blocks.map((b, i) => i === index ? { ...b, text: message.text, authorId: senderUserId } : b);
-      const { contributions, credited } = creditContribution(page, senderUserId, oldText, message.text);
-
-      await reconcileAndSave(shared, page, nextBlocks, senderUserId, {
-        "system.contributions": contributions,
-        "system.editCount": (page.system.editCount ?? 0) + 1
-      });
-      await recordActivity(senderUserId, { chars: credited });
-      return;
-    }
-
-    case "splitBlock": {
-      const page = shared.pages.get(message.noteId);
-      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
-      if (typeof message.beforeText !== "string" || typeof message.afterText !== "string") return;
-      if (message.beforeText.length + message.afterText.length > MAX_BLOCK_LENGTH) return;
-      if (!authoritativeHolds(message.noteId, message.blockId, senderUserId)) return;
-      const blocks = page.system.blocks ?? [];
-      const index = blocks.findIndex(b => b.blockId === message.blockId);
-      if (index === -1) return;
-
-      const nextBlocks = [...blocks];
-      nextBlocks.splice(index, 1,
-        { ...blocks[index], text: message.beforeText, authorId: senderUserId },
-        { blockId: foundry.utils.randomID(), text: message.afterText, authorId: senderUserId }
-      );
-      await reconcileAndSave(shared, page, nextBlocks, senderUserId, {
-        "system.editCount": (page.system.editCount ?? 0) + 1
-      });
-      return;
-    }
-
-    case "mergeBlockUp": {
-      const page = shared.pages.get(message.noteId);
-      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
-      const blocks = page.system.blocks ?? [];
-      const index = blocks.findIndex(b => b.blockId === message.blockId);
-      if (index <= 0) return; // no previous block to merge into
-      if (message.text !== undefined && (typeof message.text !== "string" || message.text.length > MAX_BLOCK_LENGTH)) return;
-      const prevBlock = blocks[index - 1];
-      if (!authoritativeHolds(message.noteId, message.blockId, senderUserId)) return;
-      if (!authoritativeHolds(message.noteId, prevBlock.blockId, senderUserId)) return; // needs both locks (spec §6.4)
-      const currentText = message.text ?? blocks[index].text;
-
-      const nextBlocks = blocks.filter((_, i) => i !== index);
-      nextBlocks[index - 1] = { ...prevBlock, text: prevBlock.text + currentText, authorId: senderUserId };
-      await reconcileAndSave(shared, page, nextBlocks, senderUserId, {
-        "system.editCount": (page.system.editCount ?? 0) + 1
-      });
-      return;
-    }
-
-    case "requestLock": authoritativeRequestLock(message.noteId, message.blockId, senderUserId); return;
-    case "releaseLock": authoritativeReleaseLock(message.noteId, message.blockId, senderUserId); return;
-    case "heartbeat": authoritativeHeartbeat(message.noteId, message.blockId, senderUserId); return;
-    case "requestLockState": {
-      const snapshot = authoritativeSnapshot();
-      game.socket.emit(CHANNEL, { type: "lockState", locks: snapshot });
-      return;
-    }
-
-    case "setNoteStyle": {
-      const page = shared.pages.get(message.noteId);
-      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
-      if (typeof message.style !== "string" || !Object.hasOwn(CARD_STYLES, message.style)) return;
-      if (message.kind !== undefined && !["note", "location"].includes(message.kind)) return;
-      const resolved = resolvePresentation(page);
-      const { label: _ignored, ...presentationFields } = resolved;
-      // Legacy editor calls still store `style`; mirror it into the explicit presentation block so
-      // the new canvas does not have to infer the renderer, and mark the record as migrated.
-      await page.update({
-        "system.style": message.style,
-        "system.schemaVersion": 1,
-        "system.presentation": {
-          ...presentationFields,
-          ...legacyStylePresentation(message.style)
-        },
-        ...(message.kind ? { "system.kind": message.kind } : {})
-      });
-      return;
-    }
-
-    case "setNotePresentation": {
-      const pages = liveSharedNotePages(shared, message.noteIds);
-      const fields = sanitizePresentationFields(message.fields);
-      if (!pages || !fields) return;
-      // `forceExtended` widens one card's renderer and is a single-note control only. A batch
-      // (or duplicate ids standing in for one) is rejected outright, never silently stripped.
-      if ("forceExtended" in fields && (pages.length !== 1 || message.noteIds.length !== 1)) return;
-      for (const page of pages) {
-        // Base on the resolved record, not just the stored block: a partial patch on a legacy
-        // note must keep its legacy style/force/torn instead of dropping them.
-        const resolved = resolvePresentation(page);
-        const { label: _ignored, ...existing } = resolved;
-        const updates = {
-          "system.presentation": { ...existing, ...fields },
-          "system.schemaVersion": 1
-        };
-        // An explicitly empty heading clears the legacy key too; an absent heading leaves it alone.
-        if (fields.heading === "") updates["system.targetHeading"] = "";
-        await page.update(updates);
-      }
-      return;
-    }
 
     case "setNoteAttachment": {
       // Phase 5 owns destructive main-pin redistribution and its undo. Until then this handler
@@ -1650,49 +1414,12 @@ async function handleMessage(message, senderUserId) {
         const existing = page.system.attachment && typeof page.system.attachment === "object"
           ? page.system.attachment : {};
         await page.update({
-          "system.attachment": { ...existing, ...fields },
-          "system.schemaVersion": 1
+          "system.attachment": { ...existing, ...fields }
         });
       }
       return;
     }
 
-    case "setNoteLabel": {
-      const page = shared.pages.get(message.noteId);
-      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
-      if (typeof message.label !== "string") return;
-      // The optional label is separate from the internal Foundry name; never rename the page here.
-      await page.update({
-        "system.label": message.label.trim().slice(0, MAX_LABEL_LENGTH),
-        "system.schemaVersion": 1
-      });
-      return;
-    }
-
-    case "setTargetHeading": {
-      const page = shared.pages.get(message.noteId);
-      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
-      if (typeof message.heading !== "string" || message.heading.length > 80) return;
-      const heading = message.heading.trim();
-      const resolved = resolvePresentation(page);
-      const { label: _ignored, ...presentationFields } = resolved;
-      await page.update({
-        "system.targetHeading": heading,
-        "system.presentation": { ...presentationFields, heading },
-        "system.schemaVersion": 1
-      });
-      return;
-    }
-
-    case "setNoteImage": {
-      const page = shared.pages.get(message.noteId);
-      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
-      const image = noteImagePath(message.image);
-      if (message.image !== null && !image) return;
-      const field = message.background === true ? "system.backgroundImage" : "system.image";
-      await page.update({ [field]: image });
-      return;
-    }
 
     case "moveCard": {
       const note = shared.pages.get(message.noteId);
@@ -2661,7 +2388,6 @@ async function handleMessage(message, senderUserId) {
           ...originalTargetAnchors, [targetPlan.anchorId]: targetPlan.anchor
         };
       }
-      const addedNewLink = existing === -1;
       try {
         if (Object.keys(layoutChanges).length) await layout.update(layoutChanges);
         await page.update({ "system.links": links });
@@ -2675,7 +2401,6 @@ async function handleMessage(message, senderUserId) {
         return;
       }
       if (existing !== -1) await pruneSharedAnchors(shared, layout, { noteId: page.id, links });
-      if (addedNewLink) await recordActivity(senderUserId, { links: 1 });
       return;
     }
 
@@ -2732,33 +2457,6 @@ async function handleMessage(message, senderUserId) {
       return;
     }
 
-    case "newLinkedNote": {
-      const sourcePage = shared.pages.get(message.sourceId);
-      if (!sourcePage || sourcePage.type !== `${MODULE_ID}.note` || sourcePage.system.deleted) return;
-      const layout = layoutPage(shared);
-      const sourceCard = layout?.system.cards[message.sourceId] ?? { x: 0, y: 0 };
-      const newPage = await createNotePage(shared, {
-        title: message.title ?? t("JN.Note.Untitled"), style: message.style, autoTitle: message.autoTitle === true,
-        x: sourceCard.x + 220, y: sourceCard.y, authorId: senderUserId
-      });
-      if (!newPage) return;
-      const links = [...(sourcePage.system.links ?? []), {
-        id: foundry.utils.randomID(),
-        targetId: newPage.id,
-        ...defaultLinkCosmetics(),
-        routeAnchors: [],
-        label: "",
-        direction: "one",
-        color: "",
-        lineStyle: "solid",
-        origin: "drawn",
-        edited: false,
-        createdBy: senderUserId
-      }];
-      await sourcePage.update({ "system.links": links });
-      await recordActivity(senderUserId, { links: 1 });
-      return;
-    }
 
     case "deleteNote": {
       const page = shared.pages.get(message.noteId);
@@ -2800,32 +2498,41 @@ async function handleMessage(message, senderUserId) {
             || page.system.deleted.undoId !== message.undoId || page.system.deleted.by !== senderUserId)) return;
       const layout = layoutPage(shared);
       const lastCard = page.system.deleted.lastCard;
+      const cardSize = card => {
+        const width = card?.sizing?.mode === "manual" ? card.sizing.width : card?.width;
+        const height = card?.sizing?.mode === "manual" ? card.sizing.minHeight : card?.height;
+        return {
+          w: Number.isFinite(width) && width > 0 ? width : 220,
+          h: Number.isFinite(height) && height > 0 ? height : 120
+        };
+      };
       let spot;
       if (layout && lastCard) {
         const cards = layout.system.cards ?? {};
-        const w = lastCard.width ?? 190, h = lastCard.height ?? 90;
+        const { w, h } = cardSize(lastCard);
         const occupied = Object.values(cards).some(c => {
-          const cw = c.width ?? 200, ch = c.height ?? 90;
-          return !(lastCard.x + w + 16 < c.x || lastCard.x > c.x + cw + 16 || lastCard.y + h + 16 < c.y || lastCard.y > c.y + ch + 16);
+          const size = cardSize(c);
+          return !(lastCard.x + w + 16 < c.x || lastCard.x > c.x + size.w + 16
+            || lastCard.y + h + 16 < c.y || lastCard.y > c.y + size.h + 16);
         });
         spot = occupied ? findFreeSpot(cards, w, h, lastCard.x, lastCard.y) : { x: lastCard.x, y: lastCard.y };
       } else {
-        spot = findFreeSpot(layout?.system.cards ?? {}, 190, 90, 0, 0);
+        spot = findFreeSpot(layout?.system.cards ?? {}, 220, 120, 0, 0);
       }
 
-      const oldTitle = (page.name ?? "").trim();
-      const restoredTitle = findNoteByTitle(shared, oldTitle, page.id)
-        ? uniqueTitle(shared, oldTitle)
-        : page.name;
-      const restoreUpdate = { "system.deleted": null };
-      if (restoredTitle !== page.name) restoreUpdate.name = restoredTitle;
-      await page.update(restoreUpdate);
+      // The Foundry page name is a permanent `jn-note-<id>` value; restore never renames it.
+      await page.update({ "system.deleted": null });
       if (layout) {
         // Copy the whole stored card back instead of hand-picking geometry, so anchor registries
         // (and any future card fields) survive a trash/restore roundtrip.
         const restoredCard = lastCard
           ? { ...foundry.utils.deepClone(lastCard), x: spot.x, y: spot.y, ports: cardPorts(lastCard) }
-          : { x: spot.x, y: spot.y, width: null, height: null, rotation: 0, ports: cardPorts(lastCard) };
+          : {
+            x: spot.x, y: spot.y,
+            sizing: { mode: "auto", width: null, minHeight: null },
+            autoSizeOrigin: { x: spot.x + 110, y: spot.y },
+            rotation: 0, ports: cardPorts(lastCard)
+          };
         // Restoring an old main pin must not reattach a main the note had deliberately disabled.
         // Stored anchors (including a retained main) are copied; only a missing main is invented
         // when the attachment still wants one.
@@ -2861,152 +2568,630 @@ async function handleMessage(message, senderUserId) {
       return;
     }
 
-    // --- GM tier (spec §14). Hidden content never arrives here: these messages only carry
-    // content at the moment it becomes public (declassification) or remove shared content.
+  }
+}
 
-    case "gmInsertBlock": {
-      if (!senderIsGM(senderUserId)) return;
-      const page = shared.pages.get(message.noteId);
-      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
-      const block = message.block;
-      if (!block || typeof block.text !== "string" || block.text.length > MAX_BLOCK_LENGTH) return;
-      if (typeof block.blockId !== "string" || !DOCUMENT_ID_RE.test(block.blockId)) return;
-      const blocks = page.system.blocks ?? [];
-      if (blocks.some(b => b.blockId === block.blockId)) return; // already declassified
-      let index = typeof message.beforeBlockId === "string"
-        ? blocks.findIndex(b => b.blockId === message.beforeBlockId)
-        : -1;
-      if (index === -1) index = blocks.length;
-      const nextBlocks = [...blocks];
-      nextBlocks.splice(index, 0, { blockId: block.blockId, text: block.text, authorId: senderUserId });
-      await reconcileAndSave(shared, page, nextBlocks, senderUserId, {
-        "system.editCount": (page.system.editCount ?? 0) + 1
+// --- Whole-note edit protocol ---------------------------------------------------------------
+
+function publicLeaseFor(noteId) {
+  return authoritySnapshot(noteId)[0]?.lease ?? null;
+}
+
+function replyBase(requestId, senderUserId, noteId) {
+  return { requestId, forUserId: senderUserId, noteId };
+}
+
+function rejectedBody(requestId, senderUserId, noteId, reason, revision, receipt) {
+  return {
+    type: "noteSaveRejected",
+    ...replyBase(requestId, senderUserId, noteId),
+    reason,
+    revision: Number.isInteger(revision) ? revision : 0,
+    ...(receipt ? { receipt } : {})
+  };
+}
+
+function notePageIn(shared, noteId) {
+  if (typeof noteId !== "string") return null;
+  const page = shared.pages.get(noteId);
+  return page?.type === `${MODULE_ID}.note` ? page : null;
+}
+
+/** The verified socket sender must be the lease's user; a payload `userId` proves nothing. */
+function senderOwnsLease(lease, senderUserId) {
+  return !!lease && typeof lease === "object" && lease.userId === senderUserId;
+}
+
+async function applyGeometryPatch(layout, noteId, geometry) {
+  const changes = {};
+  if (geometry.sizing) changes[`system.cards.${noteId}.sizing`] = geometry.sizing;
+  if (geometry.autoSizeOrigin) changes[`system.cards.${noteId}.autoSizeOrigin`] = geometry.autoSizeOrigin;
+  for (const field of ["x", "y"]) {
+    if (geometry[field] !== undefined) changes[`system.cards.${noteId}.${field}`] = geometry[field];
+  }
+  if (Object.keys(changes).length) await layout.update(changes);
+}
+
+async function handleCreateNote(shared, message, senderUserId) {
+  const requestId = requestIdOf(message.requestId) ?? foundry.utils.randomID();
+  if (!sharedWorldWritable(shared)) {
+    return {
+      type: "noteCreateRejected",
+      ...replyBase(requestId, senderUserId, null),
+      reason: "incompatible"
+    };
+  }
+  const created = await createV2NotePage(shared, message, senderUserId);
+  if (created.error) {
+    return {
+      type: "noteCreateRejected",
+      ...replyBase(requestId, senderUserId, null),
+      reason: created.error
+    };
+  }
+
+  const { page, card, skin } = created;
+  const reply = {
+    type: "noteCreated",
+    ...replyBase(requestId, senderUserId, page.id),
+    revision: 0,
+    body: page.system.body,
+    layout: page.system.layout,
+    skin,
+    card,
+    authorId: page.system.authorId,
+    createdAt: page.system.createdAt,
+    updatedAt: page.system.updatedAt,
+    attachment: deepClone(page.system.attachment ?? null),
+    links: deepClone(page.system.links ?? []),
+    deleted: page.system.deleted ?? false,
+    lastSave: page.system.lastSave ? deepClone(page.system.lastSave) : null
+  };
+
+  if (message.requestEdit === true) {
+    const session = sessionIdOf(message.clientSessionId) ?? requestId;
+    const user = game.users.get(senderUserId);
+    const grant = grantLease({
+      noteId: page.id,
+      userId: senderUserId,
+      userName: user?.name ?? "",
+      userColor: user?.color ?? "",
+      clientSessionId: session,
+      requestId,
+      revision: 0
+    });
+    if (grant.lease) {
+      reply.lease = grant.lease;
+      reply.expiresAt = grant.expiresAt;
+      broadcastLeaseChanged(page.id, publicLeaseFor(page.id), null, authorityEpoch());
+      Hooks.callAll("journalinatorNoteEditBegan", {
+        noteId: page.id,
+        authorId: senderUserId,
+        revision: 0,
+        body: page.system.body
       });
-      return;
-    }
-
-    case "gmRemoveBlock": {
-      if (!senderIsGM(senderUserId)) return;
-      const page = shared.pages.get(message.noteId);
-      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
-      const blocks = page.system.blocks ?? [];
-      if (!blocks.some(b => b.blockId === message.blockId)) return;
-      if (blocks.length <= 1) {
-        notifyUser(senderUserId, t("JN.Socket.LastBlockHidden"));
-        return;
-      }
-      const holder = authoritativeLockHolder(message.noteId, message.blockId);
-      if (holder && holder !== senderUserId) {
-        notifyUser(senderUserId, t("JN.Socket.LockedByOther"));
-        return;
-      }
-      await reconcileAndSave(shared, page, blocks.filter(b => b.blockId !== message.blockId), senderUserId);
-      return;
-    }
-
-    case "gmCreateNote": {
-      if (!senderIsGM(senderUserId)) return;
-      const note = cleanDeclassifiedNote(shared, message);
-      if (!note) return;
-      if (findNoteByTitle(shared, note.title)) {
-        notifyUser(senderUserId, t("JN.Socket.DeclassifyTitleTaken", { title: note.title }));
-        return;
-      }
-      const page = await JournalEntryPage.create({
-        _id: note.noteId,
-        name: note.title,
-        type: `${MODULE_ID}.note`,
-        system: {
-          kind: note.kind === "location" ? "location" : "note",
-          style: note.style,
-          targetHeading: note.targetHeading,
-          schemaVersion: 1,
-          label: note.label,
-          presentation: note.presentation,
-          attachment: note.attachment,
-          image: note.image,
-          backgroundImage: note.backgroundImage,
-          blocks: note.blocks.map(b => ({ ...b, authorId: senderUserId })),
-          links: note.links,
-          formerNames: note.formerNames ?? [],
-          authorId: senderUserId,
-          createdAt: Date.now(),
-          updatedAt: Date.now()
-        }
-      }, { parent: shared, keepId: true });
-      if (!page) return;
-      const layout = layoutPage(shared);
-      if (layout) {
-        await layout.update({
-          [`system.cards.${page.id}`]: {
-            ...note.card,
-            anchors: addMainAnchor(note.card.anchors ?? {}, senderUserId)
-          }
-        });
-      }
-      // Typed [[links]] in the now-public text resolve in the shared namespace only.
-      await reconcileAndSave(shared, page, page.system.blocks, senderUserId);
-      return;
-    }
-
-    case "gmAddLink": {
-      if (!senderIsGM(senderUserId)) return;
-      const page = shared.pages.get(message.sourceId);
-      const target = shared.pages.get(message.link?.targetId);
-      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
-      if (!target || target.type !== `${MODULE_ID}.note` || target.system.deleted) return;
-      if (page.id === target.id) return;
-      const links = [...(page.system.links ?? [])];
-      if (links.some(link => link.targetId === target.id)) return;
-      links.push({
-        id: foundry.utils.randomID(),
-        targetId: target.id,
-        label: "", direction: "one", color: "", lineStyle: "solid",
-        ...defaultLinkCosmetics(),
-        ...sanitizeLinkFields(message.link),
-        ...linkAnchors(message.link),
-        // This path copies a GM-only/declassified link into public data. Its endpoint anchor ids
-        // may be legacy vault references that shared pruning cannot see; keep only the fallback.
-        sourceAnchorId: "",
-        targetAnchorId: "",
-        routeAnchors: sanitizeSharedRouteAnchors(shared, message.link?.routeAnchors, page.id),
-        origin: "drawn",
-        edited: true,
-        createdBy: senderUserId,
-        hint: message.link?.hint === true
-      });
-      await page.update({ "system.links": links });
-      return;
-    }
-
-    case "gmSetHint": {
-      if (!senderIsGM(senderUserId)) return;
-      const page = shared.pages.get(message.noteId);
-      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
-      if (typeof message.hint !== "boolean") return;
-      await page.update({ "system.hint": message.hint });
-      return;
-    }
-
-    case "gmSetLinkHint": {
-      if (!senderIsGM(senderUserId)) return;
-      const page = shared.pages.get(message.noteId);
-      if (!page || page.type !== `${MODULE_ID}.note` || page.system.deleted) return;
-      if (typeof message.hint !== "boolean") return;
-      const links = page.system.links ?? [];
-      if (!links.some(link => link.id === message.linkId)) return;
-      await page.update({
-        "system.links": links.map(link => link.id === message.linkId ? { ...link, hint: message.hint } : link)
-      });
-      return;
-    }
-
-    case "addSessionMarker": {
-      if (!game.users.get(senderUserId)?.isGM) return; // only the GM adds session markers (spec §10)
-      await addSessionMarker(message.label);
-      return;
     }
   }
+  return reply;
+}
+
+async function handleBeginNoteEdit(shared, message, senderUserId) {
+  const requestId = requestIdOf(message.requestId) ?? foundry.utils.randomID();
+  const deny = (reason, extra = {}) => ({
+    type: "noteEditDenied",
+    ...replyBase(requestId, senderUserId, message.noteId),
+    reason,
+    ...extra
+  });
+
+  if (!sharedWorldWritable(shared)) return deny("incompatible");
+  if (typeof message.noteId !== "string") return deny("missing");
+  const page = notePageIn(shared, message.noteId);
+  if (!page) return deny("missing");
+  const problem = noteSchemaProblem(page);
+  if (problem) return deny("incompatible");
+  if (page.system.deleted) return deny("trashed");
+
+  const session = sessionIdOf(message.clientSessionId);
+  if (!session) return deny("invalid");
+  const user = game.users.get(senderUserId);
+  if (!user) return deny("invalid");
+
+  const grant = grantLease({
+    noteId: page.id,
+    userId: senderUserId,
+    userName: user.name ?? "",
+    userColor: user.color ?? "",
+    clientSessionId: session,
+    requestId,
+    revision: page.system.revision
+  });
+  if (!grant.lease) {
+    return deny(grant.reason ?? "locked", grant.holder ? { holder: grant.holder } : {});
+  }
+
+  setAuthorityRevision(page.id, page.system.revision);
+  if (!grant.existing) {
+    broadcastLeaseChanged(page.id, publicLeaseFor(page.id), null, authorityEpoch());
+    Hooks.callAll("journalinatorNoteEditBegan", {
+      noteId: page.id,
+      authorId: senderUserId,
+      revision: page.system.revision,
+      body: page.system.body
+    });
+  }
+
+  return {
+    type: "noteEditGranted",
+    ...replyBase(requestId, senderUserId, page.id),
+    lease: grant.lease,
+    revision: page.system.revision,
+    body: page.system.body,
+    layout: page.system.layout,
+    skin: page.system.skin,
+    deleted: false,
+    lastSave: page.system.lastSave ?? null,
+    expiresAt: grant.expiresAt
+  };
+}
+
+function handleNoteHeartbeat(shared, message, senderUserId) {
+  const requestId = requestIdOf(message.requestId) ?? foundry.utils.randomID();
+  const lease = message.lease;
+  const result = senderOwnsLease(lease, senderUserId)
+    ? heartbeatLease(lease)
+    : { ok: false, reason: "leaseLost" };
+  if (!result.ok) {
+    if (lease && typeof lease.noteId === "string") {
+      // A stale heartbeat (same user's old tab, or a token superseded by force/re-grant)
+      // must not clear a newer authoritative lease from every client mirror. Only revoke
+      // when authority has no lease left or still holds exactly this lease.
+      const current = leaseFor(lease.noteId);
+      const authorityGone = !current
+        || (current.leaseToken === lease.leaseToken
+          && current.clientSessionId === lease.clientSessionId
+          && current.userId === lease.userId);
+      if (authorityGone) {
+        const page = notePageIn(shared, lease.noteId);
+        broadcastRevoked({
+          noteId: lease.noteId,
+          leaseToken: lease.leaseToken,
+          gmEpoch: lease.gmEpoch,
+          reason: result.reason === "failover" ? "failover" : "expired",
+          revision: page?.system?.revision ?? 0
+        });
+        broadcastLeaseChanged(lease.noteId, null, null, authorityEpoch());
+      }
+    }
+    return null;
+  }
+
+  const page = notePageIn(shared, lease.noteId);
+  if (!page || page.system.deleted) {
+    broadcastRevoked({
+      noteId: lease.noteId,
+      leaseToken: lease.leaseToken,
+      gmEpoch: lease.gmEpoch,
+      reason: "ended",
+      revision: page?.system?.revision ?? 0
+    });
+    return null;
+  }
+  setAuthorityRevision(page.id, page.system.revision);
+  return {
+    type: "noteEditHeartbeatAck",
+    ...replyBase(requestId, senderUserId, page.id),
+    leaseToken: lease.leaseToken,
+    gmEpoch: authorityEpoch(),
+    revision: page.system.revision,
+    expiresAt: result.expiresAt
+  };
+}
+
+function handlePreview(shared, message, senderUserId) {
+  const lease = message.lease;
+  if (!senderOwnsLease(lease, senderUserId)) return null;
+  const result = setPreview(lease, message.sequence, message.body);
+  if (!result.ok) return null;
+  const page = notePageIn(shared, lease.noteId);
+  if (!page || page.system.deleted) return null;
+  broadcastPreview(result.preview, senderUserId);
+  return null;
+}
+
+async function performBodySave(shared, message, senderUserId) {
+  const requestId = requestIdOf(message.requestId) ?? foundry.utils.randomID();
+  const noteId = message.noteId;
+  const page = notePageIn(shared, noteId);
+  if (!sharedWorldWritable(shared)) {
+    return rejectedBody(requestId, senderUserId, noteId, "incompatible", page?.system.revision ?? 0);
+  }
+  if (!page) return rejectedBody(requestId, senderUserId, noteId, "missing", 0);
+  const problem = noteSchemaProblem(page);
+  if (problem) return rejectedBody(requestId, senderUserId, noteId, "incompatible", page.system.revision ?? 0);
+  if (page.system.deleted) return rejectedBody(requestId, senderUserId, noteId, "trashed", page.system.revision ?? 0);
+
+  const lease = message.lease;
+  if (!isLeaseValid(lease) || !senderOwnsLease(lease, senderUserId)) {
+    return rejectedBody(requestId, senderUserId, noteId, "leaseLost", page.system.revision ?? 0,
+      page.system.lastSave ?? undefined);
+  }
+
+  const sequence = message.sequence;
+  const baseRevision = message.baseRevision;
+  const body = message.body;
+  if (!Number.isInteger(sequence) || sequence < 0) {
+    return rejectedBody(requestId, senderUserId, noteId, "invalid", page.system.revision ?? 0);
+  }
+  if (!Number.isInteger(baseRevision) || baseRevision < 0) {
+    return rejectedBody(requestId, senderUserId, noteId, "invalid", page.system.revision ?? 0);
+  }
+  if (typeof body !== "string") {
+    return rejectedBody(requestId, senderUserId, noteId, "invalid", page.system.revision ?? 0);
+  }
+  if (body.length > MAX_NOTE_BODY_LENGTH) {
+    return rejectedBody(requestId, senderUserId, noteId, "tooLarge", page.system.revision ?? 0);
+  }
+  const eventIds = cleanEventIds(message.eventIds);
+  if (eventIds === null) {
+    return rejectedBody(requestId, senderUserId, noteId, "invalid", page.system.revision ?? 0);
+  }
+  const geometry = cleanGeometry(message.geometry);
+  if (geometry === null) {
+    return rejectedBody(requestId, senderUserId, noteId, "invalid", page.system.revision ?? 0);
+  }
+  const layout = geometry ? layoutPage(shared) : null;
+  if (geometry && (!layout || !layout.system.cards?.[noteId])) {
+    return rejectedBody(requestId, senderUserId, noteId, "invalid", page.system.revision ?? 0);
+  }
+
+  const bodyHash = noteBodyHash(body);
+  const currentRevision = page.system.revision ?? 0;
+  const previousBody = page.system.body ?? "";
+  const last = page.system.lastSave;
+
+  if (last && last.requestId === requestId
+      && last.clientSessionId === lease.clientSessionId
+      && last.sequence === sequence
+      && last.bodyHash === bodyHash) {
+    return {
+      type: "noteSaveAck",
+      ...replyBase(requestId, senderUserId, noteId),
+      leaseToken: lease.leaseToken,
+      gmEpoch: authorityEpoch(),
+      revision: last.revision,
+      sequence: last.sequence,
+      bodyHash: last.bodyHash,
+      acceptedAt: last.at,
+      receipt: last
+    };
+  }
+
+  if (last && last.clientSessionId === lease.clientSessionId
+      && Number.isInteger(last.sequence) && sequence < last.sequence) {
+    return rejectedBody(requestId, senderUserId, noteId, "sequenceOutOfOrder", currentRevision, last);
+  }
+
+  if (body === previousBody) {
+    return {
+      type: "noteSaveAck",
+      ...replyBase(requestId, senderUserId, noteId),
+      leaseToken: lease.leaseToken,
+      gmEpoch: authorityEpoch(),
+      revision: currentRevision,
+      sequence,
+      bodyHash,
+      acceptedAt: Date.now(),
+      ...(last ? { receipt: last } : {})
+    };
+  }
+
+  if (baseRevision !== currentRevision) {
+    return rejectedBody(requestId, senderUserId, noteId, "staleRevision", currentRevision, last ?? undefined);
+  }
+
+  const revision = currentRevision + 1;
+  const acceptedAt = Date.now();
+  const saveIdentity = {
+    requestId,
+    clientSessionId: lease.clientSessionId,
+    sequence,
+    revision,
+    bodyHash,
+    at: acceptedAt,
+    eventIds
+  };
+  try {
+    if (geometry) await applyGeometryPatch(layout, noteId, geometry);
+    await page.update({
+      "system.body": body,
+      "system.revision": revision,
+      "system.updatedAt": acceptedAt,
+      "system.lastSave": saveIdentity
+    });
+  } catch (err) {
+    console.error("Journalinator: note body save failed", err);
+    return rejectedBody(requestId, senderUserId, noteId, "invalid", page.system.revision ?? currentRevision);
+  }
+
+  setAuthorityRevision(noteId, revision);
+  Hooks.callAll("journalinatorNoteSaved", {
+    noteId,
+    page,
+    previousBody,
+    body,
+    previousRevision: currentRevision,
+    revision,
+    authorId: senderUserId,
+    saveIdentity
+  });
+  return {
+    type: "noteSaveAck",
+    ...replyBase(requestId, senderUserId, noteId),
+    leaseToken: lease.leaseToken,
+    gmEpoch: authorityEpoch(),
+    revision,
+    sequence,
+    bodyHash,
+    acceptedAt,
+    receipt: saveIdentity
+  };
+}
+
+async function handleAppearanceSave(shared, message, senderUserId) {
+  const requestId = requestIdOf(message.requestId) ?? foundry.utils.randomID();
+  const noteId = message.noteId;
+  const reject = reason => ({
+    type: "noteAppearanceRejected",
+    ...replyBase(requestId, senderUserId, noteId),
+    reason
+  });
+  if (!sharedWorldWritable(shared)) return reject("incompatible");
+  const page = notePageIn(shared, noteId);
+  if (!page) return reject("missing");
+  if (noteSchemaProblem(page)) return reject("incompatible");
+  if (page.system.deleted) return reject("trashed");
+  if (!isLeaseValid(message.lease) || !senderOwnsLease(message.lease, senderUserId)) {
+    return reject("leaseLost");
+  }
+  if (!isLayout(message.layout)) return reject("invalid");
+  const skin = cleanNoteSkin(message.skin);
+  if (!skin) return reject("invalid");
+
+  const updatedAt = Date.now();
+  try {
+    await page.update({
+      "system.layout": message.layout,
+      "system.skin": skin,
+      "system.updatedAt": updatedAt
+    });
+  } catch (err) {
+    console.error("Journalinator: note appearance save failed", err);
+    return reject("invalid");
+  }
+  return {
+    type: "noteAppearanceAck",
+    ...replyBase(requestId, senderUserId, noteId),
+    layout: message.layout,
+    skin,
+    updatedAt
+  };
+}
+
+async function handleEndNoteEdit(shared, message, senderUserId) {
+  const requestId = requestIdOf(message.requestId) ?? foundry.utils.randomID();
+  const page = notePageIn(shared, message.noteId);
+  const lease = message.lease;
+  const ended = (revision, saved, released) => ({
+    type: "noteEditEnded",
+    ...replyBase(requestId, senderUserId, message.noteId),
+    revision,
+    saved,
+    released
+  });
+  if (!page) return ended(0, false, false);
+  if (noteSchemaProblem(page)) {
+    return {
+      type: "noteEditEnded",
+      ...replyBase(requestId, senderUserId, message.noteId),
+      revision: page.system.revision ?? 0,
+      saved: false,
+      released: false
+    };
+  }
+  if (!isLeaseValid(lease) || !senderOwnsLease(lease, senderUserId)) {
+    return ended(page.system.revision ?? 0, false, false);
+  }
+
+  const priorRevision = page.system.revision ?? 0;
+  let saved = false;
+  if (message.body !== undefined) {
+    const flush = await performBodySave(shared, {
+      ...message,
+      requestId,
+      sequence: message.sequence ?? 0,
+      baseRevision: message.baseRevision ?? priorRevision
+    }, senderUserId);
+    if (flush.type === "noteSaveRejected") return flush;
+    saved = flush.revision > priorRevision;
+  }
+
+  const revision = page.system.revision ?? priorRevision;
+  const released = releaseLease(lease, "ended").ok;
+  broadcastRevoked({
+    noteId: message.noteId,
+    leaseToken: lease.leaseToken,
+    gmEpoch: authorityEpoch(),
+    reason: "ended",
+    revision
+  });
+  broadcastLeaseChanged(message.noteId, null, null, authorityEpoch());
+  Hooks.callAll("journalinatorNoteEditEnded", {
+    noteId: message.noteId,
+    authorId: senderUserId,
+    revision,
+    saved
+  });
+  return ended(revision, saved, released);
+}
+
+function handleForceUnlock(shared, message, senderUserId) {
+  const requestId = requestIdOf(message.requestId) ?? foundry.utils.randomID();
+  if (!senderIsGM(senderUserId)) {
+    return {
+      type: "noteEditDenied",
+      ...replyBase(requestId, senderUserId, message.noteId),
+      reason: "invalid"
+    };
+  }
+  const page = notePageIn(shared, message.noteId);
+  const revision = page?.system.revision ?? 0;
+  const previous = leaseFor(message.noteId);
+  if (previous) {
+    consumeLease(message.noteId);
+    broadcastRevoked({
+      noteId: message.noteId,
+      leaseToken: previous.leaseToken,
+      gmEpoch: authorityEpoch(),
+      reason: "forced",
+      revision,
+      byUserId: senderUserId
+    });
+    broadcastLeaseChanged(message.noteId, null, null, authorityEpoch());
+    Hooks.callAll("journalinatorNoteForceUnlocked", {
+      noteId: message.noteId,
+      previousUserId: previous.userId,
+      byUserId: senderUserId
+    });
+  }
+  return {
+    type: "noteEditForced",
+    ...replyBase(requestId, senderUserId, message.noteId),
+    previousLease: previous,
+    revision,
+    byUserId: senderUserId
+  };
+}
+
+function handleEditState(shared, message, senderUserId) {
+  const requestId = requestIdOf(message.requestId) ?? foundry.utils.randomID();
+  if (!authorityEpoch()) initializeAuthority();
+  const pages = message.noteId === undefined
+    ? allSharedNoteList(shared)
+    : [notePageIn(shared, message.noteId)].filter(Boolean);
+  const notes = pages.map(page => {
+    const snapshot = authoritySnapshot(page.id)[0];
+    return {
+      noteId: page.id,
+      revision: Number.isInteger(page.system.revision) ? page.system.revision : 0,
+      deleted: !!page.system.deleted,
+      lease: snapshot?.lease ?? null,
+      preview: getAuthorityPreview(page.id)
+    };
+  });
+  return {
+    type: "noteEditState",
+    requestId,
+    forUserId: senderUserId,
+    gmEpoch: authorityEpoch(),
+    at: Date.now(),
+    notes
+  };
+}
+
+async function handleEditCommand(shared, message, senderUserId) {
+  switch (message.type) {
+    case "createNote": return handleCreateNote(shared, message, senderUserId);
+    case "beginNoteEdit": return handleBeginNoteEdit(shared, message, senderUserId);
+    case "noteEditHeartbeat": return handleNoteHeartbeat(shared, message, senderUserId);
+    case "previewNoteBody": return handlePreview(shared, message, senderUserId);
+    case "saveNoteBody": return performBodySave(shared, message, senderUserId);
+    case "saveNoteAppearance": return handleAppearanceSave(shared, message, senderUserId);
+    case "endNoteEdit": return handleEndNoteEdit(shared, message, senderUserId);
+    case "forceUnlockNote": return handleForceUnlock(shared, message, senderUserId);
+    case "requestNoteEditState": return handleEditState(shared, message, senderUserId);
+    default: return null;
+  }
+}
+
+function noActiveGMReply(message) {
+  const requestId = requestIdOf(message.requestId) ?? foundry.utils.randomID();
+  const base = { requestId, forUserId: game.user.id };
+  switch (message.type) {
+    case "createNote":
+      return { type: "noteCreateRejected", ...base, noteId: null, reason: "noActiveGM" };
+    case "beginNoteEdit":
+    case "saveNoteBody":
+    case "saveNoteAppearance":
+    case "endNoteEdit":
+    case "forceUnlockNote":
+      return {
+        type: "noteEditDenied", ...base, noteId: message.noteId ?? null, reason: "noActiveGM"
+      };
+    case "requestNoteEditState":
+      return {
+        type: "noteEditState", ...base, gmEpoch: null, at: Date.now(), notes: []
+      };
+    default:
+      return { type: "timeout", requestId };
+  }
+}
+
+/** Resolves a targeted edit reply. Replies from a non-active GM are rejected by the caller. */
+function resolvePendingEditReply(message) {
+  if (!message?.requestId) return false;
+  const pending = pendingEditReplies.get(message.requestId);
+  if (!pending || pending.forUserId !== message.forUserId) return false;
+  pendingEditReplies.delete(message.requestId);
+  clearTimeout(pending.timer);
+  pending.resolve(message);
+  return true;
+}
+
+function sendTargetedReply(reply, senderUserId) {
+  if (!reply || !reply.type || reply.type === "timeout") return;
+  reply.forUserId = reply.forUserId ?? senderUserId;
+  if (reply.forUserId !== senderUserId) return;
+  if (senderUserId === game.user.id) return;
+  game.socket.emit(CHANNEL, reply, { recipients: [senderUserId] });
+}
+
+/**
+ * Sends a protocol request and waits for the targeted reply with the same `requestId`.
+ * A timeout resolves with `{type:"timeout",requestId}` instead of rejecting, because a
+ * missing acknowledgement is uncertain (retry/reconcile), not proof of failure.
+ */
+export async function requestEditReply(message, { timeoutMs = 10000 } = {}) {
+  const requestId = requestIdOf(message?.requestId) ?? foundry.utils.randomID();
+  const payload = { ...message, requestId };
+  if ((payload.type === "beginNoteEdit" || payload.type === "createNote")
+      && !sessionIdOf(payload.clientSessionId)) {
+    payload.clientSessionId = clientSessionId;
+  }
+
+  const activeGM = game.users.activeGM;
+  if (!activeGM) return noActiveGMReply(payload);
+
+  if (activeGM.id === game.user.id) {
+    const reply = await enqueueWrite(payload, game.user.id);
+    if (reply?.type === "noteEditState") applyEditState(reply.notes, reply.gmEpoch);
+    return reply ?? { type: "timeout", requestId };
+  }
+
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      if (!pendingEditReplies.has(requestId)) return;
+      pendingEditReplies.delete(requestId);
+      resolve({ type: "timeout", requestId });
+    }, Math.max(0, timeoutMs));
+    timer.unref?.();
+    pendingEditReplies.set(requestId, {
+      forUserId: game.user.id,
+      resolve,
+      timer
+    });
+    game.socket.emit(CHANNEL, payload, { recipients: [activeGM.id] });
+  });
 }
 
 /**
@@ -3028,3 +3213,17 @@ export function requestWrite(message) {
   }
   game.socket.emit(CHANNEL, message, { recipients: [activeGM.id] });
 }
+
+/**
+ * T4b guard helpers. Not applied to pin/link/route/transfer/delete/geometry handlers yet;
+ * those get the guard in the lock-enforcement task.
+ */
+export function assertNoteUnlocked(noteId) {
+  return assertUnlocked([noteId]);
+}
+
+export function assertNotesUnlocked(noteIds) {
+  return assertUnlocked(noteIds);
+}
+
+export { noteBodyHash };
