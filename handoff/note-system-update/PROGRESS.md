@@ -28,8 +28,8 @@ Owner approval: 2026-11-28, Phase 0 gate approved as designed.
 | T2 | Schema + registries + templates | general | `task/t2-schema` | complete | approved; 26 scoped tests, full suite 544 pass/4 skip/0 fail; handwriting key is `handwritten` (no legacy `hand` alias) | `c91945f` |
 | T3 | Removals + store/init/containers | general | `task/t3-removals` | complete | approved; 10 scoped tests; vault/actor/migration/stats-model removed; v2 read seam + non-destructive schema guard; full suite red only on old vault/UI tests as expected | `99f21ab` |
 | T4a | Protocol + leases + autosave core | general | `task/t4a-protocol` | complete | approved after review fixes; 34 scoped tests; whole-note leases, v2 creation, autosave receipts, preview relay, world schema write gate, creation/save/end/force hooks | `bff6e34` |
-| T4b | Lock enforcement + geometry/sizing | pending | `task/t4b-locks` | in progress | — | — |
-| T5 | History + activity + diff | — | — | queued | — | — |
+| T4b | Lock enforcement + geometry/sizing | general | `task/t4b-locks` | complete | approved after 2 review rounds; 50 scoped tests; all structural/pin/route/link/trash writes gated, group move/delete atomic validation, v2 sizing commands, thread/permanent-delete hooks, prune skips locked notes | `dde7062` |
+| T5 | History + activity + diff | general | `task/t5-history` | complete | approved; 96 scoped tests; 20 distinct snapshots, cooldown/checkpoints/restore capture, deduped counters, bounded Myers diff, no text stored | `7343c52` |
 | T6 | Shared editor | — | — | queued | — | — |
 | T7 | Private canvas | — | — | queued | — | — |
 | T8 | Canvas rendering + creation/selection UI | — | — | queued | — | — |
