@@ -30,7 +30,10 @@ Owner approval: 2026-11-28, Phase 0 gate approved as designed.
 | T4a | Protocol + leases + autosave core | general | `task/t4a-protocol` | complete | approved after review fixes; 34 scoped tests; whole-note leases, v2 creation, autosave receipts, preview relay, world schema write gate, creation/save/end/force hooks | `bff6e34` |
 | T4b | Lock enforcement + geometry/sizing | general | `task/t4b-locks` | complete | approved after 2 review rounds; 50 scoped tests; all structural/pin/route/link/trash writes gated, group move/delete atomic validation, v2 sizing commands, thread/permanent-delete hooks, prune skips locked notes | `dde7062` |
 | T5 | History + activity + diff | general | `task/t5-history` | complete | approved; 96 scoped tests; 20 distinct snapshots, cooldown/checkpoints/restore capture, deduped counters, bounded Myers diff, no text stored | `7343c52` |
-| T6 | Shared editor | — | — | queued | — | — |
+| T6 | Shared in-place editor + recovery | general | `task/t6-editor` | complete | approved after 3 review rounds; 93 scoped tests; source surface, toolbar/hints, image dialog, recovery, autosave/conflict/event-id fixes | `f1c86fd` |
+| T7a | Private store v2 + history + local sessions | pending | `task/t7a-private` | in progress | — | — |
+| T7b | Private editor/workspace UI | — | — | queued | — | — |
+| T8 | Canvas rendering + creation/selection UI | pending | `task/t8-canvas` | in progress | — | — |
 | T7 | Private canvas | — | — | queued | — | — |
 | T8 | Canvas rendering + creation/selection UI | — | — | queued | — | — |
 | T9 | App surfaces (search/trash/history UI) | — | — | queued | — | — |
