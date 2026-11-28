@@ -21,27 +21,27 @@ const UINT32_RANGE = 0x100000000;
 
 export const PAPERS = deepFreeze({
   cream: {
-    labelKey: "JN.Skin.Paper.Cream",
+    labelKey: "JN.Skin.PaperCream",
     paperToken: "--jn-sc-paper-document",
     tilt: [0, 0]
   },
   amber: {
-    labelKey: "JN.Skin.Paper.Amber",
+    labelKey: "JN.Skin.PaperAmber",
     paperToken: "--jn-sc-paper-memo",
     tilt: [-2, 2]
   },
   parchment: {
-    labelKey: "JN.Skin.Paper.Parchment",
+    labelKey: "JN.Skin.PaperParchment",
     paperToken: "--jn-sc-paper-target",
     tilt: [-1, 1]
   }
 });
 
 export const FONTS = deepFreeze({
-  default: { labelKey: "JN.Skin.Font.Default", stackToken: "--jn-sc-font-body" },
-  serif: { labelKey: "JN.Skin.Font.Serif", stackToken: "--jn-sc-font-formal" },
-  handwritten: { labelKey: "JN.Skin.Font.Handwritten", stackToken: "--jn-sc-font-hand" },
-  display: { labelKey: "JN.Skin.Font.Display", stackToken: "--jn-sc-font-display" }
+  default: { labelKey: "JN.Skin.FontDefault", stackToken: "--jn-sc-font-body" },
+  serif: { labelKey: "JN.Skin.FontSerif", stackToken: "--jn-sc-font-formal" },
+  handwritten: { labelKey: "JN.Skin.FontHandwritten", stackToken: "--jn-sc-font-hand" },
+  display: { labelKey: "JN.Skin.FontDisplay", stackToken: "--jn-sc-font-display" }
 });
 
 export const DEFAULT_SKIN = deepFreeze({

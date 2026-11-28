@@ -2,6 +2,22 @@
 
 These notes start with the small board and toolbar polish patches and cover the follow-up fixes and features.
 
+## Unreleased — Note system rewrite
+
+This development build replaces the note system. It is not a release and has not been verified in real Foundry multiplayer yet.
+
+- One note is one Markdown body. The first-line H1 is the title; later H1s render as headings. The old separate note name, label, title/heading fields, block list and paragraph widgets are gone. Duplicate and empty titles are allowed, and Foundry's page name is hidden.
+- Notes open directly on the card as a single Markdown source surface. Title, Divider and Portrait tools edit the source; native undo/redo, selection, copy/paste and IME remain available. The editor autosaves, shows `Saved`/`Saving…`/offline/failure states, and keeps unsaved text in a local recovery draft.
+- Other viewers see the rendered text update while the editor types. Cards grow automatically with their content up to the layout width cap, then vertically. Manual resize overrides Auto, and automatic resizing keeps the main pin fixed.
+- Plain and Profile layouts replace note types. Profile requires a first-line title, an optional underline, a portrait image and an optional `## Caption`; an incomplete Profile renders as Plain and shows one editor-only hint. Blank, Document and Profile creation templates choose the initial body, layout and skin.
+- Appearance is a skin: Cream, Amber or Parchment paper, Default/Serif/Handwritten/Display font, torn edges and an optional decorative background. Tilt is seeded from the note ID and stays stable. Changing layout or skin never rewrites the note text.
+- A whole-note edit lease replaces paragraph locks. One client edits at a time; other clients can read but cannot mutate, drag, resize, restyle, delete or transfer a locked note. A missing GM leaves shared notes read-only, and a GM can force-unlock after confirmation.
+- History keeps up to 20 distinct text snapshots per note with session-start, periodic and pre-restore checkpoints. The history dialog previews versions and restores text only; it does not restore pins, threads, appearance or geometry.
+- Search and the quick switcher use derived titles and excerpts, falling back to `Image note` or `Empty note`. Filters are All/Plain/Profile plus author; the old Location and style-as-type filters are gone.
+- Transfers, clipboard, publishing and route notes use the schema v2 payload. Copies get fresh identities, remap eligible internal connections, and report dropped external links or route waypoints. Private canvases keep their owner/admin path and add local tab coordination plus a workspace revision guard; their history stays workspace-local.
+- Removed: the GM secret/vault system, secret notes and hidden blocks/links, Location notes, actor linking, the statistics window and rankings, the old block/paragraph editor, and typed `[[wikilink]]` creation.
+- Clean break: there is no migration or legacy adapter. Older shared or private data is shown with a read-only notice and is left unchanged. Use a fresh test world or ask the host to reset Journalinator data.
+
 ## 0.9.6 — Pin selection
 
 - Box selection now includes free board pins. Selecting an attached pin selects its owning note,

@@ -1353,7 +1353,7 @@ async function handleSharedTransferMessage(message, senderUserId) {
   // Copying legacy/incompatible shared data into a private workspace would smuggle it past the
   // read-only shared-world gate. Private workspace transfer commands are handled elsewhere.
   if (!sharedWorldWritable(shared)) {
-    notifyUser(senderUserId, "Incompatible note data.");
+    notifyUser(senderUserId, t("JN.Notices.IncompatibleData"));
     return;
   }
 
@@ -1453,7 +1453,7 @@ async function handlePublishPrivateMessage(message, senderUserId) {
   const shared = game.journal.get(ids.shared);
   if (!shared) return;
   if (!sharedWorldWritable(shared)) {
-    notifyUser(senderUserId, "Incompatible note data.");
+    notifyUser(senderUserId, t("JN.Notices.IncompatibleData"));
     return;
   }
   if (!game.users.get(senderUserId)) return;
@@ -1500,7 +1500,7 @@ async function handlePublishPrivateMessage(message, senderUserId) {
 
   const layout = layoutPage(shared);
   if (!layout) {
-    notifyUser(senderUserId, "Invalid note payload.");
+    notifyUser(senderUserId, t("JN.Notices.InvalidNotePayload"));
     return;
   }
   const layoutSystem = layout.system ?? {};
@@ -1576,7 +1576,7 @@ async function handlePublishPrivateMessage(message, senderUserId) {
   } catch (err) {
     console.error("Journalinator: private publish failed", err);
     for (const created of createdPages) await created.delete().catch(() => {});
-    notifyUser(senderUserId, "Invalid note payload.");
+    notifyUser(senderUserId, t("JN.Notices.InvalidNotePayload"));
     return;
   }
 
@@ -1657,7 +1657,7 @@ async function handleMessage(message, senderUserId) {
   // workspace commands remain available; lease lifecycle edits are handled above and may still
   // close an existing session.
   if (!PRIVATE_WORKSPACE_TYPES.has(message.type) && !sharedWorldWritable(shared)) {
-    notifyUser(senderUserId, "Incompatible note data.");
+    notifyUser(senderUserId, t("JN.Notices.IncompatibleData"));
     return;
   }
 
@@ -1699,14 +1699,14 @@ async function handleMessage(message, senderUserId) {
       // Clipboard/publish carries the current v2 payload only. Fresh page, fresh card,
       // revision 0; no legacy block arrays and no source identity are accepted.
       if (!sharedWorldWritable(shared)) {
-        notifyUser(senderUserId, "Incompatible note data.");
+        notifyUser(senderUserId, t("JN.Notices.IncompatibleData"));
         return;
       }
       const created = await createV2NotePage(shared, {
         body: message.body, layout: message.layout, skin: message.skin, x: message.x, y: message.y
       }, senderUserId, { source: "paste" });
       if (created.error) {
-        notifyUser(senderUserId, "Invalid note payload.");
+        notifyUser(senderUserId, t("JN.Notices.InvalidNotePayload"));
         return;
       }
       acknowledgeWriteApplied(senderUserId, { kind: "paste", noteId: created.page.id });
