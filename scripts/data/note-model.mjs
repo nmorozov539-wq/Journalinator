@@ -1,10 +1,19 @@
 import { CARD_SIDES, MAX_THREAD_PIN_COORDINATE, MAX_THREAD_PINS } from "../card-ports.mjs";
 import {
-  LINK_ENDS, LINK_MATERIALS, LINK_PATTERNS, LINK_SLACK, LINK_THICKNESS,
-  NOTE_FONT_KEYS, PICTURE_LAYOUTS, PIN_STYLES, PRESENTATION_STYLES
+  LINK_ENDS, LINK_MATERIALS, LINK_PATTERNS, LINK_SLACK, LINK_THICKNESS, PIN_STYLES
 } from "../presentation.mjs";
+import { FONTS, PAPERS } from "../skins/registry.mjs";
 
 const fields = foundry.data.fields;
+
+/**
+ * schemaVersion 2 note.
+ *
+ * `body` is the sole content authority. Layout/skin are explicit visual settings;
+ * titles, captions and portraits are derived from the body by the document parser
+ * and are never persisted here. Thread payloads keep the pre-v2 geometry fields
+ * except the former secrecy flags.
+ */
 const linkPointField = () => new fields.SchemaField({
   x: new fields.NumberField({ required: true, min: 0, max: 1 }),
   y: new fields.NumberField({ required: true, min: 0, max: 1 })
@@ -16,27 +25,25 @@ const pinCoordinate = () => new fields.NumberField({
 export default class NoteModel extends foundry.abstract.TypeDataModel {
   static defineSchema() {
     return {
-      kind: new fields.StringField({ required: true, choices: ["note", "location"], initial: "note" }),
-      // Legacy storage keys. Read through presentation.mjs; kept so old worlds and old logic
-      // (rename/formerNames, wikilink reconciliation) continue to work.
-      style: new fields.StringField({ required: true, initial: "sticky" }),
-      targetHeading: new fields.StringField({ required: false, blank: true, initial: "" }),
-      schemaVersion: new fields.NumberField({ required: true, integer: true, min: 0, max: 100, initial: 0 }),
-      // Optional human-visible label. Internal `name` stays the identity/wikilink key.
-      label: new fields.StringField({ required: false, blank: true, initial: "" }),
-      presentation: new fields.SchemaField({
-        extendedStyle: new fields.StringField({
-          required: false, choices: PRESENTATION_STYLES, initial: "memo"
+      schemaVersion: new fields.NumberField({ required: true, integer: true, min: 0, initial: 2 }),
+      body: new fields.StringField({ required: true, blank: true, initial: "" }),
+      revision: new fields.NumberField({ required: true, integer: true, min: 0, initial: 0 }),
+      layout: new fields.StringField({
+        required: true, choices: ["plain", "profile"], initial: "plain"
+      }),
+      skin: new fields.SchemaField({
+        paper: new fields.StringField({
+          required: true, choices: Object.keys(PAPERS), initial: "amber"
         }),
-        forceExtended: new fields.BooleanField({ initial: false }),
-        font: new fields.StringField({ required: false, choices: NOTE_FONT_KEYS, initial: "default" }),
-        pictureLayout: new fields.StringField({
-          required: false, choices: PICTURE_LAYOUTS, initial: "above"
+        font: new fields.StringField({
+          required: true, choices: Object.keys(FONTS), initial: "default"
         }),
         torn: new fields.BooleanField({ initial: false }),
-        heading: new fields.StringField({ required: false, blank: true, initial: "" }),
-        nameGenerated: new fields.BooleanField({ initial: false })
-      }, { required: false, initial: () => ({}) }),
+        backgroundImage: new fields.StringField({
+          required: false, blank: true, nullable: true, initial: null
+        }),
+        tiltSeed: new fields.NumberField({ required: true, integer: true, min: 0, initial: 0 })
+      }, { required: true, initial: () => ({}) }),
       attachment: new fields.SchemaField({
         mainPinEnabled: new fields.BooleanField({ initial: true }),
         mainSnapRadius: new fields.NumberField({
@@ -47,20 +54,6 @@ export default class NoteModel extends foundry.abstract.TypeDataModel {
         }),
         pinStyle: new fields.StringField({ required: false, choices: PIN_STYLES, initial: "default" })
       }, { required: false, initial: () => ({}) }),
-      image: new fields.StringField({ required: false, nullable: true, blank: true, initial: null }),
-      backgroundImage: new fields.StringField({ required: false, nullable: true, blank: true, initial: null }),
-      // Optional read-only link to a Foundry actor. The card badge is derived at render time;
-      // nothing about the actor's live state is copied into the shared journal.
-      actorRef: new fields.SchemaField({
-        actorId: new fields.DocumentIdField({ required: true }),
-        sceneId: new fields.DocumentIdField({ required: false, nullable: true, initial: null }),
-        tokenId: new fields.DocumentIdField({ required: false, nullable: true, initial: null })
-      }, { required: false, nullable: true, initial: null }),
-      blocks: new fields.ArrayField(new fields.SchemaField({
-        blockId: new fields.StringField({ required: true }),
-        text: new fields.StringField({ required: true, blank: true, initial: "" }),
-        authorId: new fields.StringField({ required: false, blank: true, initial: "" })
-      })),
       links: new fields.ArrayField(new fields.SchemaField({
         id: new fields.StringField({ required: true }),
         targetId: new fields.DocumentIdField(),
@@ -99,21 +92,30 @@ export default class NoteModel extends foundry.abstract.TypeDataModel {
         lineStyle: new fields.StringField({ required: true, choices: ["solid", "dashed"], initial: "solid" }),
         origin: new fields.StringField({ required: true, choices: ["drawn", "typed"], initial: "drawn" }),
         edited: new fields.BooleanField({ initial: false }),
-        createdBy: new fields.StringField({ required: false, blank: true, initial: "" }),
-        hint: new fields.BooleanField({ initial: false })
+        createdBy: new fields.StringField({ required: false, blank: true, initial: "" })
       })),
       authorId: new fields.StringField({ required: true }),
       createdAt: new fields.NumberField({ required: true }),
       updatedAt: new fields.NumberField({ required: true }),
-      editCount: new fields.NumberField({ required: true, initial: 0 }),
-      contributions: new fields.TypedObjectField(new fields.NumberField({ initial: 0 })),
-      hint: new fields.BooleanField({ initial: false }),
-      formerNames: new fields.ArrayField(new fields.StringField({ required: true, blank: true }), { initial: [] }),
       deleted: new fields.SchemaField({
         at: new fields.NumberField({ required: true }),
         by: new fields.StringField({ required: true }),
         undoId: new fields.StringField({ required: false, nullable: true, initial: null }),
         lastCard: new fields.ObjectField({ required: false })
+      }, { required: false, nullable: true, initial: null }),
+      /**
+       * Idempotency receipt for the autosave that produced `body`/`revision`.
+       * `eventIds` carries paste/template event identities for activity dedupe.
+       */
+      lastSave: new fields.SchemaField({
+        requestId: new fields.StringField({ required: true, blank: true, initial: "" }),
+        clientSessionId: new fields.StringField({ required: true, blank: true, initial: "" }),
+        sequence: new fields.NumberField({ required: true, integer: true, min: 0, initial: 0 }),
+        revision: new fields.NumberField({ required: true, integer: true, min: 0, initial: 0 }),
+        bodyHash: new fields.StringField({ required: true, blank: true, initial: "" }),
+        at: new fields.NumberField({ required: true, initial: 0 }),
+        eventIds: new fields.ArrayField(new fields.StringField({ required: true }),
+          { required: false, maxLength: 32, initial: [] })
       }, { required: false, nullable: true, initial: null })
     };
   }

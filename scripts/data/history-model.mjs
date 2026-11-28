@@ -1,14 +1,23 @@
 const fields = foundry.data.fields;
 
 /**
- * Per-note snapshot ring buffers (spec §5.6), keyed by note id. Each entry is an opaque
- * `{ at, title, blocks }` blob — no restore UI yet, just storage, so there's no benefit to a
- * stricter schema for the blocks themselves.
+ * schemaVersion 2 recovery history.
+ *
+ * `snapshots` is keyed by note id and each entry is a complete body snapshot.
+ * Newest-first ordering and the 20-entry ring are runtime conventions, not a
+ * schema constraint.
  */
 export default class HistoryModel extends foundry.abstract.TypeDataModel {
   static defineSchema() {
     return {
-      snapshots: new fields.TypedObjectField(new fields.ArrayField(new fields.ObjectField()))
+      schemaVersion: new fields.NumberField({ required: true, integer: true, min: 0, initial: 2 }),
+      snapshots: new fields.TypedObjectField(new fields.ArrayField(new fields.SchemaField({
+        id: new fields.StringField({ required: true }),
+        at: new fields.NumberField({ required: true }),
+        authorId: new fields.StringField({ required: true }),
+        revision: new fields.NumberField({ required: true, integer: true, min: 0, initial: 0 }),
+        body: new fields.StringField({ required: true, blank: true, initial: "" })
+      })))
     };
   }
 }
