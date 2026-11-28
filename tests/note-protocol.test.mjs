@@ -333,6 +333,55 @@ test("body save acknowledges, no-ops, retries, rejects stale and oversize bodies
   Hooks.off("journalinatorNoteSaved", savedHook);
 });
 
+test("a re-begun session receives lastSave and the server rejects a lower sequence", async () => {
+  const created = await createNote({ body: "start" });
+  const { result: granted } = await playerRequest(player, {
+    type: "beginNoteEdit", noteId: created.noteId, clientSessionId: "seq-tab"
+  });
+  assert.equal(granted.type, "noteEditGranted");
+
+  const first = await playerRequest(player, {
+    type: "saveNoteBody", noteId: created.noteId, lease: granted.lease,
+    sequence: 1, baseRevision: 0, body: "one"
+  });
+  assert.equal(first.result.type, "noteSaveAck");
+
+  const second = await playerRequest(player, {
+    type: "saveNoteBody", noteId: created.noteId, lease: granted.lease,
+    sequence: 2, baseRevision: 1, body: "two"
+  });
+  assert.equal(second.result.type, "noteSaveAck");
+
+  const ended = await playerRequest(player, {
+    type: "endNoteEdit", noteId: created.noteId, lease: granted.lease,
+    sequence: 3, baseRevision: 2
+  });
+  assert.equal(ended.result.type, "noteEditEnded");
+
+  const { result: again } = await playerRequest(player, {
+    type: "beginNoteEdit", noteId: created.noteId, clientSessionId: "seq-tab"
+  });
+  assert.equal(again.type, "noteEditGranted");
+  assert.equal(again.lastSave.sequence, 2, "the grant carries the persisted receipt");
+
+  const lower = await playerRequest(player, {
+    type: "saveNoteBody", noteId: created.noteId, lease: again.lease,
+    sequence: 1, baseRevision: 2, body: "again"
+  });
+  assert.equal(lower.result.type, "noteSaveRejected");
+  assert.equal(lower.result.reason, "sequenceOutOfOrder");
+
+  const higher = await playerRequest(player, {
+    type: "saveNoteBody", noteId: created.noteId, lease: again.lease,
+    sequence: 3, baseRevision: 2, body: "again"
+  });
+  assert.equal(higher.result.type, "noteSaveAck");
+  await playerRequest(player, {
+    type: "endNoteEdit", noteId: created.noteId, lease: again.lease,
+    sequence: 4, baseRevision: 3
+  });
+});
+
 test("an old token is rejected after force, expiry or an authority epoch change", async () => {
   const created = await createNote({ body: "tokens" });
   const { result: granted } = await playerRequest(player, {

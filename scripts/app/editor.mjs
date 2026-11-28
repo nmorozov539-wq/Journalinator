@@ -1021,13 +1021,17 @@ export default class NoteEditor {
       }
       actionsToShow = [actions.close, actions.copy];
     } else if (state === "rejected" || state === "conflict") {
-      if (status?.savedLocally) {
-        label = t(STATUS_KEYS.saveFailed);
-        actionsToShow = [actions.retry, actions.copy];
-      } else {
+      // A server rejection is not a storage failure. Only claim the storage-unavailable
+      // copy when the recovery write itself failed; otherwise the draft (if any) is on
+      // this device and Retry/Copy stay available. `status.error` keeps the reason.
+      const persistenceFailed = storageUnavailable || status?.draftError === "unavailable";
+      if (persistenceFailed) {
         label = t(STATUS_KEYS.storageUnavailable);
         visualState = "storageUnavailable";
         actionsToShow = [actions.copy];
+      } else {
+        label = t(STATUS_KEYS.saveFailed);
+        actionsToShow = [actions.retry, actions.copy];
       }
     } else if (state === "saving" || status?.dirty) {
       label = t(STATUS_KEYS.saving);
@@ -1065,6 +1069,7 @@ export default class NoteEditor {
     if (ENDED_EDIT_STATES.has(this._session.state)) return;
     if (noteId !== (this.noteId ?? this._session.noteId)) return;
     const lease = state?.lease ?? null;
+    const reason = typeof state?.reason === "string" ? state.reason : null;
     const mine = this._session.lease;
     if (!mine || (lease && lease.leaseToken === mine.leaseToken)) return;
     // The socket broadcasts a revocation before the force-unlock hook. Deferring one
@@ -1073,7 +1078,11 @@ export default class NoteEditor {
     const session = this._session;
     const apply = () => {
       if (this._session !== session) return;
-      session.applyLeaseLost("leaseLost");
+      if (ENDED_EDIT_STATES.has(session.state)) return;
+      // A GM force-unlock carries `reason: "forced"`; an ordinary expiry/failover/loss
+      // does not. Normal Done/Escape releases arrive as `reason: "ended"` while the close
+      // guard above owns them, so only genuine losses reach this branch.
+      session.applyLeaseLost(reason === "forced" ? "forced" : "leaseLost");
       this._renderStatus(session.status());
     };
     if (typeof queueMicrotask === "function") queueMicrotask(apply);

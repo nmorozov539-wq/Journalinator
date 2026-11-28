@@ -159,6 +159,37 @@ test("mirror changes fire the edit-state hook", () => {
   Hooks.off("journalinatorEditStateChanged", id);
 });
 
+test("a forced revocation keeps its reason on the edit-state hook payload", () => {
+  reset();
+  game.user = player;
+  const seen = [];
+  const id = Hooks.on("journalinatorEditStateChanged", (noteId, state) => {
+    seen.push({ noteId, ...state });
+  });
+
+  es.applyEditState([{
+    noteId: NOTE,
+    lease: { noteId: NOTE, userId: gm2.id, clientSessionId: "other", leaseToken: "t" },
+    preview: { leaseToken: "t", sequence: 1, body: "live" }
+  }], "epoch-forced");
+
+  es.applyRevoked({
+    type: "noteEditRevoked",
+    noteId: NOTE,
+    leaseToken: "t",
+    reason: "forced",
+    revision: 3
+  });
+  Hooks.off("journalinatorEditStateChanged", id);
+
+  const last = seen.at(-1);
+  assert.equal(last.noteId, NOTE);
+  assert.equal(last.lease, null);
+  assert.equal(last.preview, null);
+  assert.equal(last.reason, "forced", "remote clients can distinguish a GM force-unlock");
+  assert.equal(seen.some(state => state.reason === "forced"), true);
+});
+
 test("a lease for another user appears locked in the mirror", () => {
   reset();
   es.applyEditState([{

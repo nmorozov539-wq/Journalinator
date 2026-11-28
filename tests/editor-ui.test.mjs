@@ -848,6 +848,93 @@ test("forced and lost leases show the required writer copy and keep Close/Copy",
   );
 });
 
+test("a forced revocation reason renders the GM-ended state without a local force hook", async () => {
+  const { editor } = await openEditor();
+  const hooks = makeHooks();
+  globalThis.Hooks = hooks;
+  editor.activate();
+  try {
+    hooks.callAll("journalinatorEditStateChanged", NOTE_ID, {
+      lease: null, preview: null, reason: "forced"
+    });
+    await settle();
+    assert.equal(
+      statusText(editor),
+      "The GM ended this editing session. Your unsaved text is kept locally."
+    );
+    assert.equal(editor._session.state, "forced");
+    assert.ok(editor.element.querySelector('.jn-editor-status-action[data-action="close"]'));
+    assert.ok(editor.element.querySelector('.jn-editor-status-action[data-action="copy"]'));
+  } finally {
+    editor.deactivate();
+    globalThis.Hooks = undefined;
+  }
+});
+
+test("an expired revocation still renders the lease-lost state", async () => {
+  const { editor } = await openEditor();
+  const hooks = makeHooks();
+  globalThis.Hooks = hooks;
+  editor.activate();
+  try {
+    hooks.callAll("journalinatorEditStateChanged", NOTE_ID, {
+      lease: null, preview: null, reason: "expired"
+    });
+    await settle();
+    assert.equal(
+      statusText(editor),
+      "Editing connection lost. Reopen the note to recover your draft."
+    );
+    assert.equal(editor._session.state, "leaseLost");
+  } finally {
+    editor.deactivate();
+    globalThis.Hooks = undefined;
+  }
+});
+
+test("a rejected close with working storage keeps the server-failure copy and reason", async () => {
+  const { editor, fake } = await openEditor({ body: "# Title\nBody" });
+  fake.endImpl = () => Promise.resolve({
+    type: "noteSaveRejected",
+    reason: "sequenceOutOfOrder",
+    revision: 1
+  });
+  type(editor, "# Title\nChanged");
+  click(editor, '[data-action="done"]');
+  await settle();
+
+  assert.equal(editor.isEditing(), true);
+  assert.equal(statusText(editor), "Couldn’t save. Your draft is kept on this device.");
+  assert.equal(editor._session.status().error, "sequenceOutOfOrder");
+  assert.equal(editor._session.status().draftError, null);
+  assert.ok(editor.element.querySelector('.jn-editor-status-action[data-action="retry"]'));
+  assert.ok(editor.element.querySelector('.jn-editor-status-action[data-action="copy"]'));
+});
+
+test("a failed recovery write after rejection shows the storage-unavailable copy", async () => {
+  const { editor, fake, clock, drafts } = await openEditor({ body: "# Title\nBody" });
+  drafts.storage.setItem = () => { throw new Error("quota"); };
+  fake.saveImpl = () => Promise.resolve({
+    type: "noteSaveRejected",
+    reason: "invalid",
+    revision: 1
+  });
+  type(editor, "# Title\nChanged");
+  clock.advance(700);
+  await settle();
+
+  assert.equal(editor._session.state, "rejected");
+  assert.equal(editor._session.status().error, "invalid");
+  assert.equal(editor._session.status().draftError, "unavailable");
+  assert.equal(statusText(editor), "Recovery copy unavailable in this browser.");
+  assert.equal(
+    editor.element.querySelector('.jn-editor-status-action[data-action="retry"]'),
+    null,
+    "no Retry when the recovery write failed"
+  );
+  assert.ok(editor.element.querySelector('.jn-editor-status-action[data-action="copy"]'));
+});
+
 test("Ctrl/Cmd+S flushes without closing; Escape closes after menus", async () => {
   const { editor, fake, clock } = await openEditor({ body: "# Title\nBody" });
   type(editor, "# Title\nChanged");
@@ -967,7 +1054,7 @@ test("Done and Escape send one begin/end even when the ended revocation arrives 
     fake.endImpl = () => {
       ends += 1;
       // The server broadcasts noteEditRevoked(reason: "ended") before it replies.
-      hooks.callAll("journalinatorEditStateChanged", NOTE_ID, { lease: null });
+      hooks.callAll("journalinatorEditStateChanged", NOTE_ID, { lease: null, reason: "ended" });
       return Promise.resolve({
         type: "noteEditEnded",
         revision: fake.note.revision,

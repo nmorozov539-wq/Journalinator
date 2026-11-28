@@ -435,7 +435,42 @@ export function createSelectionBar({
       let left = anchorRect.left - rootRect.left + (anchorRect.width - width) / 2;
       left = Math.max(margin, Math.min(left, Math.max(margin, rootRect.width - width - margin)));
       let top = anchorRect.top - rootRect.top - height - gap;
-      if (top < margin) top = anchorRect.bottom - rootRect.top + gap;
+
+      // A locked selected card carries its GM Unlock badge above the paper, exactly where
+      // the floating toolbar normally sits. The badge lives inside the transformed card
+      // layer, so it cannot out-stack this overlay. Keep the bar clear of every visible
+      // badge instead: above the badge when there is room, otherwise below the card.
+      const badges = [];
+      for (const id of current.lockedIds ?? []) {
+        const card = [...(root.querySelectorAll?.(".jn-card") ?? [])]
+          .find(node => node.dataset?.id === id);
+        const badge = card?.querySelector?.(".jn-lock-badge");
+        if (!badge || badge.hidden) continue;
+        const rect = badge.getBoundingClientRect?.();
+        if (!rect) continue;
+        const badgeRect = {
+          top: rect.top - rootRect.top,
+          bottom: rect.bottom - rootRect.top,
+          left: rect.left - rootRect.left,
+          right: rect.right - rootRect.left
+        };
+        if (badgeRect.bottom > badgeRect.top) badges.push(badgeRect);
+      }
+      if (badges.length) {
+        const badgeTop = Math.min(...badges.map(rect => rect.top));
+        const aboveBadge = badgeTop - height - gap;
+        const belowCard = anchorRect.bottom - rootRect.top + gap;
+        if (aboveBadge >= margin) {
+          top = aboveBadge;
+        } else if (belowCard + height <= rootRect.height - margin) {
+          top = belowCard;
+        } else {
+          // There is no clean vertical slot at a very small viewport; keep every control
+          // inside the board and prefer the side with the most room.
+          top = aboveBadge >= belowCard ? Math.max(margin, aboveBadge) : belowCard;
+        }
+      }
+
       const maxTop = Math.max(margin, rootRect.height - height - margin);
       top = Math.max(margin, Math.min(top, maxTop));
       element.style.left = `${Math.round(left)}px`;

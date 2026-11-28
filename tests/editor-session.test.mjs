@@ -276,6 +276,106 @@ test("open grants the lease and starts in editing state", async () => {
   assert.equal(transport.calls.heartbeat.length, 0);
 });
 
+test("a fresh note's first save uses sequence 1", async () => {
+  const { session, transport } = setup();
+  await session.open();
+  session.setBody("fresh text");
+  const result = await session.flush();
+  assert.equal(result.type, "noteSaveAck");
+  assert.equal(transport.calls.save.length, 1);
+  assert.equal(transport.calls.save[0].sequence, 1);
+});
+
+test("open seeds the sequence from the grant's persisted lastSave receipt", async () => {
+  const { session, transport } = setup({ revision: 5 });
+  transport.beginReply = transport.grant({
+    lastSave: { clientSessionId: "sess-a", sequence: 5, revision: 4 }
+  });
+  await session.open();
+  assert.equal(session.sequence, 5);
+  session.setBody("after reopen");
+  const result = await session.flush();
+  assert.equal(result.type, "noteSaveAck");
+  assert.equal(transport.calls.save[0].sequence, 6, "the first save advances past the receipt");
+});
+
+test("reopening the same note never sends a lower sequence (sequenceOutOfOrder regression)", async () => {
+  const { clock, transport, drafts, note } = setup({ body: "base", revision: 2 });
+  let lastSequence = 5;
+  const lastSave = () => ({
+    clientSessionId: "sess-a",
+    sequence: lastSequence,
+    revision: transport.note.revision
+  });
+  transport.beginReply = () => transport.grant({ lastSave: lastSave() });
+  transport.saveImpl = args => {
+    if (args.sequence <= lastSequence) {
+      return Promise.resolve({
+        type: "noteSaveRejected",
+        reason: "sequenceOutOfOrder",
+        revision: transport.note.revision
+      });
+    }
+    lastSequence = args.sequence;
+    transport.note.body = args.body;
+    transport.note.revision += 1;
+    return Promise.resolve(transport.ackFor(args));
+  };
+  transport.endImpl = args => {
+    if (Number.isInteger(args.sequence) && args.sequence <= lastSequence) {
+      return Promise.resolve({
+        type: "noteSaveRejected",
+        reason: "sequenceOutOfOrder",
+        revision: transport.note.revision
+      });
+    }
+    return Promise.resolve({
+      type: "noteEditEnded",
+      revision: transport.note.revision,
+      released: true
+    });
+  };
+
+  const makeSession = () => new NoteEditorSession({
+    noteId: NOTE,
+    note: {
+      body: transport.note.body,
+      revision: transport.note.revision,
+      layout: note.layout,
+      skin: note.skin
+    },
+    transport,
+    drafts,
+    clientSessionId: "sess-a",
+    now: clock.now,
+    timers: clock
+  });
+
+  const first = makeSession();
+  await first.open();
+  first.setBody("first edit");
+  const firstSave = await first.flush();
+  assert.equal(firstSave.type, "noteSaveAck");
+  assert.equal(firstSave.sequence, 6);
+  const firstEnd = await first.close();
+  assert.equal(firstEnd.type, "noteEditEnded");
+
+  const second = makeSession();
+  await second.open();
+  assert.ok(second.sequence >= lastSequence, "the reopened session starts at the receipt");
+  second.setBody("second edit");
+  const secondSave = await second.flush();
+  assert.equal(secondSave.type, "noteSaveAck");
+  assert.equal(secondSave.sequence, 7);
+  const secondEnd = await second.close();
+  assert.equal(secondEnd.type, "noteEditEnded");
+  assert.deepEqual(
+    transport.calls.save.map(call => call.sequence),
+    [6, 7],
+    "no save ever reuses a persisted sequence"
+  );
+});
+
 test("a denied lease never previews or saves", async () => {
   const { session, transport, clock } = setup();
   transport.beginReply = { type: "noteEditDenied", reason: "locked" };
@@ -926,7 +1026,7 @@ test("equal-body typing never calls save and status keeps its stable shape", asy
   await session.open();
   assert.deepEqual(
     Object.keys(session.status()).sort(),
-    ["bodyLength", "confirmedRevision", "dirty", "error", "savedLocally", "saving", "state"]
+    ["bodyLength", "confirmedRevision", "dirty", "draftError", "error", "savedLocally", "saving", "state"]
   );
   assert.equal(typeof session.saveNow, "function");
 

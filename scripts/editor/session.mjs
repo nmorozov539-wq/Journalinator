@@ -90,6 +90,7 @@ const SEND_STATES = new Set(["editing", "saving"]);
  * @property {number} confirmedRevision
  * @property {number} bodyLength
  * @property {boolean} savedLocally
+ * @property {string|null} draftError
  * @property {string|null} error
  */
 
@@ -207,6 +208,7 @@ export class NoteEditorSession {
       confirmedRevision: this._confirmedRevision,
       bodyLength: this._body.length,
       savedLocally: this._savedLocally,
+      draftError: this._draftError,
       error: this._error
     };
   }
@@ -235,6 +237,10 @@ export class NoteEditorSession {
 
       if (reply?.type === "noteEditGranted" && isObject(reply.lease)) {
         this._lease = reply.lease;
+        // The server persists `lastSave.sequence` for this note/client session and rejects a
+        // later save that reuses or goes below it. Each new session starts at zero, so seed
+        // from the grant receipt before any preview/save/end can advance the counter.
+        this._seedSequence(reply.lastSave);
         this._confirmedRevision = isRevision(reply.revision)
           ? reply.revision
           : this._confirmedRevision;
@@ -1242,6 +1248,17 @@ export class NoteEditorSession {
   _nextSequence() {
     this._sequence += 1;
     return this._sequence;
+  }
+
+  /**
+   * Raises the session counter to the highest sequence already persisted for this note.
+   * A fresh note has no receipt and starts at zero, so its first save uses sequence 1.
+   */
+  _seedSequence(lastSave) {
+    const sequence = lastSave?.sequence;
+    if (Number.isInteger(sequence) && sequence >= 0 && sequence > this._sequence) {
+      this._sequence = sequence;
+    }
   }
 
   _removeEventIds(ids) {

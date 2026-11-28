@@ -2140,6 +2140,9 @@ input.jn-task-checkbox:disabled { cursor: default; }
   color: var(--jn-muted);
   font-size: 12px;
   line-height: 1.35;
+  /* Informational only. A locked card's Unlock badge can sit beneath the notice; let the
+     click reach it instead of forcing the GM to deselect the card first. */
+  pointer-events: none;
 }
 .jn-selection-notice[hidden] { display: none; }
 

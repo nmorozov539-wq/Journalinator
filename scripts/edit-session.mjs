@@ -334,11 +334,12 @@ function sameJSON(a, b) {
   return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 }
 
-function emitState(noteId, previous, next) {
+function emitState(noteId, previous, next, reason = null) {
   if (sameJSON(previous, next)) return;
   Hooks.callAll("journalinatorEditStateChanged", noteId, {
     lease: copy(next?.lease ?? null),
-    preview: copy(next?.preview ?? null)
+    preview: copy(next?.preview ?? null),
+    ...(reason ? { reason } : {})
   });
 }
 
@@ -353,12 +354,12 @@ function normalizeMirrorEntry(lease, preview) {
   };
 }
 
-function writeMirrorEntry(noteId, lease, preview) {
+function writeMirrorEntry(noteId, lease, preview, reason = null) {
   const previous = mirrorEntry(noteId);
   const next = normalizeMirrorEntry(lease, preview);
   if (!next.lease && !next.preview) mirror.delete(noteId);
   else mirror.set(noteId, next);
-  emitState(noteId, previous, next);
+  emitState(noteId, previous, next, reason);
 }
 
 /** True when a lease exists and is not this tab's own. */
@@ -468,7 +469,8 @@ export function applyRevoked(message) {
   const token = message.leaseToken;
   if (lease && token && lease.leaseToken && lease.leaseToken !== token) return;
   if (previous?.preview && token && previous.preview.leaseToken && previous.preview.leaseToken !== token) return;
-  writeMirrorEntry(message.noteId, null, null);
+  writeMirrorEntry(message.noteId, null, null,
+    typeof message.reason === "string" && message.reason ? message.reason : null);
 }
 
 /** Drops every mirrored lease/preview, e.g. on active-GM change. */
