@@ -4,7 +4,7 @@ A shared corkboard journal for Foundry VTT v14, with per-user private canvases, 
 
 ## Development status
 
-The note-system rewrite is implemented on the development branch `note-system-update-impl` (child of `note-system-update`). The integration branch is not released. The canonical checkout remains on `note-system-update` and has not received the rewrite. Real Foundry multiplayer verification is still pending and is tracked as T13 in [the progress ledger](handoff/note-system-update/PROGRESS.md); passing Node/jsdom tests are not a substitute for a live two-client check.
+The note-system rewrite is implemented on the development branch `note-system-update-impl` (child of `note-system-update`). The integration branch is not released. The canonical checkout remains on `note-system-update` and has not received the rewrite. Independent real Foundry v14 verification was run on 2026-11-28 with a GM and two players in a disposable world; the tested scope passed after fixes, and the remaining unverified cases are listed in [the progress ledger](handoff/note-system-update/PROGRESS.md). Passing Node/jsdom tests alone are not treated as multiplayer evidence.
 
 Start with [the note-system handover](handoff/note-system-update/README.md) and read the ledger. [The OpenCode prompt](handoff/note-system-update/OPENCODE-PROMPT.md) defines delegated tasks, coordinator approval and the owner approval gate.
 

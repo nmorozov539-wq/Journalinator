@@ -1,6 +1,6 @@
 # Note-system rewrite — progress ledger
 
-Coordinator: OpenCode. Implementation branch: `note-system-update-impl` (child of `note-system-update`). Current implementation head: `52acca1`.
+Coordinator: OpenCode. Implementation branch: `note-system-update-impl` (child of `note-system-update`). Current implementation head: `283fbd1` (T15 `52acca1` plus final verification ledger).
 
 Owner approval: 2026-11-28, Phase 0 gate approved as designed.
 
