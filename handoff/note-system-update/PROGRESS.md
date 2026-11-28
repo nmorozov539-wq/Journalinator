@@ -25,7 +25,7 @@ Owner approval: 2026-11-28, Phase 0 gate approved as designed.
 | # | Task | Owner agent | Branch | Status | Review | Commit |
 | --- | --- | --- | --- | --- | --- | --- |
 | T1 | Parser + renderer + text derivation | explore/general | `task/t1-parser` | complete | approved after 2 review rounds; 65 scoped tests, full suite 518 pass/4 skip/0 fail; title indentation, comment invisibility and reference-image rendering defects fixed | `ea5f71e` |
-| T2 | Schema + registries + templates | — | — | queued | — | — |
+| T2 | Schema + registries + templates | general | `task/t2-schema` | complete | approved; 26 scoped tests, full suite 544 pass/4 skip/0 fail; handwriting key is `handwritten` (no legacy `hand` alias) | `c91945f` |
 | T3 | Removals + store/init/containers | — | — | queued | — | — |
 | T4 | Protocol + leases + lock enforcement | — | — | queued | — | — |
 | T5 | History + activity + diff | — | — | queued | — | — |
