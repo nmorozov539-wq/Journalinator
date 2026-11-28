@@ -1,60 +1,69 @@
 /**
- * Pure private-note transfer packing/importing.
+ * Pure private-note transfer packing/importing for schema v2 notes.
  *
  * A transfer is always a *copy*: the sender keeps their notes. Only the selected notes, their
- * layout cards and labels attached to those notes travel. Free board labels and links whose
- * target is outside the selection are deliberately excluded. Nothing here touches Foundry
- * documents or the shared journal; `private-store.mjs` owns persistence and the socket handler
- * owns authority.
+ * layout cards, attached labels and pins referenced by a packed pin link travel. Free board
+ * labels and links whose target is outside the selection are deliberately excluded. Nothing here
+ * touches Foundry documents or the shared journal; `private-store.mjs` owns persistence and the
+ * socket handler owns authority.
  *
- * Everything is plaintext in the private journal container (Foundry sends journal flags to every
- * connected client). This module adds no encryption and must never be used for vault content.
+ * The payload is plaintext in the private journal container (Foundry sends journal flags to every
+ * connected client). This module is UI-private copy plumbing, not an encryption boundary.
+ *
+ * Payload contract (there is no migration or compatibility adapter):
+ *   transferVersion: 2
+ *   note: { schemaVersion: 2, id, body, revision: 0, layout, skin, attachment, links,
+ *           authorId, createdAt, updatedAt }
+ *   card: { x, y, sizing: { mode, width, minHeight }, autoSizeOrigin, rotation, ports, anchors }
+ *
+ * Legacy title/kind/style/presentation/blocks/image/hint/hidden payloads are rejected.
  */
-import { CARD_STYLES } from "./styles/registry.mjs";
 import { DEFAULT_CARD_PORTS, linkAnchors, validCardPorts } from "./card-ports.mjs";
 import { validAnchorId } from "./anchors.mjs";
+import { normalizePinLink, validPinPosition } from "./board-pins.mjs";
 import { DEFAULT_STAMP_CORNER, STAMP_COLORS, isStampCorner, stampUrl } from "./stamps.mjs";
 import {
-  resolveAttachment, resolveLinkCosmetics, resolvePresentation, sanitizeCardAnchorsWithMain
+  resolveAttachment, resolveLinkCosmetics, sanitizeCardAnchorsWithMain
 } from "./presentation.mjs";
+import { parseDocument, deriveTitle } from "./document/index.mjs";
+import { getLayout, isLayout } from "./layouts/registry.mjs";
+import { resolveSkin } from "./skins/registry.mjs";
 import { t } from "./i18n.mjs";
 
+export const TRANSFER_VERSION = 2;
+export const NOTE_SCHEMA_VERSION = 2;
 export const MAX_TRANSFER_NOTES = 50;
 export const MAX_TRANSFER_TEXT = 250000;
+export const MAX_TRANSFER_BODY = 200000;
 export const MAX_TRANSFER_LABELS = 500;
 
 const MAX_TITLE_LENGTH = 200;
 const MAX_LABEL_TEXT_LENGTH = 500;
-const MAX_BLOCK_TEXT_LENGTH = MAX_TRANSFER_TEXT;
 const MAX_ID_LENGTH = 64;
 const SAFE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const RESERVED_IDS = new Set(["__proto__", "prototype", "constructor"]);
 const NOTE_TYPE = "fvtt-journalinator.note";
 
+const SIZING_WIDTH_MIN = 160;
+const SIZING_WIDTH_MAX = 800;
+const SIZING_MIN_HEIGHT_MIN = 80;
+const SIZING_MIN_HEIGHT_MAX = 1600;
+const CARD_PADDING = 16;
+const PLACEMENT_STEP = 45;
+
+const UNSUPPORTED_TRANSFER =
+  "Unsupported transfer format. This build accepts v2 note transfers only.";
+const UNSUPPORTED_NOTE =
+  "Unsupported note format. This build accepts schema v2 notes only.";
+
 const ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
-/**
- * Conservative placement sizes for cards whose stored width/height are null (auto-sized).
- *
- * Auto-sized cards are sized by CSS from their style and content, so a null card is *not* a
- * 200x90 rectangle. These values are deliberately at or above the rendered defaults: a memo is
- * 360x240, an extended document is 248 wide, a target is 252 wide, and compact paper can reach
- * 220x120. Unknown styles reserve the largest box so a placement can only err by leaving extra
- * breathing room, never by overlapping a real card.
- */
-const CARD_PLACEMENT_SIZES = Object.freeze({
-  sticky: Object.freeze({ width: 220, height: 120 }),
-  document: Object.freeze({ width: 248, height: 240 }),
-  torn: Object.freeze({ width: 225, height: 120 }),
-  wanted: Object.freeze({ width: 252, height: 290 }),
-  memo: Object.freeze({ width: 360, height: 240 })
-});
-const MAX_PLACEMENT_SIZE = Object.freeze({ width: 360, height: 290 });
-
-/** Default size used to reason about an auto-sized card of `style` (unknown styles are largest). */
-export function defaultCardSize(style) {
-  const known = own(CARD_STYLES, style) ? CARD_PLACEMENT_SIZES[style] : null;
-  return known ? { ...known } : { ...MAX_PLACEMENT_SIZE };
+/** Typed non-migrating rejection shared with private-store's incompatibility guard. */
+function incompatibleError(message) {
+  const error = new Error(message);
+  error.name = "JN.Private.IncompatibleFormat";
+  error.code = "unsupported-transfer";
+  return error;
 }
 
 function randomId() {
@@ -82,6 +91,22 @@ function own(value, key) {
   return !!value && typeof value === "object" && Object.hasOwn(value, key);
 }
 
+function isObject(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function finite(value) {
+  return Number.isFinite(value);
+}
+
+function positive(value) {
+  return finite(value) && value > 0 ? value : null;
+}
+
+function clamp(value, min, max, fallback) {
+  return finite(value) ? Math.min(max, Math.max(min, value)) : fallback;
+}
+
 function freshId(taken) {
   for (let attempt = 0; attempt < 1000; attempt++) {
     const id = randomId();
@@ -96,26 +121,18 @@ function freshId(taken) {
   return id;
 }
 
-function noteTextLength(note) {
-  return (Array.isArray(note?.blocks) ? note.blocks : [])
-    .reduce((total, block) => total
-      + (typeof block?.text === "string" ? block.text.length : 0), 0);
-}
-
-function sourceLabelEntries(labels) {
-  if (Array.isArray(labels)) return labels.filter(label => label && typeof label === "object");
-  if (!labels || typeof labels !== "object") return [];
-  return Object.values(labels).filter(label => label && typeof label === "object");
-}
-
-function styleDefaults(style) {
-  return defaultCardSize(style);
-}
-
-function cardSize(card, fallbackWidth = MAX_PLACEMENT_SIZE.width, fallbackHeight = MAX_PLACEMENT_SIZE.height) {
+/** Rendered-size estimate for a v2 card; manual sizing wins, auto uses the widest layout step. */
+export function cardPlacementSize(card, note) {
+  const sizing = card?.sizing;
+  if (sizing?.mode === "manual") {
+    const width = positive(sizing.width);
+    const height = positive(sizing.minHeight);
+    if (width !== null && height !== null) return { width, height };
+  }
+  const layout = getLayout(note?.layout ?? "plain");
   return {
-    width: Number.isFinite(card?.width) && card.width > 0 ? card.width : fallbackWidth,
-    height: Number.isFinite(card?.height) && card.height > 0 ? card.height : fallbackHeight
+    width: layout.widths[layout.widths.length - 1],
+    height: layout.minHeight
   };
 }
 
@@ -123,16 +140,16 @@ function cardSize(card, fallbackWidth = MAX_PLACEMENT_SIZE.width, fallbackHeight
  * World-space axis-aligned bounds of a card after rotation. Rotation is around the card centre,
  * matching the canvas renderer, so a 90° card swaps its visual width and height.
  */
-export function rotatedCardBounds(card, fallbackWidth = MAX_PLACEMENT_SIZE.width, fallbackHeight = MAX_PLACEMENT_SIZE.height) {
-  const { width, height } = cardSize(card, fallbackWidth, fallbackHeight);
-  const rotation = Number.isFinite(card?.rotation) ? card.rotation : 0;
+export function rotatedCardBounds(card, note = null) {
+  const { width, height } = cardPlacementSize(card, note);
+  const rotation = finite(card?.rotation) ? card.rotation : 0;
   const radians = rotation * Math.PI / 180;
   const cos = Math.abs(Math.cos(radians));
   const sin = Math.abs(Math.sin(radians));
   const rotatedWidth = width * cos + height * sin;
   const rotatedHeight = width * sin + height * cos;
-  const centerX = (Number.isFinite(card?.x) ? card.x : 0) + width / 2;
-  const centerY = (Number.isFinite(card?.y) ? card.y : 0) + height / 2;
+  const centerX = (finite(card?.x) ? card.x : 0) + width / 2;
+  const centerY = (finite(card?.y) ? card.y : 0) + height / 2;
   return {
     left: centerX - rotatedWidth / 2,
     top: centerY - rotatedHeight / 2,
@@ -141,7 +158,7 @@ export function rotatedCardBounds(card, fallbackWidth = MAX_PLACEMENT_SIZE.width
   };
 }
 
-function boundsOverlap(a, b, padding = 16) {
+export function boundsOverlap(a, b, padding = CARD_PADDING) {
   return !(a.right + padding < b.left || a.left > b.right + padding
     || a.bottom + padding < b.top || a.top > b.bottom + padding);
 }
@@ -149,35 +166,175 @@ function boundsOverlap(a, b, padding = 16) {
 /**
  * Spiral search for a free spot near `(x,y)` that does not overlap any card in `cards`.
  * Mirrors the shared/private canvas placement rule (16px breathing room, 45px steps). Both the
- * candidate and every existing card use their rotated world-space AABB, so slanted cards reserve
- * the space they actually occupy instead of their unrotated box. Auto-sized cards take their
- * conservative style default from `options.styles[id]` (or `options.notes[id].style`);
- * without metadata they reserve the largest known card box.
+ * candidate and every existing card use their rotated world-space AABB. Existing v2 cards are
+ * measured from `card.sizing`; automatic cards reserve their layout's widest step, so a
+ * placement can only err by leaving extra breathing room.
  */
 export function findFreeSpot(cards, w, h, nearX = 0, nearY = 0, rotation = 0, options = {}) {
-  const candidateFallback = defaultCardSize(options?.style);
-  const width = Number.isFinite(w) && w > 0 ? w : candidateFallback.width;
-  const height = Number.isFinite(h) && h > 0 ? h : candidateFallback.height;
-  const originX = Number.isFinite(nearX) ? nearX : 0;
-  const originY = Number.isFinite(nearY) ? nearY : 0;
-  const styles = options?.styles && typeof options.styles === "object" ? options.styles : null;
+  const fallback = getLayout("plain");
+  const width = positive(w) ?? fallback.widths[0];
+  const height = positive(h) ?? fallback.minHeight;
+  const originX = finite(nearX) ? nearX : 0;
+  const originY = finite(nearY) ? nearY : 0;
   const notes = options?.notes && typeof options.notes === "object" ? options.notes : null;
   const existing = Object.entries(cards ?? {})
-    .filter(([, card]) => card && Number.isFinite(card.x) && Number.isFinite(card.y))
-    .map(([id, card]) => {
-      const style = styles?.[id] ?? notes?.[id]?.style ?? card.style;
-      const fallback = defaultCardSize(style);
-      return rotatedCardBounds(card, fallback.width, fallback.height);
-    });
+    .filter(([, card]) => card && finite(card.x) && finite(card.y))
+    .map(([id, card]) => rotatedCardBounds(card, notes?.[id]));
   for (let radius = 0; radius < 40; radius++) {
     for (let step = 0; step < 8; step++) {
-      const x = originX + Math.cos(step * 0.785) * radius * 45;
-      const y = originY + Math.sin(step * 0.785) * radius * 45;
-      const candidate = rotatedCardBounds({ x, y, width, height, rotation });
+      const x = originX + Math.cos(step * 0.785) * radius * PLACEMENT_STEP;
+      const y = originY + Math.sin(step * 0.785) * radius * PLACEMENT_STEP;
+      const candidate = rotatedCardBounds({
+        x,
+        y,
+        sizing: { mode: "manual", width, minHeight: height },
+        rotation
+      });
       if (!existing.some(bounds => boundsOverlap(candidate, bounds))) return { x, y };
     }
   }
   return { x: originX, y: originY };
+}
+
+function normalizeSizing(sizing) {
+  if (sizing?.mode === "manual") {
+    const width = finite(sizing.width)
+      ? clamp(sizing.width, SIZING_WIDTH_MIN, SIZING_WIDTH_MAX, null) : null;
+    const minHeight = finite(sizing.minHeight)
+      ? clamp(sizing.minHeight, SIZING_MIN_HEIGHT_MIN, SIZING_MIN_HEIGHT_MAX, null) : null;
+    if (width !== null && minHeight !== null) {
+      return { mode: "manual", width, minHeight };
+    }
+  }
+  return { mode: "auto", width: null, minHeight: null };
+}
+
+function deriveNoteTitle(note) {
+  let parsed = null;
+  try {
+    parsed = parseDocument(note?.body ?? "", { selectedLayout: note?.layout });
+  } catch {
+    parsed = null;
+  }
+  return deriveTitle(parsed, {
+    emptyLabel: t("JN.Search.EmptyNote"),
+    imageLabel: t("JN.Search.ImageNote")
+  }).slice(0, MAX_TITLE_LENGTH);
+}
+
+function noteBody(note) {
+  return typeof note?.body === "string" ? note.body : "";
+}
+
+function assertV2Note(note) {
+  if (!isObject(note) || note.schemaVersion !== NOTE_SCHEMA_VERSION) {
+    throw incompatibleError(UNSUPPORTED_NOTE);
+  }
+  if (typeof note.body !== "string") throw incompatibleError(UNSUPPORTED_NOTE);
+  if (!isLayout(note.layout)) throw incompatibleError(UNSUPPORTED_NOTE);
+  if (note.body.length > MAX_TRANSFER_BODY) {
+    throw new Error(t("JN.Transfer.TooLarge", { max: MAX_TRANSFER_BODY }));
+  }
+}
+
+function cleanRouteAnchors(list) {
+  const anchors = [];
+  for (const route of Array.isArray(list) ? list : []) {
+    if (typeof route?.noteId !== "string" || !route.noteId) continue;
+    if (!validAnchorId(route.anchorId)) continue;
+    anchors.push({ noteId: route.noteId, anchorId: route.anchorId });
+  }
+  return anchors;
+}
+
+/** Copies only current v2 link fields; removed legacy markers never travel. */
+function packLink(link) {
+  const cosmetics = resolveLinkCosmetics(link);
+  return {
+    id: typeof link?.id === "string" ? link.id : "",
+    targetId: typeof link?.targetId === "string" ? link.targetId : "",
+    label: typeof link?.label === "string" ? link.label.slice(0, MAX_TITLE_LENGTH) : "",
+    direction: ["none", "one", "two"].includes(link?.direction) ? link.direction : "none",
+    color: typeof link?.color === "string" ? link.color : "",
+    lineStyle: link?.lineStyle === "dashed" ? "dashed" : "solid",
+    origin: link?.origin === "typed" ? "typed" : "drawn",
+    edited: link?.edited === true,
+    createdBy: typeof link?.createdBy === "string" ? link.createdBy : "",
+    sourceAnchorId: validAnchorId(link?.sourceAnchorId) ? link.sourceAnchorId : "",
+    targetAnchorId: validAnchorId(link?.targetAnchorId) ? link.targetAnchorId : "",
+    sourcePinRef: typeof link?.sourcePinRef === "string"
+      ? link.sourcePinRef.slice(0, 200) : "",
+    targetPinRef: typeof link?.targetPinRef === "string"
+      ? link.targetPinRef.slice(0, 200) : "",
+    routeAnchors: cleanRouteAnchors(link?.routeAnchors),
+    ...cosmetics,
+    ...linkAnchors(link)
+  };
+}
+
+function packCard(card, note) {
+  if (!isObject(card) || !finite(card.x) || !finite(card.y)) return null;
+  const sizing = normalizeSizing(card.sizing);
+  const size = cardPlacementSize({ ...card, sizing }, note);
+  const origin = card.autoSizeOrigin;
+  return {
+    x: card.x,
+    y: card.y,
+    sizing,
+    autoSizeOrigin: finite(origin?.x) && finite(origin?.y)
+      ? { x: origin.x, y: origin.y }
+      : { x: card.x + size.width / 2, y: card.y },
+    rotation: finite(card.rotation) ? card.rotation : 0,
+    ports: validCardPorts(card.ports) ? [...card.ports] : [...DEFAULT_CARD_PORTS],
+    anchors: sanitizeCardAnchorsWithMain(
+      card.anchors, resolveAttachment({ attachment: note?.attachment }).mainPinEnabled,
+      typeof note?.authorId === "string" ? note.authorId : ""
+    )
+  };
+}
+
+function packLabel(label) {
+  const stamp = typeof label?.stamp === "string" && stampUrl(label.stamp) ? label.stamp : "";
+  const color = Object.values(STAMP_COLORS).includes(label?.color) ? label.color : "";
+  return {
+    text: typeof label?.text === "string" ? label.text.slice(0, MAX_LABEL_TEXT_LENGTH) : "",
+    x: finite(label?.x) ? label.x : 0,
+    y: finite(label?.y) ? label.y : 0,
+    size: finite(label?.size) ? label.size : 14,
+    color,
+    stamp,
+    noteId: typeof label?.noteId === "string" ? label.noteId : "",
+    corner: isStampCorner(label?.corner) ? label.corner : DEFAULT_STAMP_CORNER
+  };
+}
+
+function packPin(pin, noteId, pinId) {
+  if (!validAnchorId(pinId) || !isObject(pin)) return null;
+  const owner = typeof pin.noteId === "string" ? pin.noteId : "";
+  // Free board pins (no note owner) are deliberately not transported.
+  if (!owner || owner !== noteId) return null;
+  if (!validPinPosition(owner, pin.x, pin.y)) return null;
+  return { noteId: owner, x: pin.x, y: pin.y, isDefault: false };
+}
+
+function packPinLink(link) {
+  if (!isObject(link) || typeof link.source !== "string" || typeof link.target !== "string") {
+    return null;
+  }
+  const clean = normalizePinLink(link);
+  clean.source = link.source;
+  clean.target = link.target;
+  return clean;
+}
+
+function refOwner(ref, boardPins) {
+  if (typeof ref !== "string") return "";
+  if (ref.startsWith("n:")) {
+    const split = ref.indexOf(":", 2);
+    return split > 0 ? ref.slice(2, split) : "";
+  }
+  if (ref.startsWith("p:")) return boardPins[ref.slice(2)]?.noteId ?? "";
+  return "";
 }
 
 /** Counts links and route waypoints that a copy of `noteIds` would have to drop. */
@@ -232,44 +389,8 @@ function liveSharedPage(page) {
   return !!system && typeof system === "object" && !system.deleted;
 }
 
-/** Visible shared blocks only: GM-hidden paragraphs live in the vault and never travel. */
-function sharedVisibleBlocks(system) {
-  return (Array.isArray(system?.blocks) ? system.blocks : [])
-    .filter(block => block && typeof block.text === "string" && block.hidden !== true)
-    .map(block => {
-      const clean = { text: block.text };
-      if (typeof block.authorId === "string") clean.authorId = block.authorId;
-      return clean;
-    });
-}
-
-/** Visible shared links only: GM-hidden links are vault data and must never be copied. */
-function sharedVisibleLinks(system) {
-  return (Array.isArray(system?.links) ? system.links : [])
-    .filter(link => link && typeof link === "object" && link.hidden !== true)
-    .map(link => clone(link));
-}
-
-/** Converts one shared note page into the note shape `importPrivateTransfer` expects. */
-function sharedTransferNote(page) {
-  const system = page?.system && typeof page.system === "object" ? page.system : {};
-  return {
-    id: typeof page?.id === "string" ? page.id : page?._id,
-    title: typeof page?.name === "string" ? page.name : "",
-    kind: system.kind === "location" ? "location" : "note",
-    style: system.style,
-    targetHeading: system.targetHeading,
-    label: typeof system.label === "string" ? system.label : "",
-    schemaVersion: system.schemaVersion,
-    presentation: system.presentation,
-    attachment: system.attachment,
-    image: system.image,
-    backgroundImage: system.backgroundImage,
-    blocks: sharedVisibleBlocks(system),
-    links: sharedVisibleLinks(system),
-    createdAt: system.createdAt,
-    updatedAt: system.updatedAt
-  };
+function sharedSystem(page) {
+  return page?.system && typeof page.system === "object" ? page.system : {};
 }
 
 /** External-link/waypoint accounting for a shared→private copy, for the sender UI warning. */
@@ -278,19 +399,41 @@ export function countSharedTransferDrops(sharedPages, noteIds) {
   const selected = new Set((Array.isArray(noteIds) ? noteIds : [])
     .filter(id => typeof id === "string" && liveSharedPage(pages.get(id))));
   const notes = {};
-  for (const id of selected) notes[id] = { links: sharedVisibleLinks(pages.get(id).system) };
+  for (const id of selected) {
+    const system = sharedSystem(pages.get(id));
+    notes[id] = { links: Array.isArray(system.links) ? system.links : [] };
+  }
   return countDrops(notes, selected);
 }
 
+/** Converts one shared v2 page into the note payload shape `importPrivateTransfer` expects. */
+function sharedTransferNote(page) {
+  const system = sharedSystem(page);
+  const note = {
+    schemaVersion: NOTE_SCHEMA_VERSION,
+    id: typeof page?.id === "string" ? page.id : page?._id,
+    body: typeof system.body === "string" ? system.body : "",
+    revision: 0,
+    layout: system.layout,
+    skin: resolveSkin(system.skin),
+    attachment: resolveAttachment({ attachment: system.attachment }),
+    links: (Array.isArray(system.links) ? system.links : []).map(packLink),
+    authorId: typeof system.authorId === "string" ? system.authorId : "",
+    createdAt: finite(system.createdAt) ? system.createdAt : Date.now(),
+    updatedAt: finite(system.updatedAt) ? system.updatedAt : Date.now()
+  };
+  assertV2Note({ ...note, schemaVersion: system.schemaVersion });
+  return note;
+}
+
 /**
- * Packs a bounded, self-contained private copy of selected *visible shared* notes.
+ * Packs a bounded, self-contained private copy of selected shared v2 notes.
  *
- * The shared journal is authoritative input here: hidden blocks and hidden links are excluded
- * before packing, so vault content can never leak into a private transfer. Only attached labels
- * and board pins of the selected notes travel, and a board pin must be referenced by a packed
- * pin link; orphaned pins never leave their canvas. Free labels, hidden labels and pin links whose
- * endpoints fall outside the selection are omitted. `toUserId` may equal `fromUserId`: the
- * socket handler uses that shape for a direct self-import and never stores it as a pending offer.
+ * The shared journal is authoritative input. Only current v2 body/layout/skin/attachment/links
+ * are read; explicit selection determines which relationships survive. Attached labels and board
+ * pins referenced by a packed pin link travel; orphaned/free pins and links to notes outside the
+ * selection stay behind. `toUserId` may equal `fromUserId`: the socket handler uses that shape for
+ * a direct self-import and never stores it as a pending offer.
  */
 export function buildSharedTransfer(sharedPages, layout, noteIds, { fromUserId, toUserId } = {}) {
   if (typeof fromUserId !== "string" || !fromUserId
@@ -316,8 +459,9 @@ export function buildSharedTransfer(sharedPages, layout, noteIds, { fromUserId, 
         || !liveSharedPage(pages.get(noteId))) {
       throw new Error(t("JN.Transfer.Stale"));
     }
+    const note = sharedTransferNote(pages.get(noteId));
     seen.add(noteId);
-    totalText += noteTextLength({ blocks: sharedVisibleBlocks(pages.get(noteId).system) });
+    totalText += note.body.length;
     if (totalText > MAX_TRANSFER_TEXT) {
       throw new Error(t("JN.Transfer.TooLarge", { max: MAX_TRANSFER_TEXT }));
     }
@@ -325,17 +469,10 @@ export function buildSharedTransfer(sharedPages, layout, noteIds, { fromUserId, 
   }
 
   let labelCount = 0;
-  const refOwner = ref => {
-    if (typeof ref !== "string") return "";
-    if (ref.startsWith("n:")) return ref.slice(2, ref.indexOf(":", 2));
-    if (ref.startsWith("p:")) return boardPins[ref.slice(2)]?.noteId ?? "";
-    return "";
-  };
   const transferablePinLinks = Object.entries(boardLinks)
-    .filter(([, link]) => link && link.hidden !== true
-      && seen.has(refOwner(link.source)) && seen.has(refOwner(link.target)));
-  // A pin with no transferable connection is orphaned and stays behind, even when its note is
-  // selected. Only board pins actually referenced by a packed pin link may travel.
+    .filter(([, link]) => isObject(link)
+      && seen.has(refOwner(link.source, boardPins))
+      && seen.has(refOwner(link.target, boardPins)));
   const linkedPinIds = new Set();
   for (const [, link] of transferablePinLinks) {
     for (const ref of [link.source, link.target]) {
@@ -345,10 +482,11 @@ export function buildSharedTransfer(sharedPages, layout, noteIds, { fromUserId, 
 
   const packed = selected.map(noteId => {
     const page = pages.get(noteId);
+    const note = sharedTransferNote(page);
     const attached = {};
     const usedLabelIds = new Set();
     for (const [labelId, label] of Object.entries(labels)) {
-      if (!label || typeof label !== "object" || label.hidden === true || label.noteId !== noteId) continue;
+      if (!isObject(label) || label.noteId !== noteId) continue;
       labelCount += 1;
       if (labelCount > MAX_TRANSFER_LABELS) {
         throw new Error(t("JN.Transfer.TooManyLabels", { max: MAX_TRANSFER_LABELS }));
@@ -357,25 +495,29 @@ export function buildSharedTransfer(sharedPages, layout, noteIds, { fromUserId, 
         && SAFE_ID_RE.test(labelId) && !RESERVED_IDS.has(labelId) ? labelId : "";
       if (!safeLabelId || usedLabelIds.has(safeLabelId)) safeLabelId = freshId(usedLabelIds);
       else usedLabelIds.add(safeLabelId);
-      attached[safeLabelId] = clone(label);
+      attached[safeLabelId] = packLabel(label);
+    }
+    const pins = {};
+    for (const [id, pin] of Object.entries(boardPins)) {
+      if (!linkedPinIds.has(id)) continue;
+      const clean = packPin(pin, noteId, id);
+      if (clean) pins[id] = clean;
     }
     return {
-      note: sharedTransferNote(page),
-      card: own(cards, noteId) && cards[noteId] && typeof cards[noteId] === "object"
-        ? clone(cards[noteId]) : null,
+      note,
+      card: own(cards, noteId) ? packCard(cards[noteId], note) : null,
       labels: attached,
-      pins: Object.fromEntries(Object.entries(boardPins)
-        .filter(([id, pin]) => pin && pin.hidden !== true && pin.noteId === noteId
-          && linkedPinIds.has(id))
-        .map(([id, pin]) => [id, clone(pin)]))
+      pins
     };
   });
 
   const packedPinLinks = Object.fromEntries(transferablePinLinks
-    .map(([id, link]) => [id, clone(link)]));
+    .map(([id, link]) => [id, packPinLink(link)])
+    .filter(([, link]) => link));
 
   const drops = countSharedTransferDrops(pages, selected);
   return {
+    transferVersion: TRANSFER_VERSION,
     fromUserId,
     toUserId,
     createdAt: Date.now(),
@@ -383,7 +525,7 @@ export function buildSharedTransfer(sharedPages, layout, noteIds, { fromUserId, 
     pinLinks: packedPinLinks,
     summary: {
       count: packed.length,
-      titles: packed.map(entry => String(entry.note?.title ?? "").slice(0, MAX_TITLE_LENGTH)),
+      titles: packed.map(entry => deriveNoteTitle(entry.note)),
       droppedLinks: drops.droppedLinks,
       droppedWaypoints: drops.droppedWaypoints
     }
@@ -391,18 +533,19 @@ export function buildSharedTransfer(sharedPages, layout, noteIds, { fromUserId, 
 }
 
 /**
- * Packs a bounded, self-contained copy of selected private notes.
+ * Packs a bounded, self-contained copy of selected private v2 notes.
  *
- * The returned object still needs an `id` before it is stored as a pending transfer. It contains
- * `{fromUserId, toUserId, createdAt, notes:[{note,card,labels}],
- * summary:{count,titles,droppedLinks,droppedWaypoints}}`.
+ * `allowSelf` is only for private→shared publication, which reuses the importer to allocate fresh
+ * ids and remap internal relationships without creating a pending inbox offer.
  */
-export function buildPrivateTransfer(workspace, noteIds, { fromUserId, toUserId } = {}) {
+export function buildPrivateTransfer(workspace, noteIds, {
+  fromUserId, toUserId, allowSelf = false
+} = {}) {
   if (typeof fromUserId !== "string" || !fromUserId
       || typeof toUserId !== "string" || !toUserId) {
     throw new Error(t("JN.Transfer.UserMissing"));
   }
-  if (fromUserId === toUserId) throw new Error(t("JN.Transfer.Self"));
+  if (fromUserId === toUserId && !allowSelf) throw new Error(t("JN.Transfer.Self"));
   if (!Array.isArray(noteIds) || !noteIds.length) throw new Error(t("JN.Transfer.None"));
   if (noteIds.length > MAX_TRANSFER_NOTES) {
     throw new Error(t("JN.Transfer.TooMany", { max: MAX_TRANSFER_NOTES }));
@@ -413,8 +556,10 @@ export function buildPrivateTransfer(workspace, noteIds, { fromUserId, toUserId 
     ? workspace.layout.cards : {};
   const labels = workspace?.layout?.labels && typeof workspace.layout.labels === "object"
     ? workspace.layout.labels : {};
-  const boardPins = workspace?.layout?.pins ?? {};
-  const boardLinks = workspace?.layout?.pinLinks ?? {};
+  const boardPins = workspace?.layout?.pins && typeof workspace.layout.pins === "object"
+    ? workspace.layout.pins : {};
+  const boardLinks = workspace?.layout?.pinLinks && typeof workspace.layout.pinLinks === "object"
+    ? workspace.layout.pinLinks : {};
 
   const selected = [];
   const seen = new Set();
@@ -424,9 +569,9 @@ export function buildPrivateTransfer(workspace, noteIds, { fromUserId, toUserId 
       throw new Error(t("JN.Transfer.Stale"));
     }
     const note = notes[noteId];
-    if (!note || typeof note !== "object") throw new Error(t("JN.Transfer.Stale"));
+    assertV2Note(note);
     seen.add(noteId);
-    totalText += noteTextLength(note);
+    totalText += note.body.length;
     if (totalText > MAX_TRANSFER_TEXT) {
       throw new Error(t("JN.Transfer.TooLarge", { max: MAX_TRANSFER_TEXT }));
     }
@@ -434,16 +579,10 @@ export function buildPrivateTransfer(workspace, noteIds, { fromUserId, toUserId 
   }
 
   let labelCount = 0;
-  const refOwner = ref => {
-    if (typeof ref !== "string") return "";
-    if (ref.startsWith("n:")) return ref.slice(2, ref.indexOf(":", 2));
-    if (ref.startsWith("p:")) return boardPins[ref.slice(2)]?.noteId ?? "";
-    return "";
-  };
   const transferablePinLinks = Object.entries(boardLinks)
-    .filter(([, link]) => seen.has(refOwner(link?.source)) && seen.has(refOwner(link?.target)));
-  // Orphaned board pins stay on the source canvas even when their note is selected. A pin only
-  // travels when a packed pin link actually references it.
+    .filter(([, link]) => isObject(link)
+      && seen.has(refOwner(link.source, boardPins))
+      && seen.has(refOwner(link.target, boardPins)));
   const linkedPinIds = new Set();
   for (const [, link] of transferablePinLinks) {
     for (const ref of [link.source, link.target]) {
@@ -452,10 +591,24 @@ export function buildPrivateTransfer(workspace, noteIds, { fromUserId, toUserId 
   }
 
   const packed = selected.map(noteId => {
+    const source = notes[noteId];
+    const note = {
+      schemaVersion: NOTE_SCHEMA_VERSION,
+      id: source.id,
+      body: source.body,
+      revision: 0,
+      layout: source.layout,
+      skin: resolveSkin(source.skin),
+      attachment: resolveAttachment({ attachment: source.attachment }),
+      links: (Array.isArray(source.links) ? source.links : []).map(packLink),
+      authorId: typeof source.authorId === "string" ? source.authorId : "",
+      createdAt: finite(source.createdAt) ? source.createdAt : Date.now(),
+      updatedAt: finite(source.updatedAt) ? source.updatedAt : Date.now()
+    };
     const attached = {};
     const usedLabelIds = new Set();
     for (const [labelId, label] of Object.entries(labels)) {
-      if (!label || typeof label !== "object" || label.noteId !== noteId) continue;
+      if (!isObject(label) || label.noteId !== noteId) continue;
       labelCount += 1;
       if (labelCount > MAX_TRANSFER_LABELS) {
         throw new Error(t("JN.Transfer.TooManyLabels", { max: MAX_TRANSFER_LABELS }));
@@ -464,24 +617,29 @@ export function buildPrivateTransfer(workspace, noteIds, { fromUserId, toUserId 
         && SAFE_ID_RE.test(labelId) && !RESERVED_IDS.has(labelId) ? labelId : "";
       if (!safeLabelId || usedLabelIds.has(safeLabelId)) safeLabelId = freshId(usedLabelIds);
       else usedLabelIds.add(safeLabelId);
-      attached[safeLabelId] = clone(label);
+      attached[safeLabelId] = packLabel(label);
+    }
+    const pins = {};
+    for (const [id, pin] of Object.entries(boardPins)) {
+      if (!linkedPinIds.has(id)) continue;
+      const clean = packPin(pin, noteId, id);
+      if (clean) pins[id] = clean;
     }
     return {
-      note: clone(notes[noteId]),
-      card: own(cards, noteId) && cards[noteId] && typeof cards[noteId] === "object"
-        ? clone(cards[noteId]) : null,
+      note,
+      card: own(cards, noteId) ? packCard(cards[noteId], note) : null,
       labels: attached,
-      pins: Object.fromEntries(Object.entries(boardPins)
-        .filter(([id, pin]) => pin?.noteId === noteId && linkedPinIds.has(id))
-        .map(([id, pin]) => [id, clone(pin)]))
+      pins
     };
   });
 
   const packedPinLinks = Object.fromEntries(transferablePinLinks
-    .map(([id, link]) => [id, clone(link)]));
+    .map(([id, link]) => [id, packPinLink(link)])
+    .filter(([, link]) => link));
 
   const drops = countDrops(notes, new Set(selected));
   return {
+    transferVersion: TRANSFER_VERSION,
     fromUserId,
     toUserId,
     createdAt: Date.now(),
@@ -489,25 +647,17 @@ export function buildPrivateTransfer(workspace, noteIds, { fromUserId, toUserId 
     pinLinks: packedPinLinks,
     summary: {
       count: packed.length,
-      titles: packed.map(entry => String(entry.note?.title ?? "").slice(0, MAX_TITLE_LENGTH)),
+      titles: packed.map(entry => deriveNoteTitle(entry.note)),
       droppedLinks: drops.droppedLinks,
       droppedWaypoints: drops.droppedWaypoints
     }
   };
 }
 
-function importBlocks(blocks) {
-  const source = Array.isArray(blocks) && blocks.length ? blocks : [{ text: "" }];
-  const used = new Set();
-  return source.map(block => {
-    // Block ids are local, but a copy gets fresh ones so repeated imports can never collide.
-    const clean = {
-      blockId: freshId(used),
-      text: typeof block?.text === "string" ? block.text.slice(0, MAX_BLOCK_TEXT_LENGTH) : ""
-    };
-    if (typeof block?.authorId === "string") clean.authorId = block.authorId.slice(0, MAX_ID_LENGTH);
-    return clean;
-  });
+function sourceLabelEntries(labels) {
+  if (Array.isArray(labels)) return labels.filter(label => label && typeof label === "object");
+  if (!labels || typeof labels !== "object") return [];
+  return Object.values(labels).filter(label => label && typeof label === "object");
 }
 
 function importLinks(links, { newId, noteIdMap, pinRefMap, recipientId, usedLinkIds }) {
@@ -529,26 +679,15 @@ function importLinks(links, { newId, noteIdMap, pinRefMap, recipientId, usedLink
       }
       routeAnchors.push({ noteId: mapped, anchorId: route.anchorId });
     }
-    const cosmetics = resolveLinkCosmetics(link);
+    const clean = packLink(link);
     imported.push({
+      ...clean,
       id: freshId(usedLinkIds),
       targetId,
-      label: typeof link?.label === "string"
-        ? link.label.slice(0, MAX_TITLE_LENGTH) : "",
-      direction: ["none", "one", "two"].includes(link?.direction) ? link.direction : "none",
-      color: typeof link?.color === "string" ? link.color : "",
-      lineStyle: link?.lineStyle === "dashed" ? "dashed" : "solid",
-      origin: link?.origin === "typed" ? "typed" : "drawn",
-      edited: link?.edited === true,
       createdBy: recipientId,
-      hint: false,
-      sourceAnchorId: validAnchorId(link?.sourceAnchorId) ? link.sourceAnchorId : "",
-      targetAnchorId: validAnchorId(link?.targetAnchorId) ? link.targetAnchorId : "",
       sourcePinRef: pinRefMap(link?.sourcePinRef) ?? "",
       targetPinRef: pinRefMap(link?.targetPinRef) ?? "",
-      routeAnchors,
-      ...cosmetics,
-      ...linkAnchors(link)
+      routeAnchors
     });
   }
   return { links: imported, dropped, droppedWaypoints };
@@ -557,40 +696,28 @@ function importLinks(links, { newId, noteIdMap, pinRefMap, recipientId, usedLink
 function importLabels(labels, { oldNoteId, newNoteId, usedLabelIds }) {
   const imported = {};
   for (const label of sourceLabelEntries(labels)) {
-    // Defensive: a free label or a label for another note must never ride along.
     if (label.noteId !== oldNoteId) continue;
-    const stamp = typeof label.stamp === "string" && stampUrl(label.stamp) ? label.stamp : "";
-    const color = Object.values(STAMP_COLORS).includes(label.color) ? label.color : "";
-    const id = freshId(usedLabelIds);
-    imported[id] = {
-      text: typeof label.text === "string" ? label.text.slice(0, MAX_LABEL_TEXT_LENGTH) : "",
-      x: Number.isFinite(label.x) ? label.x : 0,
-      y: Number.isFinite(label.y) ? label.y : 0,
-      size: Number.isFinite(label.size) ? label.size : 14,
-      color,
-      stamp,
-      noteId: newNoteId,
-      corner: isStampCorner(label.corner) ? label.corner : DEFAULT_STAMP_CORNER
-    };
+    const clean = packLabel({ ...label, noteId: newNoteId });
+    imported[freshId(usedLabelIds)] = clean;
   }
   return imported;
 }
 
-function importCard(sourceCard, note, newId, recipientId, cards, notes) {
-  const defaults = styleDefaults(note.style);
-  const width = Number.isFinite(sourceCard?.width) && sourceCard.width > 0
-    ? sourceCard.width : defaults.width;
-  const height = Number.isFinite(sourceCard?.height) && sourceCard.height > 0
-    ? sourceCard.height : defaults.height;
-  const spot = findFreeSpot(
-    cards, width, height,
-    Number.isFinite(sourceCard?.x) ? sourceCard.x : 0,
-    Number.isFinite(sourceCard?.y) ? sourceCard.y : 0,
-    Number.isFinite(sourceCard?.rotation) ? sourceCard.rotation : 0,
-    { notes }
-  );
+function importCard(sourceCard, note, recipientId, cards, notes) {
+  const sizing = normalizeSizing(sourceCard?.sizing);
+  const size = cardPlacementSize({ ...sourceCard, sizing }, note);
+  const sourceX = finite(sourceCard?.x) ? sourceCard.x : 0;
+  const sourceY = finite(sourceCard?.y) ? sourceCard.y : 0;
+  const rotation = finite(sourceCard?.rotation) ? sourceCard.rotation : 0;
+  const spot = findFreeSpot(cards, size.width, size.height, sourceX, sourceY, rotation, { notes });
+  const sourceOrigin = sourceCard?.autoSizeOrigin;
+  const origin = finite(sourceOrigin?.x) && finite(sourceOrigin?.y)
+    ? { x: sourceOrigin.x + (spot.x - sourceX), y: sourceOrigin.y + (spot.y - sourceY) }
+    : { x: spot.x + size.width / 2, y: spot.y };
   const anchors = sanitizeCardAnchorsWithMain(
-    sourceCard?.anchors, resolveAttachment(note).mainPinEnabled, recipientId
+    sourceCard?.anchors,
+    resolveAttachment({ attachment: note.attachment }).mainPinEnabled,
+    recipientId
   );
   for (const [id, anchor] of Object.entries(anchors)) {
     anchors[id] = { ...anchor, createdBy: recipientId };
@@ -598,33 +725,56 @@ function importCard(sourceCard, note, newId, recipientId, cards, notes) {
   return {
     x: spot.x,
     y: spot.y,
-    width: Number.isFinite(sourceCard?.width) && sourceCard.width > 0 ? sourceCard.width : null,
-    height: Number.isFinite(sourceCard?.height) && sourceCard.height > 0 ? sourceCard.height : null,
-    rotation: Number.isFinite(sourceCard?.rotation) ? sourceCard.rotation : 0,
+    sizing,
+    autoSizeOrigin: origin,
+    rotation,
     ports: validCardPorts(sourceCard?.ports) ? [...sourceCard.ports] : [...DEFAULT_CARD_PORTS],
     anchors
   };
 }
 
+function assertTransfer(transfer) {
+  if (!isObject(transfer) || transfer.transferVersion !== TRANSFER_VERSION) {
+    throw incompatibleError(UNSUPPORTED_TRANSFER);
+  }
+  if (!Array.isArray(transfer.notes) || !transfer.notes.length) {
+    throw new Error(t("JN.Transfer.None"));
+  }
+  if (transfer.notes.length > MAX_TRANSFER_NOTES) {
+    throw new Error(t("JN.Transfer.TooMany", { max: MAX_TRANSFER_NOTES }));
+  }
+}
+
 /**
- * Deep-copies a transfer into `workspace`. Note, card, link and label ids are regenerated; links
- * and route waypoints are remapped only when their target note is part of the transfer. Cards are
- * placed near their original positions without overlapping destination cards. The recipient is
- * the new owner/author, and the input workspace/transfer are never mutated.
+ * Deep-copies a v2 transfer into `workspace`. Note, card, link, label, pin and pin-link ids are
+ * regenerated; links and route waypoints are remapped only when their target note is part of the
+ * transfer. Cards keep sizing/origin/rotation/anchors but are placed near their original positions
+ * using rotated AABB footprints without overlapping destination cards. The recipient is the new
+ * owner/author; the input workspace/transfer are never mutated.
  *
  * Returns `{ workspace, imported, droppedLinks, droppedWaypoints }` where `imported` is the list
- * of new note ids. `droppedWaypoints` counts route anchors on otherwise-copied links whose
- * waypoint note stayed outside the selection.
+ * of new note ids. Revision/history/activity identities are fresh because none are carried in the
+ * payload.
  */
 export function importPrivateTransfer(workspace, transfer, recipientId) {
   if (typeof recipientId !== "string" || !recipientId) {
     throw new Error(t("JN.Transfer.UserMissing"));
   }
-  if (!transfer || !Array.isArray(transfer.notes) || !transfer.notes.length) {
-    throw new Error(t("JN.Transfer.None"));
-  }
-  if (transfer.notes.length > MAX_TRANSFER_NOTES) {
-    throw new Error(t("JN.Transfer.TooMany", { max: MAX_TRANSFER_NOTES }));
+  assertTransfer(transfer);
+
+  let totalText = 0;
+  let labelCount = 0;
+  for (const entry of transfer.notes) {
+    const note = entry?.note;
+    assertV2Note(note);
+    totalText += note.body.length;
+    if (totalText > MAX_TRANSFER_TEXT) {
+      throw new Error(t("JN.Transfer.TooLarge", { max: MAX_TRANSFER_TEXT }));
+    }
+    labelCount += sourceLabelEntries(entry?.labels).length;
+    if (labelCount > MAX_TRANSFER_LABELS) {
+      throw new Error(t("JN.Transfer.TooManyLabels", { max: MAX_TRANSFER_LABELS }));
+    }
   }
 
   const result = clone(workspace && typeof workspace === "object" ? workspace : {});
@@ -685,37 +835,20 @@ export function importPrivateTransfer(workspace, transfer, recipientId) {
     const sourceNote = entry.note;
     const oldId = sourceNote.id;
     const newId = noteIdMap.get(oldId);
-    const title = typeof sourceNote.title === "string"
-      ? sourceNote.title.slice(0, MAX_TITLE_LENGTH) : "";
-    const presentation = resolvePresentation({
-      name: title,
-      system: {
-        style: sourceNote.style,
-        targetHeading: sourceNote.targetHeading,
-        label: sourceNote.label,
-        presentation: sourceNote.presentation
-      }
-    });
-    const { label: _resolvedLabel, ...presentationFields } = presentation;
     const note = {
       id: newId,
-      title,
-      kind: sourceNote.kind === "location" ? "location" : "note",
-      style: own(CARD_STYLES, sourceNote.style) ? sourceNote.style : "sticky",
-      targetHeading: typeof sourceNote.targetHeading === "string"
-        ? sourceNote.targetHeading.slice(0, 80) : "",
-      label: typeof sourceNote.label === "string" ? sourceNote.label : "",
-      schemaVersion: Number.isInteger(sourceNote.schemaVersion) && sourceNote.schemaVersion > 0
-        ? sourceNote.schemaVersion : 1,
-      presentation: presentationFields,
-      attachment: resolveAttachment({ system: { attachment: sourceNote.attachment } }),
-      image: typeof sourceNote.image === "string" ? sourceNote.image : null,
-      backgroundImage: typeof sourceNote.backgroundImage === "string"
-        ? sourceNote.backgroundImage : null,
-      blocks: importBlocks(sourceNote.blocks),
+      body: sourceNote.body,
+      revision: 0,
+      layout: sourceNote.layout,
+      skin: resolveSkin(sourceNote.skin),
+      attachment: resolveAttachment({ attachment: sourceNote.attachment }),
       links: [],
-      createdAt: Number.isFinite(sourceNote.createdAt) ? sourceNote.createdAt : Date.now(),
-      updatedAt: Date.now()
+      authorId: recipientId,
+      createdAt: finite(sourceNote.createdAt) ? sourceNote.createdAt : Date.now(),
+      updatedAt: Date.now(),
+      schemaVersion: NOTE_SCHEMA_VERSION,
+      deleted: null,
+      lastSave: null
     };
 
     const linkResult = importLinks(sourceNote.links, {
@@ -725,15 +858,15 @@ export function importPrivateTransfer(workspace, transfer, recipientId) {
     droppedLinks += linkResult.dropped;
     droppedWaypoints += linkResult.droppedWaypoints;
 
-    const card = importCard(entry.card, note, newId, recipientId, result.layout.cards, result.notes);
+    const card = importCard(entry.card, note, recipientId, result.layout.cards, result.notes);
     result.notes[newId] = note;
     result.layout.cards[newId] = card;
     for (const [oldPinId, pin] of Object.entries(entry.pins ?? {})) {
       const newPinId = pinIdMap.get(oldPinId);
-      if (!newPinId || !Number.isFinite(pin?.x) || !Number.isFinite(pin?.y)
-          || pin.x < 0 || pin.x > 1 || pin.y < 0 || pin.y > 1) continue;
-      result.layout.pins[newPinId] = { noteId: newId, x: pin.x, y: pin.y,
-        isDefault: false };
+      if (!newPinId || !isObject(pin) || !validPinPosition(newId, pin.x, pin.y)) continue;
+      result.layout.pins[newPinId] = {
+        noteId: newId, x: pin.x, y: pin.y, isDefault: false
+      };
     }
     Object.assign(result.layout.labels, importLabels(entry.labels, {
       oldNoteId: oldId, newNoteId: newId, usedLabelIds
@@ -745,7 +878,8 @@ export function importPrivateTransfer(workspace, transfer, recipientId) {
   for (const link of Object.values(transfer.pinLinks ?? {})) {
     const source = pinRefMap(link?.source), target = pinRefMap(link?.target);
     if (!source || !target || source === target) continue;
-    result.layout.pinLinks[freshId(usedPinLinkIds)] = { ...link, source, target };
+    const clean = packPinLink({ ...link, source, target });
+    if (clean) result.layout.pinLinks[freshId(usedPinLinkIds)] = clean;
   }
 
   return { workspace: result, imported, droppedLinks, droppedWaypoints };
