@@ -8,6 +8,7 @@ import {
 import { seedForNote } from "../scripts/skins/registry.mjs";
 import { getLayout } from "../scripts/layouts/registry.mjs";
 import { originFromBox } from "../scripts/sizing/geometry.mjs";
+import { t } from "../scripts/i18n.mjs";
 
 const MODULE_ID = "fvtt-journalinator";
 const owner = makeUser("StoreOwner000001", { name: "Owner" });
@@ -143,8 +144,8 @@ test("noteView derives localized titles and exposes only v2 fields", async () =>
 
   assert.equal(privateStore.noteView(page, read.notes[titled.note.id]).name, "Visible title");
   assert.equal(privateStore.noteView(page, read.notes[untitled.note.id]).name, "Just body text");
-  assert.equal(privateStore.noteView(page, read.notes[empty.note.id]).name, "JN.Search.EmptyNote");
-  assert.equal(privateStore.noteView(page, read.notes[image.note.id]).name, "JN.Search.ImageNote");
+  assert.equal(privateStore.noteView(page, read.notes[empty.note.id]).name, t("JN.Search.EmptyNote"));
+  assert.equal(privateStore.noteView(page, read.notes[image.note.id]).name, t("JN.Search.ImageNote"));
 
   const view = privateStore.noteView(page, read.notes[titled.note.id]);
   assert.equal(view.system.schemaVersion, 2);

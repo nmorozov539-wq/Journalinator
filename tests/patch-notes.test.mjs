@@ -61,11 +61,14 @@ test("latestPatchNoteId prefers Unreleased, then the highest version", () => {
   assert.equal(latestPatchNoteId(released), "v0.9.0");
 });
 
-test("the module changelog covers every version from 0.8.0", () => {
+test("the module changelog covers every released version from 0.8.0", () => {
   const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
   const sections = parsePatchNotes(changelog);
-  const versions = sections.filter(section => section.version).map(section => section.version);
-  assert.equal(latestPatchNoteId(sections), "v0.9.6");
+  assert.equal(sections[0]?.id, "unreleased",
+    "the rewrite section is intentionally pre-release and does not bump the module version");
+  const released = sections.filter(section => section.id !== "unreleased");
+  const versions = released.filter(section => section.version).map(section => section.version);
+  assert.equal(latestPatchNoteId(released), "v0.9.6");
   for (const expected of ["0.8.0", "0.8.1", "0.8.2", "0.8.3", "0.8.4",
     "0.9.0", "0.9.1", "0.9.2", "0.9.3", "0.9.4", "0.9.5", "0.9.6"]) {
     assert.ok(versions.includes(expected), `missing ${expected}`);

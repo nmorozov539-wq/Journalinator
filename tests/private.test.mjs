@@ -13,6 +13,7 @@ const {
   WORKSPACE_FORMAT, NOTE_SCHEMA_VERSION, PrivateIncompatibleFormat
 } = await import("../scripts/store/private-store.mjs");
 const { buildPrivateTransfer } = await import("../scripts/private-transfer.mjs");
+const { t } = await import("../scripts/i18n.mjs");
 const { getLayout } = await import("../scripts/layouts/registry.mjs");
 const { originFromBox } = await import("../scripts/sizing/geometry.mjs");
 
@@ -168,8 +169,8 @@ test("derived labels use the v2 body and never an internal page name", async () 
   const read = privateStore.read(page);
   assert.equal(privateStore.noteView(page, read.notes[titled.id]).name, "Visible title");
   assert.equal(privateStore.noteView(page, read.notes[plain.id]).name, "Just the body");
-  assert.equal(privateStore.noteView(page, read.notes[empty.id]).name, "JN.Search.EmptyNote");
-  assert.equal(privateStore.noteView(page, read.notes[image.id]).name, "JN.Search.ImageNote");
+  assert.equal(privateStore.noteView(page, read.notes[empty.id]).name, t("JN.Search.EmptyNote"));
+  assert.equal(privateStore.noteView(page, read.notes[image.id]).name, t("JN.Search.ImageNote"));
 });
 
 test("v2 links, anchors, pins and sizing survive a workspace roundtrip", async () => {

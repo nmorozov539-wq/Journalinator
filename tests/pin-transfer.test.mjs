@@ -10,11 +10,11 @@ const { buildPrivateTransfer, importPrivateTransfer } = await import("../scripts
 test("private transfers copy note pins and remap connection identities", () => {
   const source = { notes: {}, layout: { cards: {}, labels: {}, pins: {}, pinLinks: {}, viewport: null },
     trash: [] };
-  const first = privateStore.makeNote({ title: "First", x: 10, y: 20,
+  const first = privateStore.makeNote({ body: "# First", x: 10, y: 20,
     cards: source.layout.cards });
   source.notes[first.note.id] = first.note;
   source.layout.cards[first.note.id] = first.card;
-  const second = privateStore.makeNote({ title: "Second", x: 300, y: 20,
+  const second = privateStore.makeNote({ body: "# Second", x: 300, y: 20,
     cards: source.layout.cards });
   source.notes[second.note.id] = second.note;
   source.layout.cards[second.note.id] = second.card;
@@ -41,8 +41,10 @@ test("private transfers copy note pins and remap connection identities", () => {
   assert.notEqual(newPinId, "manual");
   assert.deepEqual([newPin.noteId, newPin.x, newPin.y], [newFirst, 0.25, 0.75]);
   assert.deepEqual(Object.values(imported.workspace.layout.pinLinks)[0], {
-    source: `p:${newPinId}`, target: `n:${newSecond}:main`
-  });
+    source: `p:${newPinId}`, target: `n:${newSecond}:main`,
+    label: "", color: "", material: "linen", thickness: 2.6, slack: 0.09,
+    pattern: "continuous", ends: "standard", secondaryColor: ""
+  }, "v2 pin links carry normalized cosmetics");
   assert.equal(source.layout.pins.manual.noteId, first.note.id,
     "the sender keeps the original pin and note");
 });

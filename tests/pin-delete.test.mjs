@@ -31,10 +31,14 @@ const selectPin = pin => {
   event(pin, "pointerdown", 50, 50);
   event(pin, "pointerup", 50, 50);
 };
+const SKIN = { paper: "amber", font: "default", torn: false, backgroundImage: null, tiltSeed: 0 };
 const noteId = async title => {
-  await requestWrite({ type: "createNote", title, x: 10, y: 20 });
+  const reply = await requestWrite({
+    type: "createNote", body: `# ${title}`, layout: "plain", skin: SKIN, x: 10, y: 20
+  });
   await tick();
-  return notesStore.getAllNotes().find(note => note.name === title).id;
+  assert.equal(reply?.type, "noteCreated");
+  return reply.noteId;
 };
 const canvasFor = actions => {
   const canvas = new JournalCanvas({ onSelectNote() {},

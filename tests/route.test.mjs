@@ -88,7 +88,6 @@ test("splitLinkPair copies style, keeps the label first, blanks the second and u
     id: "OriginalLink0001",
     targetId: noteB,
     label: "keep me",
-    hint: true,
     direction: "one",
     material: "double",
     thickness: 4,
@@ -127,7 +126,7 @@ test("splitLinkPair copies style, keeps the label first, blanks the second and u
     assert.equal(item.edited, true);
     assert.equal(item.createdBy, "Player0000000001");
     assert.equal(item.direction, "none");
-    assert.equal(item.hint, true);
+    assert.equal(Object.hasOwn(item, "hint"), false, "the removed hint flag is not copied");
     assert.deepEqual(item.routeAnchors, []);
     assert.equal(item.pins, undefined, "no board pins are copied");
   }

@@ -20,22 +20,33 @@ foundry.applications = { api: { DialogV2: { confirm: async () => true,
 const { registerSocket, requestWrite } = await import("../scripts/socket.mjs");
 const { notesStore } = await import("../scripts/store/notes-store.mjs");
 const { default: JournalCanvas } = await import("../scripts/app/canvas.mjs");
-const { anchorWorld } = await import("../scripts/anchors.mjs");
+const { anchorWorld, cardNormalizedPoint } = await import("../scripts/anchors.mjs");
 registerSocket();
 const tick = () => new Promise(resolve => setTimeout(resolve, 50));
+const SKIN = { paper: "amber", font: "default", torn: false, backgroundImage: null, tiltSeed: 0 };
+const makeNote = async (body, x, y) => {
+  const reply = await requestWrite({
+    type: "createNote", body, layout: "plain", skin: SKIN, x, y
+  });
+  await tick();
+  assert.equal(reply?.type, "noteCreated");
+  return reply.noteId;
+};
+const noteByBody = body => notesStore.getAllNotes().find(note => note.system.body === body);
 const frame = () => new Promise(resolve => dom.window.requestAnimationFrame(() => resolve()));
 const event = (target, type, x = 0, y = 0, button = 0) => target.dispatchEvent(
   new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, button })
 );
 const screenPoint = (canvas, x, y) => [x * canvas.view.k + canvas.view.x, y * canvas.view.k + canvas.view.y];
+const cardLocalPoint = (canvas, noteId, x, y) =>
+  cardNormalizedPoint(canvas.cardBox(noteId), { x, y });
 
 test("pin tool and all four pin gestures use distinct pointer transactions", async () => {
-  await requestWrite({ type: "createNote", title: "Pin A", x: 10, y: 20 });
-  await requestWrite({ type: "createNote", title: "Pin B", x: 350, y: 20 });
-  await tick();
+  await makeNote("# Pin A", 10, 20);
+  await makeNote("# Pin B", 350, 20);
   const notes = notesStore.getAllNotes();
-  const a = notes.find(note => note.name === "Pin A");
-  const b = notes.find(note => note.name === "Pin B");
+  const a = noteByBody("# Pin A");
+  const b = noteByBody("# Pin B");
   assert.ok(a && b);
   const actions = [];
   const canvas = new JournalCanvas({ onBoardPinAction: action => actions.push(action),
@@ -52,7 +63,7 @@ test("pin tool and all four pin gestures use distinct pointer transactions", asy
   event(cardA, "pointerdown", 70, 60);
   event(cardA, "pointerup", 70, 60);
   assert.deepEqual(actions.at(-1), { type: "add", noteId: a.id,
-    x: (70 - 10) / 190, y: (60 - 20) / 70 });
+    ...cardLocalPoint(canvas, a.id, 70, 60) });
   event(canvas.root, "pointerdown", 600, 300);
   event(canvas.root, "pointerup", 600, 300);
   assert.deepEqual(actions.at(-1), { type: "add", noteId: "", x: 600, y: 300 });
@@ -120,7 +131,7 @@ test("pin tool and all four pin gestures use distinct pointer transactions", asy
   event(canvas.root, "pointermove", 390, 60);
   event(cardB, "pointerup", 390, 60);
   assert.deepEqual(actions.at(-1), { type: "move", ref: "p:manual1", noteId: b.id,
-    x: (390 - 350) / 190, y: (60 - 20) / 70 });
+    ...cardLocalPoint(canvas, b.id, 390, 60) });
   canvas.disconnectGeometry();
   canvas.root.remove();
 });
@@ -144,8 +155,8 @@ test("pin tool paints a pin-tipped cursor on the canvas and its descendants", ()
 
 test("pin heads keep a fixed board size while their hit targets stay screen-sized through zoom", () => {
   const notes = notesStore.getAllNotes();
-  const a = notes.find(note => note.name === "Pin A");
-  const b = notes.find(note => note.name === "Pin B");
+  const a = notes.find(note => note.system.body === "# Pin A");
+  const b = notes.find(note => note.system.body === "# Pin B");
   const layout = structuredClone(notesStore.getLayout());
   layout.pins = { noteExtra: { noteId: a.id, x: 0.4, y: 0.5, isDefault: false },
     standalone: { noteId: "", x: 700, y: 300, isDefault: false } };
@@ -347,50 +358,44 @@ test("box-selecting an attached pin selects its owning note, not an independent 
 });
 
 test("double-click type menu creates once at the original panned world point", () => {
-  const a = notesStore.getAllNotes().find(note => note.name === "Pin A");
+  const a = notesStore.getAllNotes().find(note => note.system.body === "# Pin A");
   const calls = [];
   const canvas = new JournalCanvas({ onSelectNote() {},
-    onEditCardBlock: (...args) => calls.push(["edit", ...args]),
+    onEditNote: (...args) => calls.push(["edit", ...args]),
     onCreateNoteAt: (...args) => calls.push(["create", ...args]) });
   document.body.append(canvas.root);
   canvas.update(notesStore.getAllNotes(), notesStore.getLayout());
   canvas.view = { x: 60, y: -25, k: 1.6 };
   canvas.refreshGeometry();
   const card = canvas.cardEls.get(a.id);
-  const text = card.querySelector('[data-card-text="block"]');
+  const text = card.querySelector(".jn-note-body");
   const pin = canvas.pinLayer.querySelector(`[data-pin-ref="n:${a.id}:main"]`);
   event(text, "dblclick", 90, 70);
   assert.equal(calls.filter(call => call[0] === "edit").length, 1);
-  event(card, "dblclick", 90, 70);
+  assert.equal(calls.at(-1)[1], a.id, "editing requests the clicked note");
   event(pin, "dblclick", 90, 70);
+  assert.equal(calls.filter(call => call[0] === "edit").length, 1,
+    "a pin double click never starts editing");
   assert.notEqual(canvas.contextMenu.style.display, "flex");
+
   const world = { x: 1200, y: 800 };
   const screen = { x: world.x * canvas.view.k + canvas.view.x,
     y: world.y * canvas.view.k + canvas.view.y };
-  const kinds = ["note", "memo", "document", "target", "location"];
-  for (const kind of kinds) {
-    event(canvas.root, "dblclick", screen.x, screen.y);
-    assert.deepEqual([...canvas.contextMenu.querySelectorAll("[data-action]")]
-      .map(button => button.dataset.action).filter(action => kinds.includes(action)), kinds);
-    const before = calls.length;
-    canvas.contextMenu.querySelector(`[data-action="${kind}"]`).click();
-    assert.equal(calls.length, before + 1);
-    const [, x, y, options] = calls.at(-1);
-    assert.ok(Math.abs(x + ({ note: 60, memo: 180, document: 124, target: 126, location: 122.5 }[kind]) - world.x) < 1e-6);
-    assert.ok(Math.abs(y + (kind === "note" ? 30 : kind === "location" ? 45 : 40) - world.y) < 1e-6);
-    assert.equal(options.kind, kind === "location" ? "location" : "note");
-  }
   event(canvas.root, "dblclick", screen.x, screen.y);
-  const beforeDismiss = calls.length;
-  event(canvas.root, "pointerdown", screen.x + 100, screen.y + 100);
-  assert.equal(calls.length, beforeDismiss);
+  assert.equal(calls.filter(call => call[0] === "create").length, 1,
+    "an empty-board double click opens one creation menu");
+  const [, x, y, options] = calls.at(-1);
+  assert.ok(Math.abs(x + 110 - world.x) < 1e-6);
+  assert.ok(Math.abs(y + 60 - world.y) < 1e-6);
+  assert.equal(options.clientX, screen.x);
+  assert.equal(options.clientY, screen.y);
   canvas.disconnectGeometry();
   canvas.root.remove();
 });
 
 test("pin Backspace removes attached connections while preserving text editing and default pins", async () => {
-  const a = notesStore.getAllNotes().find(note => note.name === "Pin A");
-  const b = notesStore.getAllNotes().find(note => note.name === "Pin B");
+  const a = notesStore.getAllNotes().find(note => note.system.body === "# Pin A");
+  const b = notesStore.getAllNotes().find(note => note.system.body === "# Pin B");
   await requestWrite({ type: "boardPinAction", action: { type: "add", noteId: a.id, x: 0.6, y: 0.5 } });
   await requestWrite({ type: "boardPinAction", action: { type: "add", noteId: "", x: 850, y: 450 } });
   await tick();
@@ -449,8 +454,8 @@ test("pin Backspace removes attached connections while preserving text editing a
 
 test("saved pins and links survive ownership changes and reload", async () => {
   const notes = notesStore.getAllNotes();
-  const a = notes.find(note => note.name === "Pin A");
-  const b = notes.find(note => note.name === "Pin B");
+  const a = notes.find(note => note.system.body === "# Pin A");
+  const b = notes.find(note => note.system.body === "# Pin B");
   await requestWrite({ type: "boardPinAction", action: { type: "add", noteId: a.id, x: 0.3, y: 0.4 } });
   await tick();
   let layout = notesStore.getLayout();
@@ -511,8 +516,9 @@ test("saved pins and links survive ownership changes and reload", async () => {
   await tick();
   refresh();
   layout = notesStore.getLayout();
+  const onB = cardLocalPoint(canvas, b.id, 390, 60);
   assert.deepEqual([layout.pins[id].noteId, layout.pins[id].x, layout.pins[id].y],
-    [b.id, 40 / 190, 40 / 70], "canvas to note uses exact local coordinates");
+    [b.id, onB.x, onB.y], "canvas to note uses exact local coordinates");
 
   event(pin(), "pointerdown", sx, sy);
   event(pin(), "pointerup", sx, sy);
@@ -524,8 +530,9 @@ test("saved pins and links survive ownership changes and reload", async () => {
   refresh();
   layout = notesStore.getLayout();
   assert.equal(layout.pins[id].noteId, a.id);
-  assert.ok(Math.abs(layout.pins[id].x - 90 / 190) < 1e-9
-    && Math.abs(layout.pins[id].y - 45 / 70) < 1e-9,
+  const onA = cardLocalPoint(canvas, a.id, 100, 65);
+  assert.ok(Math.abs(layout.pins[id].x - onA.x) < 1e-9
+    && Math.abs(layout.pins[id].y - onA.y) < 1e-9,
   "note to note changes owner without snapping");
 
   const before = canvas.root.querySelector(".jn-pin-links path")?.getAttribute("d");
@@ -547,23 +554,22 @@ test("saved pins and links survive ownership changes and reload", async () => {
 
 test("right drag pans over notes and pins; only text and empty-board double clicks act", () => {
   const notes = notesStore.getAllNotes();
-  const a = notes.find(note => note.name === "Pin A");
+  const a = notes.find(note => note.system.body === "# Pin A");
   const calls = [];
   const canvas = new JournalCanvas({ onSelectNote() {},
-    onEditCardBlock: (...args) => calls.push(["edit", ...args]),
+    onEditNote: (...args) => calls.push(["edit", ...args]),
     onCreateNoteAt: (...args) => calls.push(["create", ...args]) });
   document.body.append(canvas.root);
   canvas.pinsEnabled = true;
   canvas.update(notes, notesStore.getLayout());
   const card = canvas.cardEls.get(a.id);
-  const text = card.querySelector("[data-card-text='block']");
+  const text = card.querySelector(".jn-note-body");
   const pin = canvas.root.querySelector(`[data-pin-ref="n:${a.id}:main"]`);
   event(text, "pointerdown", 40, 50);
   event(text, "pointerup", 40, 50);
   assert.equal(calls.some(call => call[0] === "edit"), false,
     "single click selects without editing");
-  event(text, "pointerdown", 40, 50);
-  event(text, "pointerup", 40, 50);
+  event(text, "dblclick", 40, 50);
   assert.equal(calls.filter(call => call[0] === "edit").length, 1);
 
   const pan = target => {
@@ -585,17 +591,16 @@ test("right drag pans over notes and pins; only text and empty-board double clic
   event(card, "dblclick", 40, 40);
   assert.equal(calls.filter(call => call[0] === "create").length, 0);
   event(canvas.root, "dblclick", 600, 400);
-  assert.equal(calls.filter(call => call[0] === "create").length, 0);
-  assert.equal(canvas.contextMenu.style.display, "flex");
-  canvas.contextMenu.querySelector('[data-action="note"]').click();
-  assert.equal(calls.filter(call => call[0] === "create").length, 1);
+  assert.equal(calls.filter(call => call[0] === "create").length, 1,
+    "a genuine empty-canvas double click opens one creation menu");
+  assert.equal(canvas.contextMenu.style.display, "none");
   canvas.disconnectGeometry();
   canvas.root.remove();
 });
 
 test("only a genuine empty-canvas double click opens the board menu after pin gestures", async () => {
   const notes = notesStore.getAllNotes();
-  const a = notes.find(note => note.name === "Pin A");
+  const a = notes.find(note => note.system.body === "# Pin A");
   const layout = structuredClone(notesStore.getLayout());
   layout.pins = { menuPin: { noteId: "", x: 300, y: 200, isDefault: false } };
   layout.pinLinks = {};
@@ -603,13 +608,13 @@ test("only a genuine empty-canvas double click opens the board menu after pin ge
   const actions = [];
   const canvas = new JournalCanvas({ onSelectNote() {},
     onBoardPinAction: action => { actions.push(action); },
-    onEditCardBlock: (...args) => calls.push(["edit", ...args]),
+    onEditNote: (...args) => calls.push(["edit", ...args]),
     onCreateNoteAt: (...args) => calls.push(["create", ...args]) });
   document.body.append(canvas.root);
   canvas.pinsEnabled = true;
   canvas.update(notes, layout);
   const card = canvas.cardEls.get(a.id);
-  const text = card.querySelector('[data-card-text="block"]');
+  const text = card.querySelector(".jn-note-body");
   const pin = canvas.root.querySelector('[data-pin-ref="p:menuPin"]');
   assert.ok(text && pin);
 
@@ -647,12 +652,12 @@ test("only a genuine empty-canvas double click opens the board menu after pin ge
     onCreateNoteAt: (...args) => calls.push(["create", ...args]) });
   document.body.append(fresh.root);
   fresh.update(notes, layout);
+  const createsBefore = calls.filter(call => call[0] === "create").length;
   event(fresh.root, "dblclick", 900, 500);
-  assert.equal(fresh.contextMenu.style.display, "flex",
-    "a genuine empty-canvas double click still opens the note-type menu");
-  const kinds = ["note", "memo", "document", "target", "location"];
-  assert.deepEqual([...fresh.contextMenu.querySelectorAll("[data-action]")]
-    .map(button => button.dataset.action).filter(action => kinds.includes(action)), kinds);
+  assert.equal(calls.filter(call => call[0] === "create").length, createsBefore + 1,
+    "a genuine empty-canvas double click still opens one creation menu");
+  const [, x, y] = calls.at(-1);
+  assert.deepEqual([x, y, calls.at(-1)[3].clientX, calls.at(-1)[3].clientY], [790, 440, 900, 500]);
   fresh.disconnectGeometry();
   fresh.root.remove();
   canvas.disconnectGeometry();
@@ -660,12 +665,11 @@ test("only a genuine empty-canvas double click opens the board menu after pin ge
 });
 
 test("pin drag repaints attached threads and pin links in place before release", async () => {
-  await requestWrite({ type: "createNote", title: "Drag Pin A", x: 40, y: 40 });
-  await requestWrite({ type: "createNote", title: "Drag Pin B", x: 560, y: 340 });
-  await tick();
+  await makeNote("# Drag Pin A", 40, 40);
+  await makeNote("# Drag Pin B", 560, 340);
   const notes = notesStore.getAllNotes();
-  const a = notes.find(note => note.name === "Drag Pin A");
-  const b = notes.find(note => note.name === "Drag Pin B");
+  const a = noteByBody("# Drag Pin A");
+  const b = noteByBody("# Drag Pin B");
   assert.ok(a && b);
   await requestWrite({ type: "boardPinAction", action: { type: "add", noteId: a.id, x: 0.25, y: 0.75 } });
   await requestWrite({ type: "boardPinAction", action: { type: "add", noteId: "", x: 900, y: 700 } });
@@ -734,12 +738,11 @@ test("pin drag repaints attached threads and pin links in place before release",
 });
 
 test("dragging a note pin never uses percent positions or snaps back before its write", async () => {
-  await requestWrite({ type: "createNote", title: "Minor Drag", x: 40, y: 40 });
-  await requestWrite({ type: "createNote", title: "Minor Drag Target", x: 600, y: 400 });
-  await tick();
+  await makeNote("# Minor Drag", 40, 40);
+  await makeNote("# Minor Drag Target", 600, 400);
   const notes = notesStore.getAllNotes();
-  const a = notes.find(note => note.name === "Minor Drag");
-  const b = notes.find(note => note.name === "Minor Drag Target");
+  const a = noteByBody("# Minor Drag");
+  const b = noteByBody("# Minor Drag Target");
   assert.ok(a && b);
   await requestWrite({ type: "addCardAnchor", noteId: a.id, kind: "minor", x: 0.3, y: 0.7 });
   await tick();
@@ -790,8 +793,8 @@ test("dragging a note pin never uses percent positions or snaps back before its 
 });
 
 test("moving a legacy minor anchor migrates its link endpoint without changing the link", async () => {
-  const a = notesStore.getAllNotes().find(note => note.name === "Pin A");
-  const b = notesStore.getAllNotes().find(note => note.name === "Pin B");
+  const a = notesStore.getAllNotes().find(note => note.system.body === "# Pin A");
+  const b = notesStore.getAllNotes().find(note => note.system.body === "# Pin B");
   await requestWrite({ type: "addCardAnchor", noteId: a.id, kind: "minor", x: 0.3, y: 0.4 });
   await tick();
   const before = notesStore.getLayout();
