@@ -1,1134 +1,1225 @@
+/**
+ * In-place shared note editor.
+ *
+ * One continuous Markdown source surface replaces the old paragraph/block editor. This
+ * module owns the toolbar, Profile helper, image dialog, appearance popover, recovery UI
+ * and autosave status. It composes the approved T6a `NoteEditorSession` and `DraftStore`
+ * with a T4a socket adapter, but does not mount the canvas, render cards, size the paper
+ * or register board shortcuts. T8 supplies the host; tests inject a fake transport.
+ *
+ * Constructor options:
+ * - `transport`       NoteEditTransport. Omit to lazily build the socket adapter.
+ * - `drafts`          DraftStore. Omit for the default per-origin/world/user store; `null` disables.
+ * - `onState(status)` Called after every session status change.
+ * - `onClose(info)`   Called after a successful close with `{noteId, reason, result}`.
+ * - `onRequestEdit(id)` Host hint after a forced/lost lease, so it can request editing again.
+ * - `onSend(event)`   Reserved host observer for outgoing editor activity (transport is authoritative).
+ * - `onNoteChanged(info)` Called after acknowledged saves and appearance changes.
+ * - `t`               Translation function; defaults to `../i18n.mjs`.
+ * - `now`             Clock function for session/draft timestamps.
+ * - `imageDialog`     Test/host override returning `{src, alt, markdown}` or `null`.
+ */
+
 import { notesStore } from "../store/notes-store.mjs";
-import { privateStore } from "../store/private-store.mjs";
-import { requestWrite } from "../socket.mjs";
-import { requestLock, releaseLock, sendHeartbeat, requestLockState, getLock, isHeldByMe } from "../locks.mjs";
-import { NOTE_FONT_KEYS, PIN_STYLES, PICTURE_LAYOUTS, resolveAttachment, resolvePresentation } from "../presentation.mjs";
-import { noteImagePath } from "../image-url.mjs";
-import { promptImageSource } from "./image-dialog.mjs";
-import * as secrets from "../secrets/secret-actions.mjs";
-import { stripSecretPrefix } from "../secrets/model.mjs";
-import { renderMarkdown, toggleTaskListItem } from "../markdown.mjs";
-import { applyMarkdownAutocomplete } from "../markdown-edit.mjs";
-import { t } from "../i18n.mjs";
+import { NoteEditorSession } from "../editor/session.mjs";
+import { DraftStore } from "../editor/drafts.mjs";
+import { SourceSurface } from "../editor/source-surface.mjs";
+import {
+  createAddTitleGhost,
+  createProfileHelper,
+  createSecondaryRow,
+  createToolbar
+} from "../editor/toolbar.mjs";
+import {
+  classifyDraft,
+  copyToClipboard,
+  draftTimestamp,
+  openRecoveryDialog
+} from "../editor/recovery.mjs";
+import { createSocketTransport, readStateEntry } from "../editor/socket-transport.mjs";
+import { parseDocument, isOffsetInCodeOrComment } from "../document/parse.mjs";
+import { buildImageDialog } from "./image-dialog.mjs";
+import { resolveSkin } from "../skins/registry.mjs";
+import { t as defaultT } from "../i18n.mjs";
 
-const { DialogV2 } = foundry.applications.api;
-const esc = text => foundry.utils.escapeHTML(String(text ?? ""));
+export const TAB_SESSION_ID_KEY = "journalinator.editor.sessionId";
+const MAX_SESSION_ID_LENGTH = 100;
+const MAX_BODY_LENGTH = 200000;
 
-/** Runs a GM vault action and surfaces failures (e.g. the vault was locked meanwhile). */
-function gm(job) {
-  return Promise.resolve().then(job).catch(err => {
-    console.error(err);
-    ui.notifications.error(err.message);
-  });
+let fallbackSequence = 0;
+
+function randomId(prefix = "") {
+  const cryptoApi = globalThis.crypto;
+  let body = "";
+  if (cryptoApi?.randomUUID) {
+    try {
+      body = cryptoApi.randomUUID();
+    } catch {
+      body = "";
+    }
+  }
+  if (!body && cryptoApi?.getRandomValues) {
+    const bytes = new Uint8Array(16);
+    cryptoApi.getRandomValues(bytes);
+    body = [...bytes].map(byte => byte.toString(16).padStart(2, "0")).join("");
+  }
+  if (!body) {
+    fallbackSequence += 1;
+    body = `${Date.now().toString(36)}-${fallbackSequence.toString(36)}`;
+  }
+  return `${prefix}${body}`.slice(0, MAX_SESSION_ID_LENGTH);
 }
 
-const HEARTBEAT_INTERVAL_MS = 8000;
-const DRAFT_SAVE_DELAY_MS = 300;
-const DRAFT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+function sessionStorageSafe() {
+  try {
+    return globalThis.sessionStorage ?? null;
+  } catch {
+    return null;
+  }
+}
 
 /**
- * The note editor: one continuous document (spec §9), paragraph by paragraph, each block
- * individually lock-arbitrated (spec §6.3-§6.6). Owns its own persistent DOM node — created
- * once by JournalApp and kept alive across its re-renders, same reasoning as JournalCanvas —
- * so a document-sync hook firing for an unrelated note never tears down an in-progress edit.
- *
- * Known rough edge: an unrelated hook still calls render() here (there's no surgical per-block
- * DOM patching yet), so a block you're actively typing in gets its <textarea> torn down and
- * rebuilt on every unrelated edit anywhere in the journal. Content is preserved via persistent
- * `drafts` (captured on input and right before each rebuild, mirrored to localStorage), so
- * nothing is lost, but the cursor jumps to the end of the text each time. Good enough for
- * Phase 4; worth revisiting in the polish phase.
+ * Per-tab id persisted in sessionStorage (never localStorage). The id names this tab's
+ * draft and is reused when the lease is re-begun, so a reload can reclaim the same tab's
+ * lease; it is not a fresh lease id.
  */
-export default class NoteEditor {
-  constructor(callbacks) {
-    this.callbacks = callbacks; // { onFocusNote(id), onSelectNote(id) }
-    this.root = document.createElement("div");
-    this.root.className = "journalinator-editor-inner";
-    this.noteId = null;
-    this.editingBlockId = null;
-    this.editingSecret = false; // editing a GM-only block: local, no lock, saved to the vault
-    this.pendingBlockId = null;
-    this.inlineSlot = null;
-    this.pendingMerge = null; // { blockId, prevBlockId }
-    this.pendingTaskToggle = null; // { noteId, blockId, index, text } waiting for a lock
-    this.drafts = new Map();
-    this.heartbeatTimer = null;
-    this.hookId = null;
-    this.draftTimer = null;
-    this.onPageHide = null;
-    this.readOnly = false; // no active GM: notes can be read but not edited
-  }
-
-  /**
-   * Registers the lock listener for the lifetime of an open app. Kept separate from the
-   * constructor so a closed app leaves no global hook behind.
-   */
-  activate() {
-    if (this.hookId !== null) return;
-    this.hookId = Hooks.on("journalinatorLocksChanged", (noteId, blockId, lock) => {
-      if (noteId !== this.noteId) return;
-      this.#onLockChanged(blockId, lock);
-    });
-    this.onPageHide = () => this.#persistCurrentDraft();
-    addEventListener("pagehide", this.onPageHide);
-  }
-
-  /** Saves an in-progress block when the view changes without tearing down the editor hooks. */
-  suspend() {
-    this.#stopEditing({ save: true });
-    this.#clearDraftTimer();
-    this.#releasePendingLocks();
-    this.#stopHeartbeat();
-  }
-
-  /**
-   * Saves any in-progress block, releases every lock this editor may hold or still be
-   * requesting, stops the heartbeat, and unregisters the hook. Called when the app closes.
-   */
-  deactivate() {
-    this.#stopEditing({ save: true });
-    this.#clearDraftTimer();
-    this.#releasePendingLocks();
-    this.#stopHeartbeat();
-    this.drafts.clear();
-    this.noteId = null;
-    if (this.onPageHide) {
-      removeEventListener("pagehide", this.onPageHide);
-      this.onPageHide = null;
+export function getTabSessionId(storage = sessionStorageSafe()) {
+  try {
+    const existing = storage?.getItem?.(TAB_SESSION_ID_KEY);
+    if (typeof existing === "string" && existing && existing.length <= MAX_SESSION_ID_LENGTH) {
+      return existing;
     }
-    if (this.hookId !== null) {
-      Hooks.off("journalinatorLocksChanged", this.hookId);
-      this.hookId = null;
-    }
-  }
-
-  /** Switches the open note if it changed; always call render() afterward to (re)draw. */
-  open(noteId) {
-    if (this.noteId === noteId) return;
-    this.#stopEditing({ save: true });
-    this.#releasePendingLocks();
-    this.noteId = noteId;
-    this.#loadDrafts(noteId);
-    if (noteId) requestLockState();
-  }
-
-  /** Opens a card and immediately starts editing its first text block. */
-  editFirstBlock(noteId, slot) {
-    this.open(noteId);
-    this.render();
-    if (this.readOnly) return;
-    const note = notesStore.getNote(noteId);
-    const block = note?.system.blocks?.[0];
-    if (block && slot) this.editBoardBlock(noteId, slot.dataset.blockId, slot);
-    else if (block) this.#clickBlock(block.blockId);
-  }
-
-  editBoardBlock(noteId, blockId, slot) {
-    this.open(noteId);
-    if (this.readOnly) {
-      this.render();
-      return this.#warnReadOnly();
-    }
-    if (this.editingBlockId === blockId) {
-      this.inlineSlot = slot;
-      this.render();
-      return;
-    }
-    this.#stopEditing({ save: true });
-    this.#releasePendingLocks();
-    this.inlineSlot = slot;
-    if (!this.#clickBlock(blockId)) this.inlineSlot = null;
-  }
-
-  /** Toggles a rendered GFM task checkbox, taking the block lock when the block is shared. */
-  toggleTask(noteId, blockId, index) {
-    if (this.readOnly) return this.#warnReadOnly();
-    if (this.pendingTaskToggle) {
-      releaseLock(this.pendingTaskToggle.noteId, this.pendingTaskToggle.blockId);
-      this.pendingTaskToggle = null;
-    }
-    const note = notesStore.getNote(noteId);
-    const block = note?.system.blocks.find(item => item.blockId === blockId);
-    if (!block) return;
-    // The lock listener only follows the open note, so make this note current before requesting.
-    this.open(noteId);
-    const next = toggleTaskListItem(block.text, index);
-    if (next === null) return;
-
-    if (note.secret || notesStore.isHiddenBlock(noteId, blockId)) {
-      gm(() => secrets.saveSecretBlock(noteId, blockId, next));
-      return;
-    }
-    const lock = getLock(noteId, blockId);
-    if (lock && lock.userId !== game.user.id) return;
-    if (isHeldByMe(noteId, blockId)) {
-      this.#saveTaskToggle(noteId, blockId, next);
-      return;
-    }
-    this.pendingTaskToggle = { noteId, blockId, index, text: next };
-    requestLock(noteId, blockId);
-  }
-
-  #saveTaskToggle(noteId, blockId, text) {
-    const write = requestWrite({ type: "saveBlock", noteId, blockId, text });
-    this.#releaseAfterWrite(write, noteId, blockId);
-  }
-
-  #warnReadOnly() {
-    ui.notifications?.warn(t("JN.TopBar.Offline"));
-  }
-
-  renameNote(noteId, title) {
-    if (this.readOnly) return this.#warnReadOnly();
-    const note = notesStore.getNote(noteId);
-    if (!note || note.system.deleted || !title) return;
-    const current = note.secret ? stripSecretPrefix(note.name) : note.name;
-    if (title === current) return;
-    return note.secret ? gm(() => secrets.renameSecretNote(noteId, title))
-      : requestWrite({ type: "renameNote", noteId, title });
-  }
-
-  setTargetHeading(noteId, heading) {
-    if (this.readOnly) return this.#warnReadOnly();
-    const note = notesStore.getNote(noteId);
-    if (!note || note.system.deleted || heading === (note.system.targetHeading ?? "")) return;
-    return note.secret ? gm(() => secrets.setSecretTargetHeading(noteId, heading))
-      : requestWrite({ type: "setTargetHeading", noteId, heading });
-  }
-
-  /** Optional display label; empty is valid and never renames the internal Foundry page. */
-  setNoteLabel(noteId, label) {
-    if (this.readOnly) return this.#warnReadOnly();
-    const note = notesStore.getNote(noteId);
-    if (!note || note.system.deleted) return;
-    const value = String(label ?? "").trim();
-    if (value === (note.system.label ?? "")) return;
-    return note.secret ? gm(() => secrets.setSecretNoteLabel(noteId, value))
-      : requestWrite({ type: "setNoteLabel", noteId, label: value });
-  }
-
-  /** Stores explicit presentation fields; unknown values are rejected by the socket handler. */
-  setNotePresentation(noteId, fields) {
-    if (this.readOnly) return this.#warnReadOnly();
-    const note = notesStore.getNote(noteId);
-    if (!note || note.system.deleted || !fields || typeof fields !== "object") return;
-    return note.secret ? gm(() => secrets.setSecretNotePresentation(noteId, fields))
-      : requestWrite({ type: "setNotePresentation", noteIds: [noteId], fields });
-  }
-
-  setNoteKind(noteId, kind) {
-    if (this.readOnly) return this.#warnReadOnly();
-    const note = notesStore.getNote(noteId);
-    if (!note || note.system.deleted || !["note", "location"].includes(kind)) return;
-    return note.secret ? gm(() => secrets.setSecretNoteKind(noteId, kind))
-      : requestWrite({ type: "setNoteKind", noteId, kind });
-  }
-
-  /** Snap radii and pin appearance. Main-pin removal has its own undoable request below. */
-  setNoteAttachment(noteId, fields) {
-    if (this.readOnly) return this.#warnReadOnly();
-    const note = notesStore.getNote(noteId);
-    if (!note || note.system.deleted || !fields || typeof fields !== "object") return;
-    const clean = {};
-    if (Number.isFinite(fields.mainSnapRadius)) {
-      clean.mainSnapRadius = Math.min(64, Math.max(0, fields.mainSnapRadius));
-    }
-    if (Number.isFinite(fields.minorSnapRadius)) {
-      clean.minorSnapRadius = Math.min(32, Math.max(0, fields.minorSnapRadius));
-    }
-    if (PIN_STYLES.includes(fields.pinStyle)) clean.pinStyle = fields.pinStyle;
-    const sharedPinToggle = !note.secret && typeof fields.mainPinEnabled === "boolean"
-      ? fields.mainPinEnabled : null;
-    if (note.secret && typeof fields.mainPinEnabled === "boolean") {
-      // Secret vault notes have no shared link redistribution; the direct vault path is fine.
-      clean.mainPinEnabled = fields.mainPinEnabled;
-    }
-    if (sharedPinToggle !== null) {
-      // Never let the generic batch path bypass redistribution/undo on the shared canvas.
-      const result = this.setMainPinEnabled(noteId, sharedPinToggle);
-      if (!Object.keys(clean).length) return result;
-    }
-    if (!Object.keys(clean).length) return;
-    return note.secret ? gm(() => secrets.setSecretNoteAttachment(noteId, clean))
-      : requestWrite({ type: "setNoteAttachment", noteIds: [noteId], fields: clean });
-  }
-
-  /**
-   * Main-pin visibility. Removal is a normal history transaction (Ctrl+Z restores the exact
-   * arrangement); re-enabling only shows the canonical pin and never reattaches links. Secret
-   * notes are GM-local and use the vault attachment path directly.
-   */
-  setMainPinEnabled(noteId, enabled) {
-    if (this.readOnly) return this.#warnReadOnly();
-    const note = notesStore.getNote(noteId);
-    if (!note || note.system.deleted || typeof enabled !== "boolean") return;
-    if (note.secret) return gm(() => secrets.setSecretNoteAttachment(noteId, { mainPinEnabled: enabled }));
-    if (this.callbacks.onSetMainPinEnabled) return this.callbacks.onSetMainPinEnabled(noteId, enabled);
-    if (!enabled) {
-      return requestWrite({ type: "setMainPinEnabled", noteId, enabled: false, undoId: foundry.utils.randomID() });
-    }
-    return requestWrite({ type: "setMainPinEnabled", noteId, enabled: true });
-  }
-
-  /** Experimental world setting; an unset legacy value still means enabled. */
-  #pinsEnabled() {
-    try {
-      return game.settings?.get?.("fvtt-journalinator", "pinsEnabled") !== false;
-    } catch {
-      return true;
-    }
-  }
-
-  /** Empty when a shared note can be sent; otherwise the localized reason to disable the action. */
-  #sharedSendBlockedReason() {
-    if (!game.users.activeGM) return t("JN.Private.NeedGM");
-    const hasOtherUser = [...(game.users ?? [])].some(user => user && user.id !== game.user.id);
-    if (!hasOtherUser && !privateStore.findActive(game.user.id)) return t("JN.Transfer.NoRecipients");
-    return "";
-  }
-
-  #attachmentPanel(note) {
-    const attachment = resolveAttachment(note);
-    const styleOptions = PIN_STYLES.map(key => {
-      const labelKey = `JN.Pin.Styles.${key.charAt(0).toUpperCase()}${key.slice(1)}`;
-      return `<option value="${key}" ${attachment.pinStyle === key ? "selected" : ""}>${t(labelKey)}</option>`;
-    }).join("");
-    return `
-      <label class="jn-presentation-check">
-        <input type="checkbox" class="journalinator-main-pin" ${attachment.mainPinEnabled ? "checked" : ""}>
-        ${t("JN.Pin.Enabled")}
-      </label>
-      <label class="jn-presentation-field">${t("JN.Pin.SnapMain")}
-        <input type="number" class="journalinator-main-snap" min="0" max="64" step="1"
-          value="${attachment.mainSnapRadius}" aria-label="${t("JN.Pin.SnapMain")}">
-      </label>
-      <label class="jn-presentation-field">${t("JN.Pin.SnapMinor")}
-        <input type="number" class="journalinator-minor-snap" min="0" max="32" step="1"
-          value="${attachment.minorSnapRadius}" aria-label="${t("JN.Pin.SnapMinor")}">
-      </label>
-      <label class="jn-presentation-field">${t("JN.Pin.Style")}
-        <select class="journalinator-pin-style" aria-label="${t("JN.Pin.Style")}">${styleOptions}</select>
-      </label>`;
-  }
-
-  async editNoteImage(noteId, background = false) {
-    if (this.readOnly) return this.#warnReadOnly();
-    const note = notesStore.getNote(noteId);
-    if (!note || note.system.deleted) return;
-    const existing = note.system[background ? "backgroundImage" : "image"];
-    const value = await promptImageSource(
-      t(background ? "JN.Editor.BackgroundURL" : "JN.Editor.ImageURL"),
-      existing ?? "",
-      existing ? t(background ? "JN.Editor.ClearBackgroundHint" : "JN.Editor.ClearImageHint") : ""
-    );
-    if (value == null) return;
-    const image = value ? noteImagePath(value) : null;
-    if (value && !image) return ui.notifications.warn(t("JN.Editor.InvalidImageURL"));
-    return note.secret ? gm(() => secrets.setSecretNoteImage(noteId, image, background))
-      : requestWrite({ type: "setNoteImage", noteId, image, background });
-  }
-
-  #activeTextarea() {
-    return this.inlineSlot?.querySelector(".jn-block-input") ?? this.root.querySelector(".jn-block-input");
-  }
-
-  suspendBlur() {
-    const textarea = this.#activeTextarea();
-    if (textarea) textarea.onblur = null;
-  }
-
-  #clearInlineInput() {
-    const textarea = this.inlineSlot?.querySelector(".jn-block-input");
-    if (!textarea) return;
-    textarea.onblur = null;
-    textarea.remove();
-  }
-
-  #finishInlineInput() {
-    const inline = !!this.inlineSlot;
-    this.#clearInlineInput();
-    this.inlineSlot = null;
-    if (inline) this.render();
-  }
-
-  mount(slot) {
-    this.suspendBlur();
-    slot.appendChild(this.root);
-  }
-
-  render() {
-    this.#captureDraftBeforeRebuild();
-    this.suspendBlur();
-    this.#clearInlineInput();
-    this.root.classList.toggle("jn-readonly", this.readOnly);
-    const note = this.noteId ? notesStore.getNote(this.noteId) : null;
-    if (!note) {
-      this.root.replaceChildren();
-      return;
-    }
-
-    if (note.system.deleted) {
-      const restore = t("JN.Common.Restore");
-      this.root.innerHTML = `
-        <div class="jn-note-tools">
-          <button type="button" class="journalinator-restore" title="${esc(restore)}" aria-label="${esc(restore)}">
-            <i class="fa-solid fa-trash-arrow-up" aria-hidden="true"></i>
-          </button>
-        </div>
-      `;
-      this.root.querySelector(".journalinator-restore").addEventListener("click", () => {
-        if (this.readOnly) return this.#warnReadOnly();
-        requestWrite({ type: "restoreNote", noteId: this.noteId });
-      });
-      return;
-    }
-
-    this.#pruneSavedDrafts(note);
-
-    const allNotes = notesStore.getAllNotes();
-    const authorColor = game.users.get(note.system.authorId)?.color ?? "#8d8d97";
-    const presentation = resolvePresentation(note);
-    const currentType = note.system.kind === "location"
-      ? "location" : (presentation.forceExtended ? presentation.extendedStyle : "auto");
-    const styleChoices = [
-      ["auto", "JN.Style.Auto"],
-      ["memo", "JN.Style.Memo"],
-      ["document", "JN.Style.Document"],
-      ["target", "JN.Style.Target"],
-      ["location", "JN.Kind.Location"]
-    ];
-    const styleOptions = styleChoices
-      .map(([key, labelKey]) => `<option value="${key}" ${currentType === key ? "selected" : ""}>${t(labelKey)}</option>`)
-      .join("");
-    const fontOptions = NOTE_FONT_KEYS
-      .map(key => `<option value="${key}" ${presentation.font === key ? "selected" : ""}>${t(`JN.Font.${key === "default" ? "Default" : key === "serif" ? "Serif" : key === "hand" ? "Hand" : "Display"}`)}</option>`)
-      .join("");
-    const layoutOptions = PICTURE_LAYOUTS
-      .map(key => `<option value="${key}" ${presentation.pictureLayout === key ? "selected" : ""}>${t(`JN.Picture.${key === "above" ? "Above" : key === "below" ? "Below" : key === "left" ? "Left" : "Right"}`)}</option>`)
-      .join("");
-    const backlinks = allNotes
-      .map(n => [n, (n.system.links ?? []).find(l => l.targetId === note._id)
-        ?? (note.system.links ?? []).find(l => l.targetId === n._id)])
-      .filter(([, link]) => link)
-      .map(([n, link]) => `<button type="button" class="journalinator-chip${link.hidden ? " jn-chip-hidden" : ""}" data-id="${n._id}"${link.hidden ? ` title="${t("JN.Editor.GMOnlyLink")}"` : ""}>${foundry.utils.escapeHTML(n.name)}</button>`)
-      .join("") || `<small class="journalinator-meta">${t("JN.Common.NoneYet")}</small>`;
-    const gmView = notesStore.merged;
-    const tool = (icon, label, content) => `<details class="jn-note-tool">
-      <summary title="${esc(label)}" aria-label="${esc(label)}"><i class="fa-solid ${icon}" aria-hidden="true"></i></summary>
-      <div class="jn-note-tool-panel">${content}</div></details>`;
-    const type = `<select class="journalinator-kind" aria-label="${t("JN.Editor.Type")}">${styleOptions}</select>`;
-    const presentationPanel = `
-      <label class="jn-presentation-field">${t("JN.Editor.Font")}
-        <select class="journalinator-font" aria-label="${t("JN.Editor.Font")}">${fontOptions}</select>
-      </label>
-      <label class="jn-presentation-field">${t("JN.Editor.PictureLayout")}
-        <select class="journalinator-picture-layout" aria-label="${t("JN.Editor.PictureLayout")}">${layoutOptions}</select>
-      </label>
-      <label class="jn-presentation-check">
-        <input type="checkbox" class="journalinator-force-extended" ${presentation.forceExtended ? "checked" : ""}>
-        ${t("JN.Editor.ForceExtended")}
-      </label>
-      <label class="jn-presentation-check">
-        <input type="checkbox" class="journalinator-torn" ${presentation.torn ? "checked" : ""}>
-        ${t("JN.Editor.Torn")}
-      </label>`;
-    const sharedSendBlocked = note.secret ? "" : this.#sharedSendBlockedReason();
-    const gmTools = note.secret ? `
-      <div class="jn-gm-banner">
-        <button type="button" class="journalinator-delete" title="${t("JN.Editor.DeletePermanentTitle")}">&#128465;</button>
-      </div>` : `
-      <div class="journalinator-row jn-gm-row">
-        <button type="button" class="journalinator-hint-toggle${note.system.hint ? " on" : ""}" title="${t("JN.Editor.HintTitle")}">&#10022; ${note.system.hint ? t("JN.Editor.GMHint") : t("JN.Editor.MarkHint")}</button>
-        <button type="button" class="journalinator-add-hidden">${t("JN.Editor.AddHiddenBlock")}</button>
-      </div>`;
-
-    this.root.innerHTML = `
-      <div class="jn-note-tools">
-        ${tool("fa-pencil", t("JN.Editor.RenameTitle"), `<div class="journalinator-eh">
-          <span class="jn-dot" style="background:${authorColor}"></span>
-          <b><button type="button" class="jn-inline-title" title="${t("JN.Editor.RenameTitle")}">${esc(note.name)}</button></b>
-        </div>`)}
-        ${tool("fa-tag", t("JN.Editor.Label"), `<input type="text" class="journalinator-label" aria-label="${t("JN.Editor.Label")}"
-          value="${esc(note.system.label ?? "")}" placeholder="${t("JN.Editor.Label")}" maxlength="200">`)}
-        ${tool("fa-link", t("JN.Editor.RelatedNotes"), `<div class="journalinator-chips">${backlinks}</div>`)}
-        ${tool("fa-layer-group", t("JN.Editor.Type"), type)}
-        ${tool("fa-sliders", t("JN.Editor.Presentation"), presentationPanel)}
-        ${this.#pinsEnabled() ? tool("fa-thumbtack", t("JN.Pin.Style"), this.#attachmentPanel(note)) : ""}
-        ${presentation.extendedStyle === "target" ? tool("fa-bullseye", t("JN.Style.Target"), `
-          <input type="text" class="journalinator-target-heading" aria-label="${t("JN.Style.Target")}"
-            value="${esc(presentation.heading)}" placeholder="${t("JN.Style.Target")}" maxlength="80">`) : ""}
-        ${gmView || note.secret ? tool("fa-lock", t("JN.Editor.GMOnly"), gmTools + (this.callbacks.boardOnly ? note.system.blocks.map((block, index) =>
-          `<div class="jn-note-block-tools" data-block-id="${esc(block.blockId)}"><span>${index + 1}</span>
-            ${this.#gmBlockActions(note, block, !block.hidden && !!getLock(note._id, block.blockId))}</div>`).join("") : "")) : ""}
-      </div>
-      <div class="jn-editor-note-actions">
-        ${note.secret
-          ? `<button type="button" class="journalinator-declassify">${t("JN.Transfer.SendTo")}</button>`
-          : `<button type="button" class="jn-shared-send"${sharedSendBlocked ? " disabled" : ""}${
-            sharedSendBlocked ? ` title="${esc(sharedSendBlocked)}"` : ""
-          }>${t("JN.Transfer.SendTo")}</button>`}
-        <button type="button" class="jn-edit-background">${t("JN.Editor.ChangeBackground")}</button>
-        <button type="button" class="jn-edit-stamp">${t("JN.Stamp.Add")}</button>
-      </div>
-      <div class="jn-doc" ${this.callbacks.boardOnly ? "hidden" : ""}>
-        ${note.system.blocks.filter(block => !this.callbacks.boardOnly || block.blockId === this.editingBlockId)
-          .map(block => this.#renderBlockHTML(note, block)).join("")}
-      </div>
-    `;
-
-    const liveTextarea = this.root.querySelector(".jn-block-input");
-    if (liveTextarea && this.inlineSlot?.parentNode) this.inlineSlot.appendChild(liveTextarea);
-    this.#bindHandlers(note);
-    liveTextarea?.focus();
-  }
-
-  #renderBlockHTML(note, block) {
-    const lock = block.hidden ? null : getLock(note._id, block.blockId);
-    const mine = lock?.userId === game.user.id;
-    const lockedByOther = lock && !mine;
-    const pending = this.pendingBlockId === block.blockId && !lock;
-    const editing = this.editingBlockId === block.blockId;
-    const author = game.users.get(block.authorId || note.system.authorId);
-    const vars = `--jn-au:${author?.color ?? "#8d8d97"};--jn-lc:${lock?.userColor ?? "transparent"}`;
-    const classes = ["jn-block"];
-    if (lockedByOther || mine) classes.push("jn-locked");
-    if (pending) classes.push("jn-pending");
-    if (editing) classes.push("editing");
-    if (block.hidden && !note.secret) classes.push("jn-hidden-block");
-
-    let tag = "";
-    if (lockedByOther) tag = `<span class="jn-tag">${t("JN.Editor.EditingBy", { name: foundry.utils.escapeHTML(lock.userName) })}</span>`;
-    else if (mine) tag = `<span class="jn-tag">${t("JN.Editor.YouEditing")}</span>`;
-    else if (pending) tag = `<span class="jn-tag">${t("JN.Editor.Requesting")}</span>`;
-    else if (!editing && this.drafts.has(block.blockId)) tag = `<span class="jn-tag jn-draft-tag">${t("JN.Editor.UnsavedDraft")}</span>`;
-
-    if (editing) {
-      const text = this.drafts.get(block.blockId) ?? block.text;
-      return `<div class="${classes.join(" ")}" data-block-id="${block.blockId}" style="${vars}">${tag}<textarea class="jn-block-input">${foundry.utils.escapeHTML(text)}</textarea></div>`;
-    }
-    const cursor = lockedByOther ? "not-allowed" : "text";
-    const rendered = renderMarkdown(block.text, { interactiveTasks: !this.readOnly });
-    const body = rendered
-      ? `<div class="jn-block-markdown">${rendered}</div>`
-      : `<span class="jn-empty-block">${block.hidden ? t("JN.Editor.EmptyHiddenBlock") : t("JN.Editor.EmptyBlock")}</span>`;
-    return `<div class="${classes.join(" ")}" data-block-id="${block.blockId}" style="${vars};cursor:${cursor}" title="${foundry.utils.escapeHTML(author?.name ?? "")}">${tag}${this.#gmBlockActions(note, block, lockedByOther)}${body}</div>`;
-  }
-
-  /** Hover controls for GMs: hide a shared block, reveal/delete a hidden one, add a hidden block after. */
-  #gmBlockActions(note, block, lockedByOther) {
-    if (!notesStore.merged) return "";
-    const buttons = [];
-    if (note.secret) {
-      if (note.system.blocks.length > 1) buttons.push(`<button type="button" data-act="delete" title="${t("JN.Editor.DeleteBlockTitle")}">&#10005;</button>`);
-    } else if (block.hidden) {
-      buttons.push(`<button type="button" data-act="reveal" title="${t("JN.Editor.ShowBlockTitle")}">${t("JN.Common.Reveal")}</button>`);
-      buttons.push(`<button type="button" data-act="delete" title="${t("JN.Editor.DeleteHiddenBlockTitle")}">&#10005;</button>`);
-    } else if (!lockedByOther) {
-      buttons.push(`<button type="button" data-act="hide" title="${t("JN.Editor.HideBlockTitle")}">${t("JN.Common.Hide")}</button>`);
-    }
-    buttons.push(`<button type="button" data-act="add" title="${t("JN.Editor.AddHiddenAfterTitle")}">+</button>`);
-    return `<span class="jn-block-gm">${buttons.join("")}</span>`;
-  }
-
-  #bindHandlers(note) {
-    const noteId = this.noteId;
-    const tools = this.root.querySelectorAll(".jn-note-tool");
-    for (const tool of tools) tool.addEventListener("toggle", () => {
-      if (!tool.open) return;
-      for (const other of tools) if (other !== tool) other.open = false;
-    });
-    for (const tool of tools) tool.addEventListener("keydown", event => {
-      if (event.key !== "Escape" || !tool.open || event.defaultPrevented) return;
-      event.stopPropagation();
-      tool.open = false;
-      tool.querySelector("summary").focus();
-    });
-    const initialTitle = note.secret ? stripSecretPrefix(note.name) : note.name;
-    const rename = title => this.renameNote(noteId, title);
-    const titleButton = this.root.querySelector(".jn-inline-title");
-    titleButton.addEventListener("click", () => {
-      const input = document.createElement("input");
-      input.className = "jn-inline-title-input";
-      input.type = "text";
-      input.value = initialTitle;
-      input.setAttribute("aria-label", t("JN.Editor.RenameTitle"));
-      titleButton.replaceWith(input);
-      const finish = save => {
-        if (!input.isConnected) return;
-        const title = input.value.trim();
-        input.replaceWith(titleButton);
-        if (save) rename(title);
-      };
-      input.addEventListener("blur", () => finish(true));
-      input.addEventListener("keydown", event => {
-        if (event.isComposing || !["Enter", "Escape"].includes(event.key)) return;
-        event.preventDefault();
-        event.stopPropagation();
-        finish(event.key === "Enter");
-        titleButton.focus();
-      });
-      input.focus();
-      input.select();
-    });
-
-    this.root.querySelector(".journalinator-declassify")?.addEventListener("click", () => this.#declassifyNote(note));
-    this.root.querySelector(".jn-shared-send")?.addEventListener("click", () => this.callbacks.onSend?.(note._id));
-    this.root.querySelector(".jn-edit-background")?.addEventListener("click", () => this.editNoteImage(note._id, true));
-    this.root.querySelector(".jn-edit-stamp")?.addEventListener("click", event =>
-      this.callbacks.onStamp?.(note._id, event.currentTarget));
-    this.root.querySelector(".journalinator-hint-toggle")?.addEventListener("click", () => {
-      requestWrite({ type: "gmSetHint", noteId, hint: !note.system.hint });
-    });
-    this.root.querySelector(".journalinator-add-hidden")?.addEventListener("click", () => this.#addHiddenAfter(null));
-    this.root.querySelectorAll(".jn-block-gm button").forEach(btn => {
-      btn.addEventListener("click", ev => {
-        ev.stopPropagation();
-        const blockId = btn.closest("[data-block-id]").dataset.blockId;
-        this.#gmBlockAction(note, blockId, btn.dataset.act);
-      });
-    });
-
-    this.root.querySelector(".journalinator-delete")?.addEventListener("click", async () => {
-      if (note.secret) {
-        const ok = await DialogV2.confirm({
-          window: { title: t("JN.Editor.DeleteSecretNote") },
-          content: `<p>${t("JN.Editor.DeleteSecretConfirm", { name: esc(note.name) })}</p>`
-        });
-        if (!ok) return;
-        this.#stopEditing();
-        await gm(() => secrets.deleteSecretNote(noteId));
-        this.callbacks.onSelectNote?.(null);
-        return;
-      }
-      this.#stopEditing();
-      requestWrite({ type: "deleteNote", noteId });
-      ui.notifications?.info(t("JN.Delete.Notice", { count: 1 }));
-    });
-
-    this.root.querySelectorAll(".journalinator-chip").forEach(el => {
-      el.addEventListener("click", () => this.callbacks.onFocusNote(el.dataset.id));
-    });
-
-    const labelInput = this.root.querySelector(".journalinator-label");
-    const commitLabel = () => this.setNoteLabel(noteId, labelInput.value);
-    labelInput?.addEventListener("change", commitLabel);
-    labelInput?.addEventListener("keydown", event => {
-      if (event.isComposing || event.key !== "Enter") return;
-      event.preventDefault();
-      event.stopPropagation();
-      labelInput.blur();
-    });
-
-    this.root.querySelector(".journalinator-kind")?.addEventListener("change", ev => {
-      const type = ev.target.value;
-      if (type === "location") {
-        this.setNoteKind(noteId, "location");
-        this.setNotePresentation(noteId, { extendedStyle: "document", forceExtended: true });
-        return;
-      }
-      if (note.system.kind === "location") this.setNoteKind(noteId, "note");
-      if (type === "auto") this.setNotePresentation(noteId, { forceExtended: false });
-      else this.setNotePresentation(noteId, { extendedStyle: type, forceExtended: true });
-    });
-    this.root.querySelector(".journalinator-font")?.addEventListener("change", ev => {
-      this.setNotePresentation(noteId, { font: ev.target.value });
-    });
-    this.root.querySelector(".journalinator-picture-layout")?.addEventListener("change", ev => {
-      this.setNotePresentation(noteId, { pictureLayout: ev.target.value });
-    });
-    this.root.querySelector(".journalinator-force-extended")?.addEventListener("change", ev => {
-      this.setNotePresentation(noteId, { forceExtended: ev.target.checked });
-    });
-    this.root.querySelector(".journalinator-torn")?.addEventListener("change", ev => {
-      this.setNotePresentation(noteId, { torn: ev.target.checked });
-    });
-    this.root.querySelector(".journalinator-main-pin")?.addEventListener("change", ev => {
-      this.setMainPinEnabled(noteId, ev.target.checked);
-    });
-    const mainSnap = this.root.querySelector(".journalinator-main-snap");
-    const minorSnap = this.root.querySelector(".journalinator-minor-snap");
-    const pinStyle = this.root.querySelector(".journalinator-pin-style");
-    mainSnap?.addEventListener("change", () => {
-      const value = Number(mainSnap.value);
-      if (Number.isFinite(value)) this.setNoteAttachment(noteId, { mainSnapRadius: value });
-    });
-    minorSnap?.addEventListener("change", () => {
-      const value = Number(minorSnap.value);
-      if (Number.isFinite(value)) this.setNoteAttachment(noteId, { minorSnapRadius: value });
-    });
-    pinStyle?.addEventListener("change", () => {
-      this.setNoteAttachment(noteId, { pinStyle: pinStyle.value });
-    });
-
-    const targetHeading = this.root.querySelector(".journalinator-target-heading");
-    targetHeading?.addEventListener("change", () => {
-      this.setTargetHeading(noteId, targetHeading.value.trim());
-    });
-    targetHeading?.addEventListener("keydown", event => {
-      if (event.isComposing || event.key !== "Enter") return;
-      event.preventDefault();
-      event.stopPropagation();
-      targetHeading.blur();
-    });
-
-    this.root.querySelectorAll(".jn-block:not(.editing)").forEach(el => {
-      el.addEventListener("click", ev => {
-        if (ev.target.closest("a[href], input[type=\"checkbox\"]")) return;
-        this.#clickBlock(el.dataset.blockId);
-      });
-      el.querySelectorAll('input[type="checkbox"]').forEach((box, index) => {
-        box.addEventListener("click", ev => {
-          ev.preventDefault();
-          ev.stopPropagation();
-          this.toggleTask(note._id, el.dataset.blockId, index);
-        });
-      });
-    });
-
-    const textarea = this.#activeTextarea();
-    if (textarea) {
-      textarea.addEventListener("keydown", ev => applyMarkdownAutocomplete(ev, textarea));
-      textarea.addEventListener("input", () => this.#queueDraftSave());
-      textarea.onblur = () => this.#stopEditing({ save: true });
-      if (this.inlineSlot) {
-        textarea.setAttribute("aria-label", t("JN.Editor.EditCardText"));
-        textarea.addEventListener("keydown", ev => {
-          if (ev.isComposing || !(ev.key === "Escape" || (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)))) return;
-          ev.preventDefault();
-          ev.stopImmediatePropagation();
-          this.#stopEditing({ save: ev.key !== "Escape" });
-        });
-      }
-      textarea.addEventListener("keydown", ev => this.#onTextareaKeydown(ev, note));
-    }
-  }
-
-  #clickBlock(blockId) {
-    if (this.readOnly) {
-      this.#warnReadOnly();
-      return false;
-    }
-    if (this.pendingTaskToggle) {
-      releaseLock(this.pendingTaskToggle.noteId, this.pendingTaskToggle.blockId);
-      this.pendingTaskToggle = null;
-    }
-    if (this.editingBlockId === blockId || this.pendingBlockId === blockId) return;
-    if (notesStore.isHiddenBlock(this.noteId, blockId)) {
-      // GM-only blocks take no lock: lock traffic is broadcast and would reveal the block exists.
-      this.#stopEditing({ save: true });
-      this.editingBlockId = blockId;
-      this.editingSecret = true;
-      this.render();
-      return true;
-    }
-    const lock = getLock(this.noteId, blockId);
-    if (lock && lock.userId !== game.user.id) return; // locked by someone else — not clickable
-    this.pendingBlockId = blockId;
-    this.render();
-    requestLock(this.noteId, blockId);
-    return true;
-  }
-
-  #onLockChanged(blockId, lock) {
-    const mine = lock?.userId === game.user.id;
-
-    if (this.pendingTaskToggle?.blockId === blockId) {
-      const task = this.pendingTaskToggle;
-      this.pendingTaskToggle = null;
-      if (mine) this.#saveTaskToggle(task.noteId, task.blockId, task.text);
-      else this.render();
-      return;
-    }
-
-    if (this.pendingBlockId === blockId) {
-      this.pendingBlockId = null;
-      if (mine) {
-        this.editingBlockId = blockId;
-        this.#startHeartbeat(blockId);
-      } else this.inlineSlot = null;
-      this.render();
-      return;
-    }
-
-    if (this.pendingMerge?.prevBlockId === blockId) {
-      if (!mine) {
-        // The previous block is held by someone else (or the request timed out): stop waiting,
-        // otherwise a later unrelated grant could trigger a merge the user no longer expects.
-        this.pendingMerge = null;
-        this.render();
-        return;
-      }
-      const { blockId: currentBlockId, prevBlockId } = this.pendingMerge;
-      this.pendingMerge = null;
-      this.#performMerge(currentBlockId, prevBlockId);
-      return;
-    }
-
-    if (this.editingBlockId === blockId && !mine) {
-      // lost the lock involuntarily (expired, or a conflicting grant elsewhere) — rescue the draft
-      const textarea = this.#activeTextarea();
-      if (textarea) {
-        this.drafts.set(blockId, textarea.value);
-        this.#persistDraft(blockId, textarea.value);
-      }
-      this.editingBlockId = null;
-      this.#stopHeartbeat();
-      this.#clearDraftTimer();
-      this.render();
-      this.inlineSlot = null;
-      return;
-    }
-
-    this.render();
-  }
-
-  #startHeartbeat(blockId) {
-    this.#stopHeartbeat();
-    this.heartbeatTimer = setInterval(() => sendHeartbeat(this.noteId, blockId), HEARTBEAT_INTERVAL_MS);
-  }
-
-  #stopHeartbeat() {
-    clearInterval(this.heartbeatTimer);
-    this.heartbeatTimer = null;
-  }
-
-  /** Releases locks we asked for but have not yet promoted to an active block edit. */
-  #releasePendingLocks() {
-    if (!this.noteId) return;
-    if (this.pendingBlockId) releaseLock(this.noteId, this.pendingBlockId);
-    if (this.pendingMerge) releaseLock(this.noteId, this.pendingMerge.prevBlockId);
-    if (this.pendingTaskToggle) releaseLock(this.pendingTaskToggle.noteId, this.pendingTaskToggle.blockId);
-    this.pendingBlockId = null;
-    this.pendingMerge = null;
-    this.pendingTaskToggle = null;
-    if (!this.editingBlockId) this.inlineSlot = null;
-  }
-
-  #stopEditing({ save = false } = {}) {
-    if (!this.editingBlockId) return;
-    const blockId = this.editingBlockId;
-    const noteId = this.noteId;
-    this.#clearDraftTimer();
-    const textarea = this.#activeTextarea();
-    const note = notesStore.getNote(noteId);
-    const originalText = note?.system.blocks.find(b => b.blockId === blockId)?.text ?? "";
-    let write = null;
-
-    const secret = this.editingSecret;
-    this.editingSecret = false;
-
-    if (save && textarea && textarea.value !== originalText) {
-      this.drafts.set(blockId, textarea.value);
-      this.#persistDraft(blockId, textarea.value);
-      if (secret) write = gm(() => secrets.saveSecretBlock(noteId, blockId, textarea.value));
-      else if (this.#blocksSecretMention(textarea.value)) write = null; // kept as a draft
-      else write = requestWrite({ type: "saveBlock", noteId, blockId, text: textarea.value });
-    } else if (save && !textarea && this.drafts.has(blockId)) {
-      // No textarea to send, but a persisted draft exists; keep it for recovery.
-    } else {
-      this.#removeDraft(blockId);
-    }
-
-    this.editingBlockId = null;
-    this.#finishInlineInput();
-    if (secret) return;
-
-    // For the active GM, requestWrite is queued; releasing first would let the queued
-    // saveBlock fail its lock check. Wait for the write before releasing in that case.
-    if (write) this.#releaseAfterWrite(write, noteId, blockId);
-    else releaseLock(noteId, blockId);
-    this.#stopHeartbeat();
-  }
-
-  #releaseAfterWrite(write, noteId, ...blockIds) {
-    Promise.resolve(write).finally(() => {
-      for (const blockId of blockIds) {
-        const reacquired = this.noteId === noteId && (
-          this.editingBlockId === blockId ||
-          this.pendingBlockId === blockId ||
-          this.pendingMerge?.prevBlockId === blockId
-        );
-        if (!reacquired) releaseLock(noteId, blockId);
-      }
-    });
-  }
-
-  #captureDraftBeforeRebuild() {
-    if (!this.editingBlockId) return;
-    const textarea = this.#activeTextarea();
-    if (textarea) {
-      this.drafts.set(this.editingBlockId, textarea.value);
-      this.#persistDraft(this.editingBlockId, textarea.value);
-    }
-  }
-
-  #queueDraftSave() {
-    if (!this.editingBlockId) return;
-    this.#clearDraftTimer();
-    this.draftTimer = setTimeout(() => {
-      this.draftTimer = null;
-      this.#persistCurrentDraft();
-    }, DRAFT_SAVE_DELAY_MS);
-  }
-
-  #clearDraftTimer() {
-    clearTimeout(this.draftTimer);
-    this.draftTimer = null;
-  }
-
-  #persistCurrentDraft() {
-    if (!this.editingBlockId) return;
-    const textarea = this.#activeTextarea();
-    if (!textarea) return;
-    this.drafts.set(this.editingBlockId, textarea.value);
-    this.#persistDraft(this.editingBlockId, textarea.value);
-  }
-
-  #draftPrefix(noteId = this.noteId) {
-    const worldId = game.world?.id ?? "world";
-    const userId = game.user?.id ?? "user";
-    return `journalinator.draft.${worldId}.${userId}.${noteId}.`;
-  }
-
-  #storage() {
-    try {
-      return globalThis.localStorage ?? null;
-    } catch {
-      return null;
-    }
-  }
-
-  #persistDraft(blockId, text) {
-    const storage = this.#storage();
-    if (!storage || !this.noteId) return;
-    try {
-      storage.setItem(this.#draftPrefix() + blockId, JSON.stringify({ text, at: Date.now() }));
-    } catch {
-      // Quota/private-mode failures are non-fatal; the in-memory draft still works.
-    }
-  }
-
-  #removeDraft(blockId) {
-    this.drafts.delete(blockId);
-    const storage = this.#storage();
-    if (!storage || !this.noteId) return;
-    try {
-      storage.removeItem(this.#draftPrefix() + blockId);
-    } catch {
-      // ignore
-    }
-  }
-
-  #loadDrafts(noteId) {
-    this.drafts.clear();
-    if (!noteId) return;
-    const storage = this.#storage();
-    if (!storage) return;
-    const note = notesStore.getNote(noteId);
-    const blockText = new Map((note?.system.blocks ?? []).map(block => [block.blockId, block.text]));
-    const prefix = this.#draftPrefix(noteId);
-
-    try {
-      const keys = [];
-      for (let i = 0; i < storage.length; i++) {
-        const key = storage.key(i);
-        if (key?.startsWith(prefix)) keys.push(key);
-      }
-      for (const key of keys) {
-        const blockId = key.slice(prefix.length);
-        let raw;
-        try {
-          raw = JSON.parse(storage.getItem(key) ?? "null");
-        } catch {
-          storage.removeItem(key);
-          continue;
-        }
-        const stale = !raw || typeof raw.text !== "string" ||
-          !Number.isFinite(raw.at) || Date.now() - raw.at > DRAFT_TTL_MS;
-        const blockGone = Boolean(note) && !blockText.has(blockId);
-        const alreadySaved = Boolean(note) && blockText.get(blockId) === raw?.text;
-        if (stale || blockGone || alreadySaved) {
-          storage.removeItem(key);
-          continue;
-        }
-        this.drafts.set(blockId, raw.text);
-      }
-    } catch {
-      // Storage can be unavailable; memory drafts still work for this session.
-    }
-  }
-
-  #pruneSavedDrafts(note) {
-    for (const [blockId, text] of [...this.drafts]) {
-      const block = note.system.blocks.find(b => b.blockId === blockId);
-      if (!block || block.text === text) this.#removeDraft(blockId);
-    }
-  }
-
-  #onTextareaKeydown(ev, note) {
-    if (ev.isComposing) return;
-    const textarea = ev.target;
-    const blockId = this.editingBlockId;
-
-    if (ev.key === "Enter" && textarea.value.slice(0, textarea.selectionStart).endsWith("\n")) {
-      ev.preventDefault();
-      const noteId = this.noteId;
-      const beforeText = textarea.value.slice(0, textarea.selectionStart).replace(/\n+$/, "");
-      const afterText = textarea.value.slice(textarea.selectionStart);
-      if (this.editingSecret) {
-        this.#clearDraftTimer();
-        this.#removeDraft(blockId);
-        this.editingBlockId = null;
-        this.editingSecret = false;
-        this.#finishInlineInput();
-        gm(() => secrets.splitSecretBlock(noteId, blockId, beforeText, afterText));
-        return;
-      }
-      if (this.#blocksSecretMention(beforeText + afterText)) return;
-      this.#clearDraftTimer();
-      this.#removeDraft(blockId);
-      this.editingBlockId = null;
-      this.#finishInlineInput();
-      this.#stopHeartbeat();
-      const write = requestWrite({ type: "splitBlock", noteId, blockId, beforeText, afterText });
-      this.#releaseAfterWrite(write, noteId, blockId);
-      return;
-    }
-
-    if (ev.key === "Backspace" && textarea.selectionStart === 0 && textarea.selectionEnd === 0) {
-      const blocks = note.system.blocks;
-      const index = blocks.findIndex(b => b.blockId === blockId);
-      if (index <= 0) return; // first block — nothing to merge into
-      // Hidden and shared blocks never merge into each other.
-      if (!!blocks[index - 1].hidden !== this.editingSecret) return;
-      ev.preventDefault();
-      const prevBlockId = blocks[index - 1].blockId;
-      if (this.editingSecret) {
-        const noteId = this.noteId;
-        // Capture the textarea first: a merge must use what is on screen, not the last save.
-        const text = textarea.value;
-        this.#clearDraftTimer();
-        this.#removeDraft(blockId);
-        this.editingBlockId = null;
-        this.editingSecret = false;
-        this.#finishInlineInput();
-        gm(() => secrets.mergeSecretBlockUp(noteId, blockId, text));
-        return;
-      }
-      if (isHeldByMe(this.noteId, prevBlockId)) {
-        this.#performMerge(blockId, prevBlockId);
-      } else {
-        this.pendingMerge = { blockId, prevBlockId };
-        requestLock(this.noteId, prevBlockId);
-      }
-    }
-  }
-
-  #performMerge(blockId, prevBlockId) {
-    const noteId = this.noteId;
-    // The active textarea may contain edits that were never saved. Pass them along so the
-    // merge does not resurrect the older stored text and silently discard the user's typing.
-    const text = this.#activeTextarea()?.value;
-    this.#clearDraftTimer();
-    this.#removeDraft(blockId);
-    this.editingBlockId = null;
-    this.#finishInlineInput();
-    this.#stopHeartbeat();
-    const write = requestWrite({
-      type: "mergeBlockUp", noteId, blockId, ...(typeof text === "string" ? { text } : {})
-    });
-    this.#releaseAfterWrite(write, noteId, blockId, prevBlockId);
-  }
-
-  /**
-   * GMs only: refuses to send shared text that links a secret note by its `GM-XXXX` title, which
-   * would otherwise create a public note carrying that title. The text stays as a local draft.
-   */
-  #blocksSecretMention(text) {
-    if (!notesStore.merged) return false;
-    const mentions = secrets.prefixedSecretMentions(text);
-    if (!mentions.length) return false;
-    ui.notifications.error(t("JN.Editor.PrefixedMentionError", { mentions: mentions.join(", ") }));
-    return true;
-  }
-
-  async #confirmBareMentions(text, what) {
-    const mentions = secrets.bareSecretMentions(text);
-    if (!mentions.length) return true;
-    return DialogV2.confirm({
-      window: { title: t("JN.Editor.SecretMentionsTitle") },
-      content: `<p>${t("JN.Editor.SecretMentionsBody", { what, names: mentions.map(esc).join(", ") })}</p><p>${t("JN.Editor.SecretMentionsContinue")}</p>`
-    });
-  }
-
-  async #addHiddenAfter(afterBlockId) {
-    const noteId = this.noteId;
-    this.#stopEditing({ save: true });
-    const newId = await gm(() => secrets.addHiddenBlock(noteId, afterBlockId));
-    if (!newId || this.noteId !== noteId) return;
-    if (this.callbacks.onEditHiddenBlock) return this.callbacks.onEditHiddenBlock(noteId, newId);
-    this.editingBlockId = newId;
-    this.editingSecret = true;
-    this.render();
-  }
-
-  async #gmBlockAction(note, blockId, act) {
-    const noteId = note._id;
-    const block = note.system.blocks.find(b => b.blockId === blockId);
-    if (!block) return;
-    if (act === "add") return this.#addHiddenAfter(blockId);
-
-    // Include anything typed in the active textarea so a reveal confirmation sees the text that
-    // is about to be published, not the older saved copy.
-    const currentText = this.editingBlockId === blockId && this.noteId === noteId
-      ? (this.#activeTextarea()?.value ?? block.text) : block.text;
-    if (this.editingBlockId === blockId) this.#stopEditing({ save: true });
-
-    if (act === "delete") {
-      const ok = !block.text || await DialogV2.confirm({
-        window: { title: t("JN.Editor.DeleteHiddenBlockTitle") },
-        content: `<p>${t("JN.Editor.DeleteHiddenConfirm")}</p>`
-      });
-      if (ok) gm(() => secrets.deleteSecretBlock(noteId, blockId));
-      return;
-    }
-
-    if (act === "reveal") {
-      if (!(await this.#confirmBareMentions(currentText, t("JN.Editor.WhatBlock")))) return;
-      gm(() => secrets.declassifyBlock(noteId, blockId));
-      return;
-    }
-
-    if (act === "hide") {
-      const ok = await DialogV2.confirm({
-        window: { title: t("JN.Editor.HideBlockDialogTitle") },
-        content: `<p>${t("JN.Editor.HideBlockConfirm")}</p><p>${t("JN.Editor.HideBlockQuestion")}</p>`
-      });
-      if (ok) gm(() => secrets.hideSharedBlock(noteId, blockId));
-    }
-  }
-
-  async #declassifyNote(note) {
-    // Capture the in-progress textarea before opening the title dialog: opening it can blur the
-    // editor and save, after which `note` is an older snapshot.
-    const text = note.system.blocks.map(block => {
-      const live = this.noteId === note._id && this.editingBlockId === block.blockId
-        ? this.#activeTextarea()?.value : null;
-      return live ?? block.text;
-    }).join("\n");
-    const title = await this.#promptText(t("JN.Editor.DeclassifyPublicTitle"), stripSecretPrefix(note.name));
-    if (!title) return;
-    if (!(await this.#confirmBareMentions(text, t("JN.Editor.WhatNote")))) return;
-    this.#stopEditing({ save: true });
-    gm(() => secrets.declassifyNote(note._id, title));
-  }
-
-  async #promptText(title, initial, hint = "") {
-    return foundry.applications.api.DialogV2.prompt({
-      window: { title },
-      content: `<input type="text" name="value" autofocus value="${esc(initial)}">${hint ? `<p>${esc(hint)}</p>` : ""}`,
-      ok: { label: t("JN.Common.OK"), callback: (event, button) => button.form.elements.value.value.trim() },
-      rejectClose: false
-    });
+    const id = randomId("tab-");
+    storage?.setItem?.(TAB_SESSION_ID_KEY, id);
+    return id;
+  } catch {
+    return randomId("tab-");
   }
 }
+
+function normalizeNote(noteId, raw) {
+  if (!raw) return null;
+  const system = raw.system ?? raw;
+  if (!system || typeof system !== "object") return null;
+  return {
+    noteId: raw.noteId ?? raw._id ?? raw.id ?? noteId,
+    revision: Number.isInteger(system.revision) ? system.revision : 0,
+    body: typeof system.body === "string" ? system.body : "",
+    layout: system.layout === "profile" ? "profile" : "plain",
+    skin: system.skin ?? raw.skin ?? null,
+    deleted: system.deleted === true || raw.deleted === true
+  };
+}
+
+function isNonEmptyTitle(parsed) {
+  return Boolean(parsed?.title?.present && parsed.title.empty !== true
+    && typeof parsed.title.text === "string" && parsed.title.text.trim().length > 0);
+}
+
+/** Absolute range of the visible first-line title text (excluding `# ` and closing hashes). */
+export function titleTextRange(value) {
+  const text = String(value ?? "");
+  const lineEnd = text.indexOf("\n");
+  const raw = lineEnd < 0 ? text : text.slice(0, lineEnd);
+  const atx = parseAtxHeadingLite(raw);
+  if (!atx) return null;
+  const marker = /^( {0,3}#{1,6})(?:[ \t]+)?/.exec(raw);
+  const start = marker ? marker[0].length : 0;
+  const title = atx.text ?? "";
+  if (!title) return { start, end: start };
+  return { start, end: Math.min(raw.length, start + title.length) };
+}
+
+function parseAtxHeadingLite(raw) {
+  const match = /^( {0,3})(#{1,6})(?:[ \t]+(.*))?$/.exec(raw);
+  if (!match) return null;
+  let content = match[3] ?? "";
+  if (/^#+[ \t]*$/.test(content)) content = "";
+  else content = content.replace(/[ \t]+#+[ \t]*$/, "");
+  return { level: match[2].length, text: content.replace(/[ \t]+$/, "") };
+}
+
+/**
+ * Builds a standalone block insertion at a caret/selection, adding newlines only where
+ * needed. Returns the text and the caret after the block (before a following line break).
+ */
+export function insertionAt(value, start, end, block) {
+  const text = String(value ?? "");
+  const from = Math.max(0, Math.min(text.length, start ?? 0));
+  const to = Math.max(from, Math.min(text.length, end ?? from));
+  const before = text.slice(0, from);
+  const after = text.slice(to);
+  const lead = before.length === 0 || before.endsWith("\n") ? "" : "\n";
+  const trail = after.length === 0 || after.startsWith("\n") ? "" : "\n";
+  return {
+    text: lead + block + trail,
+    caret: from + lead.length + block.length + trail.length
+  };
+}
+
+const STATUS_KEYS = {
+  opening: "JN.Editor.Status.Opening",
+  saved: "JN.Editor.Status.Saved",
+  saving: "JN.Editor.Status.Saving",
+  offline: "JN.Editor.Status.Offline",
+  offlineSaved: "JN.Editor.Status.OfflineSaved",
+  storageUnavailable: "JN.Editor.Status.StorageUnavailable",
+  saveFailed: "JN.Editor.Status.SaveFailed",
+  gmEnded: "JN.Editor.Status.GmEnded",
+  leaseLost: "JN.Editor.Status.LeaseLost",
+  locked: "JN.Editor.Status.Locked",
+  conflictChanged: "JN.Editor.Status.ConflictChanged"
+};
+
+const TERMINAL_STATES = new Set(["closed", "disposed"]);
+
+export default class NoteEditor {
+  /**
+   * @param {Object} [options] See the module header for the full option contract.
+   */
+  constructor(options = {}) {
+    this._transportOption = options.transport ?? null;
+    this._transport = this._transportOption;
+    this._transportPromise = null;
+    this._draftOption = options.drafts;
+    this._drafts = null;
+    this._draftsCreated = false;
+
+    this._onState = typeof options.onState === "function" ? options.onState : null;
+    this._onClose = typeof options.onClose === "function" ? options.onClose : null;
+    this._onRequestEdit = typeof options.onRequestEdit === "function" ? options.onRequestEdit : null;
+    this._onSend = typeof options.onSend === "function" ? options.onSend : null;
+    this._onNoteChanged = typeof options.onNoteChanged === "function" ? options.onNoteChanged : null;
+    this._t = typeof options.t === "function" ? options.t : defaultT;
+    this._now = typeof options.now === "function" ? options.now : () => Date.now();
+    this._imageDialogFactory = typeof options.imageDialog === "function" ? options.imageDialog : null;
+
+    this.root = document.createElement("div");
+    this.root.className = "jn-note-editor";
+
+    this.noteId = null;
+    this._session = null;
+    this._sessionId = null;
+    this._source = null;
+    this._ui = null;
+    this._parsed = null;
+    this._selectedLayout = "plain";
+    this._host = null;
+    this._readOnly = false;
+    this._storageUnavailable = false;
+    this._pendingPasteIds = [];
+    this._hint = null;
+
+    this._activated = false;
+    this._hookStateId = null;
+    this._hookForcedId = null;
+    this._onPageHide = null;
+  }
+
+  get element() {
+    return this.root;
+  }
+
+  // --- Lifecycle -------------------------------------------------------------------------
+
+  /** Registers lease-state and pagehide listeners for the lifetime of the app. */
+  activate() {
+    if (this._activated) return;
+    this._activated = true;
+    const hooks = globalThis.Hooks;
+    if (hooks?.on) {
+      this._hookStateId = hooks.on("journalinatorEditStateChanged", (noteId, state) => {
+        this._handleEditStateChanged(noteId, state);
+      });
+      this._hookForcedId = hooks.on("journalinatorNoteForceUnlocked", payload => {
+        this._handleForceUnlocked(payload);
+      });
+    }
+    if (typeof globalThis.addEventListener === "function") {
+      this._onPageHide = () => {
+        try {
+          this._session?.dispose();
+        } catch {
+          // Pagehide is best-effort; the draft was written by dispose/flushDraft.
+        }
+      };
+      globalThis.addEventListener("pagehide", this._onPageHide);
+    }
+  }
+
+  /** Saves and releases an open edit without unregistering app hooks. */
+  async suspend() {
+    if (!this._session) return { ok: true, type: "closed", released: false };
+    return this.close({ reason: "suspend" });
+  }
+
+  /** Saves/releases, then unregisters hooks and detaches the editor element. */
+  async deactivate() {
+    this._activated = false;
+    this._removeHooks();
+    const result = this._session
+      ? await this.close({ reason: "deactivate" })
+      : { ok: true, type: "closed", released: false };
+    this.detach();
+    return result;
+  }
+
+  _removeHooks() {
+    const hooks = globalThis.Hooks;
+    if (hooks?.off) {
+      if (this._hookStateId !== null) hooks.off("journalinatorEditStateChanged", this._hookStateId);
+      if (this._hookForcedId !== null) hooks.off("journalinatorNoteForceUnlocked", this._hookForcedId);
+    }
+    this._hookStateId = null;
+    this._hookForcedId = null;
+    if (this._onPageHide && typeof globalThis.removeEventListener === "function") {
+      globalThis.removeEventListener("pagehide", this._onPageHide);
+    }
+    this._onPageHide = null;
+  }
+
+  /**
+   * Opens a note for in-place editing. Recovery is resolved first; the lease is only
+   * acquired after the author has chosen what to do with a differing local draft.
+   *
+   * @param {string} noteId
+   * @param {{host?: HTMLElement, note?: Object}} [options]
+   */
+  async open(noteId, { host, note } = {}) {
+    if (typeof noteId !== "string" || !noteId) {
+      return { ok: false, type: "error", reason: "missing" };
+    }
+    if (host) this._host = host;
+
+    if (this._session) {
+      const previous = await this.close({ reason: "switch" });
+      if (this._session && !TERMINAL_STATES.has(this._session.state)) {
+        return { ok: false, type: "error", reason: previous?.reason ?? "closeFailed" };
+      }
+    }
+
+    this.noteId = noteId;
+    let resolved = note;
+    if (resolved === undefined) {
+      try {
+        resolved = notesStore.getNote(noteId);
+      } catch {
+        resolved = null;
+      }
+    }
+    let confirmed = normalizeNote(noteId, resolved);
+    let exists = Boolean(confirmed && !confirmed.deleted);
+    if (!confirmed) {
+      confirmed = {
+        noteId,
+        revision: 0,
+        body: "",
+        layout: "plain",
+        skin: null,
+        deleted: true
+      };
+    }
+
+    const drafts = this._ensureDrafts();
+    const sessionId = getTabSessionId();
+    this._sessionId = sessionId;
+
+    let transport;
+    try {
+      transport = await this._ensureTransport();
+    } catch (error) {
+      this._reportError(error);
+      this.noteId = null;
+      return { ok: false, type: "error", reason: "transport" };
+    }
+
+    let recoveryBody = null;
+    if (drafts && this._draftAvailable()) {
+      let draft = null;
+      try {
+        draft = drafts.load(noteId, sessionId);
+      } catch (error) {
+        this._reportError(error);
+        draft = null;
+      }
+      if (draft) {
+        const outcome = await this._recoverDraft({
+          draft,
+          note: confirmed,
+          exists,
+          drafts,
+          sessionId,
+          transport
+        });
+        if (!outcome.proceed) {
+          this.noteId = null;
+          return { ok: false, type: "recovery", reason: outcome.reason ?? "deferred" };
+        }
+        if (outcome.note) confirmed = outcome.note;
+        if (outcome.exists !== undefined) exists = outcome.exists;
+        if (typeof outcome.body === "string") recoveryBody = outcome.body;
+      }
+    }
+
+    if (!exists) {
+      this.noteId = null;
+      return { ok: false, type: "error", reason: "missing" };
+    }
+
+    this._selectedLayout = confirmed.layout;
+    this._storageUnavailable = !this._draftAvailable();
+
+    let session;
+    session = new NoteEditorSession({
+      noteId,
+      note: {
+        body: confirmed.body,
+        revision: confirmed.revision,
+        layout: confirmed.layout,
+        skin: confirmed.skin
+      },
+      transport,
+      drafts,
+      clientSessionId: sessionId,
+      now: this._now,
+      onState: status => {
+        if (this._session === session) this._handleSessionState(status);
+      },
+      onLeaseLost: () => {
+        if (this._session === session) this._onRequestEdit?.(this.noteId);
+      },
+      onSaved: reply => {
+        if (this._session === session) this._handleSaved(reply);
+      }
+    });
+    this._session = session;
+
+    if (recoveryBody !== null) session.setBody(recoveryBody, { composing: false });
+
+    this._buildDOM();
+    if (this._host) this.attach(this._host);
+    this._source.setValue(session.body, { preserveSelection: false });
+    this._updateDocumentState();
+    this._renderStatus(session.status());
+
+    const result = await session.open();
+    if (this._session !== session) {
+      // The user closed (or switched notes) while the lease request was in flight. If a
+      // grant arrived late, release it instead of leaking a lease to a discarded editor.
+      if (session.lease) {
+        try {
+          await session.close({ release: true });
+        } catch {
+          // A best-effort late release is enough; the lease also expires on its own.
+        }
+      }
+      return result;
+    }
+    this._renderStatus(session.status());
+    return result;
+  }
+
+  /** Re-parses local source and applies any clean remote body/appearance updates. */
+  refresh() {
+    if (!this._session) return this;
+    const noteId = this.noteId ?? this._session.noteId;
+    let raw = null;
+    try {
+      raw = notesStore.getNote(noteId);
+    } catch {
+      raw = null;
+    }
+    if (raw) {
+      const note = normalizeNote(noteId, raw);
+      if (note) {
+        this._session.applyRemote({
+          body: note.body,
+          revision: note.revision,
+          layout: note.layout,
+          skin: note.skin
+        });
+      }
+    }
+    if (this._session.layout) this._selectedLayout = this._session.layout;
+    if (this._source && !this._source.isComposing()
+        && this._source.getValue() !== this._session.body) {
+      this._source.setValue(this._session.body, { preserveSelection: true });
+    }
+    this._updateDocumentState();
+    this._renderStatus(this._session.status());
+    return this;
+  }
+
+  /** Re-renders chrome only; the textarea is never rebuilt while the session is alive. */
+  render() {
+    if (!this._session) return this;
+    this._ensureDOM();
+    this._updateDocumentState();
+    this._renderStatus(this._session.status());
+    return this;
+  }
+
+  /**
+   * Flushes and releases. The editor only leaves editing mode after `noteEditEnded`
+   * (or an already-closed session). Forced/lost leases close locally without pretending
+   * to have released a lease the editor no longer owns.
+   */
+  async close({ reason = "done" } = {}) {
+    this._ui?.toolbar.closeTransient({ restoreFocus: false });
+    const session = this._session;
+    if (!session) {
+      return { ok: true, type: "closed", released: false };
+    }
+
+    const localOnly = reason === "forced" || reason === "leaseLost";
+    const result = await session.close({ release: !localOnly });
+    const ended = result?.type === "noteEditEnded"
+      || result?.type === "closed"
+      || (result?.ok === true && result?.released === false && TERMINAL_STATES.has(session.state));
+    if (ended) {
+      this._finishClose({ reason, result });
+    } else {
+      this._renderStatus(session.status());
+    }
+    return result;
+  }
+
+  isEditing() {
+    return Boolean(this._session && !TERMINAL_STATES.has(this._session.state));
+  }
+
+  attach(host) {
+    if (!host) return this;
+    this._host = host;
+    host.appendChild(this.root);
+    return this;
+  }
+
+  detach() {
+    this._host = null;
+    this.root.remove();
+    return this;
+  }
+
+  // --- DOM construction ------------------------------------------------------------------
+
+  _ensureDOM() {
+    if (this._ui && this._session) return;
+    this._buildDOM();
+  }
+
+  _buildDOM() {
+    const t = this._t;
+    this._pasteFlushPending = false;
+    this._hint = null;
+
+    const toolbar = createToolbar({
+      t,
+      onAction: action => this._runAction(action),
+      onLayout: layout => {
+        void this._selectLayout(layout);
+      },
+      onSkinChange: patch => {
+        void this._applySkinPatch(patch);
+      },
+      onBackgroundChoose: () => {
+        void this._chooseBackground();
+      },
+      onBackgroundRemove: () => {
+        void this._applySkinPatch({ backgroundImage: null });
+      }
+    });
+
+    const secondary = createSecondaryRow({ t });
+    const profile = createProfileHelper({
+      t,
+      onAction: action => this._runAction(action)
+    });
+
+    const hint = document.createElement("div");
+    hint.className = "jn-editor-hint";
+    hint.setAttribute("role", "note");
+    hint.hidden = true;
+
+    const surfaceHost = document.createElement("div");
+    surfaceHost.className = "jn-editor-surface-host";
+    surfaceHost.style.position = "relative";
+
+    const ghost = createAddTitleGhost({
+      t,
+      onClick: () => this._applyTitle()
+    });
+
+    const source = new SourceSurface({
+      onInput: event => this._handleInput(event),
+      onCompositionStart: () => {
+        this._session?.setBody(this._source.getValue(), { composing: true });
+      },
+      onCompositionEnd: value => {
+        this._session?.setBody(value, { composing: false });
+        this._updateDocumentState();
+      },
+      onPaste: event => {
+        if (!event?.id) return;
+        this._session?.addEventIds([event.id]);
+        this._pasteFlushPending = true;
+      }
+    });
+    source.mount(surfaceHost);
+    surfaceHost.appendChild(ghost);
+    source.textarea.addEventListener("keydown", event => this._handleKeydown(event));
+
+    this.root.replaceChildren(
+      toolbar.element,
+      secondary.element,
+      profile.element,
+      hint,
+      surfaceHost
+    );
+    this.root.dataset.noteId = this.noteId ?? "";
+    this.root.classList.add("jn-note-editor-root");
+
+    this._source = source;
+    this._ui = { toolbar, secondary, profile, hint, ghost, surfaceHost };
+    toolbar.setLayout(this._selectedLayout);
+    toolbar.setSkin(resolveSkin(this._session?.skin ?? null));
+  }
+
+  // --- Input and document state ----------------------------------------------------------
+
+  _handleInput(event) {
+    if (!this._session) return;
+    this._session.setBody(event.value, { composing: event.composing });
+    this._updateDocumentState();
+    this._clearHint();
+    if (!event.composing) this._flushPasteEvents();
+  }
+
+  _flushPasteEvents() {
+    if (!this._session || !this._pasteFlushPending) return;
+    this._pasteFlushPending = false;
+    const result = this._session.flush({ reason: "paste" });
+    // The session owns event-id accounting; its ack removes only the ids that were
+    // actually included in that save. Never clear ids from this UI-side promise.
+    Promise.resolve(result).then(() => this._renderStatus()).catch(() => {});
+  }
+
+  _updateDocumentState() {
+    if (!this._source || !this._ui) return;
+    const selectedLayout = this._selectedLayout ?? this._session?.layout ?? "plain";
+    const body = this._source.getValue();
+    this._parsed = parseDocument(body, { selectedLayout });
+    this._source.updateParsed(this._parsed);
+    this._ui.profile.update(selectedLayout === "profile" ? this._parsed.profileIssue : null);
+    this._ui.toolbar.setLayout(selectedLayout);
+    const untitled = !this._parsed.title || this._parsed.title.empty === true;
+    this._ui.ghost.hidden = this._readOnly || !untitled;
+    this._ui.ghost.setAttribute("aria-hidden", String(this._ui.ghost.hidden));
+  }
+
+  _setHint(text) {
+    if (!this._ui) return;
+    this._ui.hint.textContent = text ?? "";
+    this._ui.hint.hidden = !text;
+    this._hint = text ?? null;
+  }
+
+  _clearHint() {
+    this._setHint("");
+  }
+
+  // --- Toolbar actions -------------------------------------------------------------------
+
+  _runAction(action) {
+    if (action === "layout" || action === "appearance") return;
+    if (this._readOnly && action !== "done") return;
+    this._clearHint();
+    if (action === "title" || action === "add-title") {
+      this._applyTitle();
+    } else if (action === "divider") {
+      this._applyDivider();
+    } else if (action === "portrait") {
+      void this._applyPortrait();
+    } else if (action === "done") {
+      void this.close({ reason: "done" });
+    }
+  }
+
+  _currentParse() {
+    return parseDocument(this._source?.getValue() ?? "", {
+      selectedLayout: this._selectedLayout ?? this._session?.layout ?? "plain"
+    });
+  }
+
+  _applyTitle() {
+    if (!this._source) return;
+    const value = this._source.getValue();
+    const parsed = this._currentParse();
+    const range = titleTextRange(value);
+    if (parsed.title) {
+      if (range) {
+        if (parsed.title.empty) this._source.focusRange(range.start, range.start);
+        else this._source.focusRange(range.start, range.end);
+      } else {
+        this._source.focus();
+      }
+      this._updateDocumentState();
+      return;
+    }
+
+    // One native edit keeps the whole insertion in a single undo step. The old body stays
+    // byte-for-byte as it was, just shifted below the new empty title marker.
+    const insertion = value.length ? "# \n" : "# ";
+    this._source.focus();
+    this._source.setSelection(0, 0);
+    this._source.insertText(insertion);
+    if (this._source.getValue() === value) {
+      this._source.replaceRange(0, 0, insertion);
+    }
+    this._source.focusRange(2, 2);
+    this._updateDocumentState();
+  }
+
+  _applyDivider() {
+    if (!this._source) return;
+    const parsed = this._currentParse();
+    const selection = this._source.getSelection();
+    if (isOffsetInCodeOrComment(parsed, selection.start)) {
+      this._setHint(this._t("JN.Editor.DividerInCode"));
+      return;
+    }
+    const block = insertionAt(this._source.getValue(), selection.start, selection.end, "---");
+    this._source.replaceRange(selection.start, selection.end, block.text);
+    this._source.focusRange(block.caret, block.caret);
+    this._clearHint();
+    this._updateDocumentState();
+  }
+
+  async _applyPortrait() {
+    if (!this._source || !this._session) return;
+    const parsed = this._currentParse();
+    const selection = this._source.getSelection();
+    const existing = parsed.profile?.portrait ?? null;
+    const profileInsert = this._selectedLayout === "profile"
+      && isNonEmptyTitle(parsed)
+      && !existing;
+
+    if (!existing && !profileInsert && isOffsetInCodeOrComment(parsed, selection.start)) {
+      this._setHint(this._t("JN.Editor.CodeInsertBlocked"));
+      return;
+    }
+
+    const result = await this._openPortraitDialog({
+      mode: existing ? "replace" : "insert",
+      initialSrc: existing?.src ?? "",
+      initialAlt: existing?.alt ?? ""
+    });
+    if (!result) {
+      this._source.focusRange(selection.start, selection.end);
+      return;
+    }
+
+    if (existing) {
+      this._source.replaceRange(existing.start, existing.end, result.markdown);
+      this._focusFollowing(existing.start + result.markdown.length);
+    } else if (profileInsert) {
+      // Preserve comments/blank lines between the title and the rest; insert immediately
+      // after the title or its optional underline.
+      const anchor = parsed.underline ? parsed.underline.end : parsed.title.end;
+      const block = insertionAt(this._source.getValue(), anchor, anchor, result.markdown);
+      this._source.replaceRange(anchor, anchor, block.text);
+      this._focusFollowing(anchor + block.text.length);
+    } else {
+      const block = insertionAt(
+        this._source.getValue(),
+        selection.start,
+        selection.end,
+        result.markdown
+      );
+      this._source.replaceRange(selection.start, selection.end, block.text);
+      this._focusFollowing(selection.start + block.text.length);
+    }
+    this._clearHint();
+    this._updateDocumentState();
+  }
+
+  _focusFollowing(offset) {
+    if (!this._source) return;
+    const value = this._source.getValue();
+    let caret = Math.max(0, Math.min(value.length, offset));
+    if (value[caret] === "\n") caret += 1;
+    this._source.focusRange(caret, caret);
+  }
+
+  async _selectLayout(layout) {
+    if (!this._session) return;
+    const result = await this._session.setLayout(layout);
+    if (result?.ok) {
+      this._selectedLayout = result.layout ?? layout;
+      this._ui?.toolbar.setLayout(this._selectedLayout);
+      this._updateDocumentState();
+      this._renderStatus();
+      this._onNoteChanged?.({
+        noteId: this.noteId,
+        layout: this._selectedLayout,
+        skin: this._session.skin
+      });
+    } else {
+      this._ui?.toolbar.setLayout(this._selectedLayout);
+    }
+  }
+
+  async _applySkinPatch(patch) {
+    if (!this._session) return;
+    const current = resolveSkin(this._session.skin ?? this._ui?.toolbar.getSkin());
+    const next = resolveSkin({ ...current, ...patch });
+    const result = await this._session.setSkin(next);
+    if (result?.ok) {
+      const applied = resolveSkin(result.skin ?? next);
+      this._ui?.toolbar.setSkin(applied);
+      this._renderStatus();
+      this._onNoteChanged?.({
+        noteId: this.noteId,
+        layout: this._session.layout,
+        skin: applied
+      });
+    } else {
+      this._ui?.toolbar.setSkin(resolveSkin(this._session.skin ?? current));
+    }
+  }
+
+  async _chooseBackground() {
+    if (!this._session || !this._source) return;
+    const current = resolveSkin(this._session.skin);
+    const selection = this._source.getSelection();
+    const result = await this._openImageDialog({
+      title: this._t("JN.Skin.BackgroundImage"),
+      mode: "insert",
+      initialSrc: current.backgroundImage ?? ""
+    });
+    if (!result) {
+      this._source.focusRange(selection.start, selection.end);
+      return;
+    }
+    if (result.src) await this._applySkinPatch({ backgroundImage: result.src });
+  }
+
+  _openPortraitDialog({ mode, initialSrc, initialAlt }) {
+    return this._openImageDialog({ mode, initialSrc, initialAlt });
+  }
+
+  async _openImageDialog(options) {
+    if (this._imageDialogFactory) {
+      return this._imageDialogFactory({
+        ...options,
+        t: this._t
+      });
+    }
+    const dialog = buildImageDialog({ ...options, t: this._t });
+    const host = globalThis.document?.body ?? this.root;
+    host.appendChild(dialog.element);
+    dialog.urlInput.focus();
+    dialog.urlInput.select?.();
+    this._imageDialog = dialog;
+    try {
+      return await dialog.promise;
+    } finally {
+      if (this._imageDialog === dialog) this._imageDialog = null;
+    }
+  }
+
+  // --- Keyboard and composition ----------------------------------------------------------
+
+  _handleKeydown(event) {
+    // Board shortcuts never see textarea keystrokes, regardless of which key it is.
+    event.stopPropagation();
+    if (event.isComposing || this._source?.isComposing()) return;
+
+    if ((event.ctrlKey || event.metaKey) && String(event.key).toLowerCase() === "s") {
+      event.preventDefault();
+      const result = this._session?.flush({ reason: "shortcut" });
+      Promise.resolve(result).then(() => this._renderStatus()).catch(() => {});
+      return;
+    }
+
+    if (event.key !== "Escape") return;
+    if (this._imageDialog) {
+      event.preventDefault();
+      this._imageDialog.close();
+      return;
+    }
+    if (this._ui?.toolbar.isTransientOpen()) {
+      event.preventDefault();
+      this._ui.toolbar.closeTransient();
+      return;
+    }
+    event.preventDefault();
+    void this.close({ reason: "escape" });
+  }
+
+  // --- Session status --------------------------------------------------------------------
+
+  _handleSessionState(status) {
+    this._renderStatus(status);
+    this._onState?.(status);
+  }
+
+  _handleSaved(reply) {
+    this._onNoteChanged?.({
+      noteId: this.noteId,
+      body: this._session?.confirmedBody,
+      revision: this._session?.confirmedRevision,
+      reply
+    });
+  }
+
+  _draftAvailable() {
+    if (!this._drafts) return false;
+    try {
+      return typeof this._drafts.isAvailable === "function" ? this._drafts.isAvailable() : true;
+    } catch {
+      return false;
+    }
+  }
+
+  _statusActions(state) {
+    const t = this._t;
+    const copy = {
+      id: "copy",
+      label: t("JN.Editor.CopyText"),
+      onClick: () => {
+        void copyToClipboard(this._source?.getValue() ?? this._session?.body ?? "");
+      }
+    };
+    const close = {
+      id: "close",
+      label: t("JN.Common.Close"),
+      onClick: () => {
+        const reason = state === "forced" || state === "leaseLost" ? state : "close";
+        void this.close({ reason });
+      }
+    };
+    const retry = {
+      id: "retry",
+      label: t("JN.Common.Retry"),
+      onClick: () => {
+        if (state === "conflict") {
+          void this._retryConflict();
+          return;
+        }
+        const result = this._session?.flush({ reason: "retry" });
+        Promise.resolve(result).then(() => this._renderStatus()).catch(() => {});
+      }
+    };
+    return { copy, close, retry };
+  }
+
+  /**
+   * Explicit conflict recovery. An equal-body state is adopted as clean; differing or
+   * unavailable text keeps the local draft and only shows a hint — it is never
+   * overwritten silently.
+   */
+  async _retryConflict() {
+    const result = await this._session?.retryConflict();
+    if (result?.ok) {
+      this._clearHint();
+      this._renderStatus();
+      return;
+    }
+    if (result?.reason === "conflictChanged") {
+      this._setHint(this._t(STATUS_KEYS.conflictChanged));
+    } else if (result?.reason === "offline") {
+      this._setHint(this._t(STATUS_KEYS.offline));
+    }
+    this._renderStatus();
+  }
+
+  _renderStatus(status = this._session?.status()) {
+    if (!this._ui) return;
+    const t = this._t;
+    const state = status?.state ?? "idle";
+    const storageUnavailable = !this._draftAvailable();
+    this._storageUnavailable = storageUnavailable;
+    const actions = this._statusActions(state);
+
+    let label = "";
+    let actionsToShow = [];
+    let visualState = state;
+
+    if (state === "acquiring") {
+      label = t(STATUS_KEYS.opening);
+    } else if (TERMINAL_STATES.has(state) || state === "idle") {
+      label = "";
+    } else if (storageUnavailable) {
+      label = t(STATUS_KEYS.storageUnavailable);
+      visualState = "storageUnavailable";
+      actionsToShow = [actions.copy];
+    } else if (state === "forced") {
+      label = t(STATUS_KEYS.gmEnded);
+      actionsToShow = [actions.close, actions.copy];
+    } else if (state === "leaseLost") {
+      label = t(STATUS_KEYS.leaseLost);
+      actionsToShow = [actions.close, actions.copy];
+    } else if (state === "denied") {
+      label = t(STATUS_KEYS.locked);
+      actionsToShow = [actions.close, actions.copy];
+    } else if (state === "offline") {
+      if (status?.savedLocally) {
+        label = t(STATUS_KEYS.offlineSaved);
+      } else {
+        label = t(STATUS_KEYS.offline);
+      }
+      actionsToShow = [actions.close, actions.copy];
+    } else if (state === "rejected" || state === "conflict") {
+      if (status?.savedLocally) {
+        label = t(STATUS_KEYS.saveFailed);
+        actionsToShow = [actions.retry, actions.copy];
+      } else {
+        label = t(STATUS_KEYS.storageUnavailable);
+        visualState = "storageUnavailable";
+        actionsToShow = [actions.copy];
+      }
+    } else if (state === "saving" || status?.dirty) {
+      label = t(STATUS_KEYS.saving);
+    } else if (state === "editing") {
+      label = t(STATUS_KEYS.saved);
+    } else {
+      label = t(STATUS_KEYS.saveFailed);
+      actionsToShow = status?.savedLocally ? [actions.retry, actions.copy] : [actions.copy];
+    }
+
+    this._ui.secondary.setStatus({
+      text: label,
+      state: visualState,
+      actions: actionsToShow
+    });
+    // Storage failure keeps the exact required copy while exposing the real server state
+    // separately for the card chrome/CSS.
+    this._ui.secondary.statusElement.dataset.serverState = state;
+
+    const readOnly = ["acquiring", "denied", "forced", "leaseLost", "closed", "disposed"].includes(state);
+    this._readOnly = readOnly;
+    if (this._source) this._source.textarea.readOnly = readOnly;
+    this._ui.toolbar.setDisabled(readOnly);
+    if (this._ui) {
+      const untitled = !this._parsed?.title || this._parsed.title.empty === true;
+      this._ui.ghost.hidden = readOnly || !untitled;
+    }
+    this.root.dataset.state = visualState;
+  }
+
+  // --- Lease changes ---------------------------------------------------------------------
+
+  _handleEditStateChanged(noteId, state) {
+    if (!this._session || noteId !== (this.noteId ?? this._session.noteId)) return;
+    const lease = state?.lease ?? null;
+    const mine = this._session.lease;
+    if (!mine || (lease && lease.leaseToken === mine.leaseToken)) return;
+    // The socket broadcasts a revocation before the force-unlock hook. Deferring one
+    // microtask lets a same-tick force notification set the precise `forced` state;
+    // `applyLeaseLost` is terminal, so a later leaseLost call cannot overwrite it.
+    const session = this._session;
+    const apply = () => {
+      if (this._session !== session) return;
+      session.applyLeaseLost("leaseLost");
+      this._renderStatus(session.status());
+    };
+    if (typeof queueMicrotask === "function") queueMicrotask(apply);
+    else Promise.resolve().then(apply);
+  }
+
+  _handleForceUnlocked(payload) {
+    if (!this._session || payload?.noteId !== (this.noteId ?? this._session.noteId)) return;
+    this._session.applyLeaseLost("forced");
+    this._renderStatus(this._session.status());
+  }
+
+  // --- Recovery --------------------------------------------------------------------------
+
+  async _recoverDraft({ draft, note, exists, drafts, sessionId, transport }) {
+    let state = classifyDraft({ draft, note, exists });
+    if (state.kind === "none") return { proceed: true, note };
+    if (state.kind === "identical") {
+      drafts.remove(this.noteId, sessionId);
+      return { proceed: true, note };
+    }
+
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const dialog = openRecoveryDialog({
+        state,
+        t: this._t,
+        host: globalThis.document?.body ?? this.root,
+        formatTime: at => draftTimestamp(at, { now: this._now() })
+      });
+      this._recoveryDialog = dialog;
+      const { action } = await dialog.promise;
+      this._recoveryDialog = null;
+
+      if (action === "defer") {
+        return { proceed: false, reason: "recoveryDeferred" };
+      }
+      if (action === "discard") {
+        drafts.remove(this.noteId, sessionId);
+        return { proceed: true, note: state.note ?? note, exists: state.kind !== "missing" };
+      }
+      if (action !== "recover") continue;
+
+      let latest = null;
+      try {
+        latest = await this._readLatest(transport);
+      } catch {
+        latest = null;
+      }
+      if (!latest) {
+        // Offline/unverifiable: the author explicitly chose their local draft. The session
+        // will keep it dirty and report the actual save state.
+        return { proceed: true, body: draft.body, note, exists };
+      }
+
+      const recheck = classifyDraft({
+        draft,
+        note: latest.note,
+        exists: latest.exists
+      });
+      if (recheck.kind === "missing") {
+        state = recheck;
+        continue;
+      }
+      if (recheck.kind === "identical") {
+        drafts.remove(this.noteId, sessionId);
+        return { proceed: true, note: latest.note, exists: true };
+      }
+
+      const shownBody = state.note?.body ?? "";
+      const shownRevision = state.note?.revision ?? 0;
+      const latestBody = recheck.note?.body ?? "";
+      const latestRevision = recheck.note?.revision ?? 0;
+      if (latestBody !== shownBody || (latestRevision !== shownRevision && latestBody !== draft.body)) {
+        // Another client changed the note after the comparison was drawn. Refresh rather
+        // than silently replacing text the author has not seen.
+        state = recheck;
+        continue;
+      }
+
+      return {
+        proceed: true,
+        body: draft.body,
+        note: latest.note ?? note,
+        exists: true
+      };
+    }
+
+    return { proceed: false, reason: "recoveryLoop" };
+  }
+
+  async _readLatest(transport) {
+    const reply = await transport.state({ noteId: this.noteId });
+    const entry = readStateEntry(reply, this.noteId);
+    if (!entry) return null;
+    if (entry.deleted === true) {
+      return {
+        exists: false,
+        note: {
+          noteId: this.noteId,
+          revision: Number.isInteger(entry.revision) ? entry.revision : 0,
+          body: "",
+          deleted: true
+        }
+      };
+    }
+    if (typeof entry.body !== "string") return null;
+    return {
+      exists: true,
+      note: {
+        noteId: this.noteId,
+        revision: Number.isInteger(entry.revision) ? entry.revision : 0,
+        body: entry.body,
+        layout: entry.layout,
+        skin: entry.skin,
+        deleted: false
+      }
+    };
+  }
+
+  // --- Drafts and transport ---------------------------------------------------------------
+
+  _ensureDrafts() {
+    if (this._draftsCreated) return this._drafts;
+    this._draftsCreated = true;
+    if (this._draftOption === null) {
+      this._drafts = null;
+      return null;
+    }
+    if (this._draftOption) {
+      this._drafts = this._draftOption;
+      return this._drafts;
+    }
+    try {
+      this._drafts = new DraftStore({
+        origin: globalThis.location?.origin ?? "",
+        worldId: globalThis.game?.world?.id ?? "",
+        userId: globalThis.game?.user?.id ?? "",
+        canvasId: "shared",
+        now: this._now
+      });
+    } catch (error) {
+      this._reportError(error);
+      this._drafts = null;
+    }
+    return this._drafts;
+  }
+
+  async _ensureTransport() {
+    if (this._transport) return this._transport;
+    if (!this._transportPromise) {
+      this._transportPromise = (async () => {
+        try {
+          const [socket, editSession] = await Promise.all([
+            import("../socket.mjs"),
+            import("../edit-session.mjs")
+          ]);
+          // The lease must use a fresh per-page client session id; the persistent tab id
+          // above is only draft identity, so a reload can still find its own draft.
+          this._transport = createSocketTransport({
+            notesStore,
+            clientSessionId: editSession.clientSessionId ?? randomId("page-"),
+            requestEditReply: socket.requestEditReply,
+            requestWrite: socket.requestWrite,
+            now: this._now
+          });
+        } catch (error) {
+          this._transportPromise = null;
+          throw error;
+        }
+        return this._transport;
+      })();
+    }
+    return this._transportPromise;
+  }
+
+  _finishClose({ reason, result }) {
+    const noteId = this.noteId;
+    this._source?.destroy();
+    this._source = null;
+    this._ui = null;
+    this._parsed = null;
+    this._session = null;
+    this._readOnly = true;
+    this.noteId = null;
+    this.root.replaceChildren();
+    this.root.dataset.noteId = "";
+    this.root.dataset.state = "closed";
+    this._onClose?.({ noteId, reason, result });
+  }
+
+  _reportError(error) {
+    // UI callbacks are untrusted; never throw from them or recurse.
+    try {
+      console.error?.("Journalinator editor:", error);
+    } catch {
+      // Ignore console failures in constrained environments.
+    }
+  }
+}
+
+export { MAX_BODY_LENGTH };

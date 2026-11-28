@@ -226,6 +226,7 @@
   "JN.Prompt.GMLabel": "Метка ведущего",
 
   "JN.Editor.Empty": "Выберите заметку, чтобы открыть её.",
+  "JN.Editor.Status.ConflictChanged": "Заметка изменилась, пока вы редактировали. Скопируйте текст перед повторной попыткой или открытием.",
   "JN.Editor.InTrash": "Эта заметка в корзине.",
   "JN.Editor.RenameTitle": "Переименовать заметку",
   "JN.Editor.TargetHeading": "Надпись на карточке",

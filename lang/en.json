@@ -226,6 +226,7 @@
   "JN.Prompt.GMLabel": "GM Label",
 
   "JN.Editor.Empty": "Select a note to open it.",
+  "JN.Editor.Status.ConflictChanged": "This note changed while you were editing. Copy your text before reopening or retrying.",
   "JN.Editor.InTrash": "This note is in the trash.",
   "JN.Editor.RenameTitle": "Rename note",
   "JN.Editor.TargetHeading": "Card heading",

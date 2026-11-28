@@ -472,6 +472,178 @@ test("a clean body returns a synthetic noop without calling save or advancing se
   assert.equal(session.sequence, before);
 });
 
+test("event ids are carried by exactly one save and not repeated", async () => {
+  const { session, transport } = setup();
+  await session.open();
+  session.addEventIds(["paste-large:one"]);
+  session.setBody("pasted text");
+  await session.flush({ reason: "paste" });
+  await settle();
+
+  assert.equal(transport.calls.save.length, 1);
+  assert.deepEqual(transport.calls.save[0].eventIds, ["paste-large:one"]);
+
+  session.setBody("pasted text plus typing");
+  await session.flush();
+  await settle();
+  assert.equal(transport.calls.save.length, 2);
+  assert.deepEqual(transport.calls.save[1].eventIds, []);
+});
+
+test("an ack for an older snapshot keeps a newer paste id pending", async () => {
+  const { session, transport } = setup();
+  transport.deferSaves = true;
+  await session.open();
+
+  session.addEventIds(["paste-large:old"]);
+  session.setBody("one");
+  const first = session.flush({ reason: "paste" });
+  await settle();
+  assert.deepEqual(transport.calls.save[0].eventIds, ["paste-large:old"]);
+
+  session.addEventIds(["paste-large:new"]);
+  session.setBody("two");
+  transport.resolveSave(0, {
+    type: "noteSaveAck",
+    revision: 3,
+    sequence: transport.calls.save[0].sequence,
+    bodyHash: noteBodyHash("one")
+  });
+  await first;
+  await settle();
+
+  const second = session.flush();
+  await settle();
+  assert.equal(transport.calls.save.length, 2);
+  assert.deepEqual(transport.calls.save[1].eventIds, ["paste-large:new"]);
+  transport.resolveSave(1);
+  await second;
+  await settle();
+});
+
+test("a rejected save keeps its event id for the next retry", async () => {
+  const { session, transport } = setup();
+  transport.saveImpl = () => Promise.resolve({
+    type: "noteSaveRejected",
+    reason: "noActiveGM",
+    revision: 2
+  });
+  await session.open();
+  session.addEventIds(["paste-large:retry"]);
+  session.setBody("local text");
+  await session.flush();
+  await settle();
+  assert.equal(session.state, "offline");
+
+  transport.saveImpl = null;
+  await session.flush();
+  await settle();
+  assert.equal(transport.calls.save.length, 2);
+  assert.deepEqual(transport.calls.save[1].eventIds, ["paste-large:retry"]);
+});
+
+test("a noteEditEnded ack clears the event ids that were sent with end", async () => {
+  const { session, transport } = setup();
+  await session.open();
+  session.addEventIds(["paste-large:end"]);
+
+  const result = await session.close();
+  assert.equal(result.type, "noteEditEnded");
+  assert.deepEqual(transport.calls.end[0].eventIds, ["paste-large:end"]);
+  assert.deepEqual(session._eventIds, []);
+});
+
+test("retryConflict adopts an equal latest body as clean", async () => {
+  const { session, transport, clock, drafts } = setup();
+  transport.saveImpl = () => Promise.resolve({
+    type: "noteSaveRejected",
+    reason: "staleRevision",
+    revision: 5
+  });
+  await session.open();
+  session.setBody("local text");
+  clock.advance(AUTOSAVE_MS);
+  await settle();
+  assert.equal(session.state, "conflict");
+
+  transport.stateImpl = () => Promise.resolve({
+    type: "noteEditState",
+    notes: [{ noteId: NOTE, revision: 6, body: "local text" }]
+  });
+  const result = await session.retryConflict();
+  assert.deepEqual(result, { ok: true, revision: 6 });
+  assert.equal(session.state, "editing");
+  assert.equal(session.dirty, false);
+  assert.equal(session.confirmedBody, "local text");
+  assert.equal(session.confirmedRevision, 6);
+  assert.equal(drafts.load(NOTE, "sess-a"), null);
+});
+
+test("retryConflict never overwrites a differing latest body and keeps the draft", async () => {
+  const { session, transport, clock, drafts } = setup();
+  transport.saveImpl = () => Promise.resolve({
+    type: "noteSaveRejected",
+    reason: "staleRevision",
+    revision: 5
+  });
+  await session.open();
+  session.setBody("local text");
+  clock.advance(AUTOSAVE_MS);
+  await settle();
+  const saveCalls = transport.calls.save.length;
+
+  transport.stateImpl = () => Promise.resolve({
+    type: "noteEditState",
+    notes: [{ noteId: NOTE, revision: 7, body: "someone else" }]
+  });
+  const result = await session.retryConflict();
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "conflictChanged");
+  assert.equal(result.note.body, "someone else");
+  assert.equal(result.note.revision, 7);
+  assert.equal(session.state, "conflict");
+  assert.equal(session.body, "local text");
+  assert.equal(session.confirmedBody, "base");
+  assert.equal(transport.calls.save.length, saveCalls, "no silent overwrite save");
+  assert.equal(drafts.load(NOTE, "sess-a").body, "local text");
+});
+
+test("retryConflict reports offline when the latest state is unavailable", async () => {
+  {
+    const { session, transport, clock } = setup();
+    transport.saveImpl = () => Promise.resolve({
+      type: "noteSaveRejected",
+      reason: "staleRevision",
+      revision: 5
+    });
+    await session.open();
+    session.setBody("local text");
+    clock.advance(AUTOSAVE_MS);
+    await settle();
+    transport.stateImpl = () => { throw new Error("state unavailable"); };
+    const result = await session.retryConflict();
+    assert.deepEqual(result, { ok: false, reason: "offline" });
+    assert.equal(session.state, "conflict");
+    assert.equal(session.body, "local text");
+  }
+
+  {
+    const { session, transport, clock } = setup();
+    transport.saveImpl = () => Promise.resolve({
+      type: "noteSaveRejected",
+      reason: "staleRevision",
+      revision: 5
+    });
+    await session.open();
+    session.setBody("local text");
+    clock.advance(AUTOSAVE_MS);
+    await settle();
+    transport.stateImpl = () => Promise.resolve({ type: "timeout" });
+    const result = await session.retryConflict();
+    assert.deepEqual(result, { ok: false, reason: "offline" });
+  }
+});
+
 test("staleRevision becomes a conflict, keeps the draft and does not retry", async () => {
   const { session, transport, clock, drafts } = setup();
   transport.saveImpl = () => Promise.resolve({
@@ -517,6 +689,88 @@ test("tooLarge and invalid rejections become rejected and retain the draft", asy
     await settle();
     assert.equal(transport.calls.save.length, 1);
   }
+});
+
+test("editing recovers from a tooLarge or invalid rejection and saves on the next autosave", async () => {
+  for (const reason of ["tooLarge", "invalid"]) {
+    const { session, transport, clock } = setup();
+    transport.saveImpl = args => Promise.resolve(
+      transport.calls.save.length === 1
+        ? { type: "noteSaveRejected", reason, revision: 2 }
+        : transport.ackFor(args)
+    );
+    await session.open();
+    session.setBody("x".repeat(20));
+    clock.advance(AUTOSAVE_MS);
+    await settle();
+    assert.equal(session.state, "rejected");
+    assert.equal(session.status().error, reason);
+    assert.equal(transport.calls.save.length, 1);
+
+    const previews = transport.calls.preview.length;
+    session.setBody("fixed");
+    assert.equal(session.state, "editing");
+    assert.equal(session.status().error, null);
+    assert.equal(session.dirty, true);
+
+    clock.advance(PREVIEW_MS);
+    await settle();
+    assert.equal(transport.calls.preview.length, previews + 1, "preview resumes after the edit");
+
+    clock.advance(AUTOSAVE_MS);
+    await settle();
+    assert.equal(transport.calls.save.length, 2, "autosave fires after the edit");
+    assert.equal(transport.calls.save[1].body, "fixed");
+    assert.equal(session.state, "editing");
+    assert.equal(session.dirty, false);
+  }
+});
+
+test("a conflict is not recovered by editing", async () => {
+  const { session, transport, clock } = setup();
+  transport.saveImpl = () => Promise.resolve({
+    type: "noteSaveRejected",
+    reason: "staleRevision",
+    revision: 9
+  });
+  await session.open();
+  session.setBody("local text");
+  clock.advance(AUTOSAVE_MS);
+  await settle();
+  assert.equal(session.state, "conflict");
+
+  session.setBody("local text edited");
+  assert.equal(session.state, "conflict");
+  assert.equal(transport.calls.save.length, 1);
+
+  clock.advance(10000);
+  await settle();
+  assert.equal(transport.calls.save.length, 1);
+  assert.equal(session.state, "conflict");
+});
+
+test("a leaseLost session is not recovered by editing", async () => {
+  const { session, transport, clock } = setup();
+  transport.saveImpl = () => Promise.resolve({
+    type: "noteSaveRejected",
+    reason: "leaseLost",
+    revision: 3
+  });
+  await session.open();
+  session.setBody("lost text");
+  clock.advance(AUTOSAVE_MS);
+  await settle();
+  assert.equal(session.state, "leaseLost");
+  assert.equal(session.lease, null);
+
+  session.setBody("more lost text");
+  assert.equal(session.state, "leaseLost");
+  assert.equal(session.lease, null);
+
+  clock.advance(10000);
+  await settle();
+  assert.equal(transport.calls.save.length, 1);
+  assert.equal(session.state, "leaseLost");
 });
 
 test("leaseLost and forced stop timers and keep the local draft", async () => {

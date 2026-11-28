@@ -391,6 +391,7 @@ export class NoteEditorSession {
     const maySendBody = this._canSaveNow()
       && this._state !== "conflict"
       && this._state !== "rejected";
+    const endEventIds = [...this._eventIds];
     const payload = {
       noteId: this.noteId,
       lease: this._lease,
@@ -398,7 +399,7 @@ export class NoteEditorSession {
       baseRevision: this._confirmedRevision,
       body: maySendBody ? this._body : undefined,
       geometry: this._geometry ?? null,
-      eventIds: [...this._eventIds]
+      eventIds: endEventIds
     };
 
     let reply;
@@ -414,6 +415,7 @@ export class NoteEditorSession {
 
     if (reply?.type === "noteEditEnded") {
       if (isRevision(reply.revision)) this._confirmedRevision = reply.revision;
+      this._removeEventIds(endEventIds);
       this._lease = null;
       this._cancelPreview();
       this._cancelAutosave();
@@ -483,6 +485,14 @@ export class NoteEditorSession {
 
     const wasClean = !this._dirty;
     this._dirty = body !== this._confirmedBody;
+
+    // A `tooLarge`/`invalid` rejection leaves the textarea editable. The lease is still
+    // ours, so a genuinely different body clears the stale error and resumes the normal
+    // preview/autosave flow. Conflict and lost/forced leases are never recovered here.
+    if (this._state === "rejected" && this._dirty && this._lease && !this._leaseUncertain) {
+      this._setState("editing", null);
+    }
+
     if (this._dirty) {
       if (this._dirtySince == null) this._dirtySince = this._now();
     } else {
@@ -513,7 +523,7 @@ export class NoteEditorSession {
    */
   async flush({ reason = "manual", geometry, eventIds } = {}) {
     if (geometry !== undefined) this._geometry = geometry;
-    if (eventIds !== undefined) this._eventIds = Array.isArray(eventIds) ? [...eventIds] : [];
+    if (eventIds !== undefined) this.addEventIds(eventIds);
     void reason;
 
     this._cancelAutosave();
@@ -540,9 +550,68 @@ export class NoteEditorSession {
     return this._startSave();
   }
 
+  /**
+   * Merges activity event ids into the pending set. Ids are never replaced here so a
+   * large paste recorded during an in-flight save survives for the next save.
+   *
+   * @param {string[]} ids
+   */
+  addEventIds(ids) {
+    if (!Array.isArray(ids)) return this;
+    for (const id of ids) {
+      if (typeof id === "string" && id && !this._eventIds.includes(id)) {
+        this._eventIds.push(id);
+      }
+    }
+    return this;
+  }
+
   /** Ctrl/Cmd+S and Done alias. */
   saveNow(options) {
     return this.flush(options);
+  }
+
+  /**
+   * Explicit recovery from a `conflict` state. The latest authoritative body is adopted
+   * only when it exactly equals the local text; otherwise the local draft is preserved
+   * and the caller must use the explicit recovery/overwrite flow.
+   *
+   * @returns {Promise<{ok: true, revision: number}|{ok: false, reason: string, note?: Object}>}
+   */
+  async retryConflict() {
+    if (TERMINAL_STATES.has(this._state)) {
+      return { ok: false, reason: this._state };
+    }
+    let reply;
+    try {
+      reply = await this.transport.state({ noteId: this.noteId });
+    } catch (error) {
+      this._reportError(error);
+      return { ok: false, reason: "offline" };
+    }
+    const note = this._stateNote(reply);
+    if (!note) return { ok: false, reason: "offline" };
+
+    const latestBody = typeof note.body === "string" ? note.body : null;
+    if (latestBody === null) {
+      return { ok: false, reason: "conflictChanged", note };
+    }
+    if (latestBody !== this._body) {
+      return { ok: false, reason: "conflictChanged", note };
+    }
+
+    const revision = isRevision(note.revision) ? note.revision : this._confirmedRevision;
+    this._confirmedBody = latestBody;
+    this._confirmedRevision = revision;
+    this._remoteRevision = null;
+    this._remoteBody = null;
+    this._dirty = false;
+    this._dirtySince = null;
+    this._cancelAutosave();
+    this._removeDraft();
+    this._setState("editing", null);
+    this._emitStatus();
+    return { ok: true, revision: this._confirmedRevision };
   }
 
   /** Writes any coalesced draft now (blur/pagehide/switch/lock loss/close). */
@@ -683,7 +752,8 @@ export class NoteEditorSession {
       baseRevision: this._confirmedRevision,
       sequence,
       bodyHash: noteBodyHash(this._body),
-      requestId: `${this.clientSessionId}:${sequence}`
+      requestId: `${this.clientSessionId}:${sequence}`,
+      eventIds: [...this._eventIds]
     };
     const entry = { snapshot, promise: null };
     this._inFlight = entry;
@@ -706,7 +776,7 @@ export class NoteEditorSession {
           baseRevision: snapshot.baseRevision,
           body: snapshot.body,
           geometry: this._geometry ?? null,
-          eventIds: [...this._eventIds]
+          eventIds: [...snapshot.eventIds]
         });
         result = await this._handleSaveReply(reply, snapshot);
       } catch (error) {
@@ -782,6 +852,11 @@ export class NoteEditorSession {
       this._emitStatus();
       return { type: "noteSaveAck", accepted: false, revision: reply.revision ?? this._confirmedRevision };
     }
+
+    // This ack — including the server's no-op ack for already-saved text and an ack for
+    // older text while newer typing is local — covers the ids sent with this snapshot.
+    // Ids recorded after the save started stay pending for the next save.
+    if (matchesSnapshot) this._removeEventIds(snapshot.eventIds);
 
     const ackedRevision = isRevision(reply.revision) ? reply.revision : this._confirmedRevision;
     this._confirmedRevision = Math.max(this._confirmedRevision, ackedRevision);
@@ -1167,6 +1242,12 @@ export class NoteEditorSession {
   _nextSequence() {
     this._sequence += 1;
     return this._sequence;
+  }
+
+  _removeEventIds(ids) {
+    if (!Array.isArray(ids) || !ids.length) return;
+    const acked = new Set(ids);
+    this._eventIds = this._eventIds.filter(id => !acked.has(id));
   }
 
   _failure(reason) {
