@@ -340,7 +340,16 @@ export default class JournalApp extends ApplicationV2 {
   });
 
   #private = new PrivateWorkspace({
-    onChange: () => this.render(),
+    onChange: () => {
+      // Autosave/appearance writes update only the retained private canvas while the shared
+      // editor is open; a full app render would move the focused textarea.
+      if (this.#view === "private" && this.#private?.editor?.isEditing) {
+        this.#private.refreshCanvas();
+        this.#syncSelectionControls();
+        return;
+      }
+      this.render();
+    },
     onSelectionChange: () => this.#syncSelectionControls(),
     onSend: noteId => this.#openSendPanel(this.element, null, noteId, "private"),
     onStamp: (noteId, trigger) => this.#private.canvas.openStampPicker(noteId, trigger),
@@ -726,20 +735,19 @@ export default class JournalApp extends ApplicationV2 {
 
   #copySelectedNotes() {
     if (this.#view === "private") {
-      const noteId = this.#private.canvas.getSelectedNoteIds()[0];
-      return !!noteId;
+      return this.#private.copyNotes(this.#private.getSelectedNoteIds());
     }
     return this.#copyNotes(this.#canvas.getSelectedNoteIds());
   }
 
   async #pasteClipboard() {
-    if (!this.#clipboard.length) return false;
     if (this.#view === "private") {
-      // T11 replaces the private transfer payload; shared clipboard entries are not pasted into
-      // a private workspace until that adapter lands.
-      ui.notifications?.warn(t("JN.Clipboard.PrivateUnsupported"));
+      if (!this.#private.clipboard.length) return false;
+      const position = this.#private.canvas.newCardPosition();
+      await this.#private.pasteClipboard(position);
       return true;
     }
+    if (!this.#clipboard.length) return false;
     if (!this.#sharedWritable()) {
       if (!game.users?.activeGM) ui.notifications?.warn(t("JN.Notices.NoGM"));
       else this.#warnIncompatible();
@@ -1632,6 +1640,8 @@ export default class JournalApp extends ApplicationV2 {
         <header class="journalinator-topbar">
           ${userBadge}
           ${viewSwitch}
+          ${context.canManagePrivate ? `<button type="button" class="jn-toolbar-icon journalinator-private-admin"
+            ${tooltipAttrs(t("JN.Private.AdminTitle"))}><i class="fa-solid fa-user-shield" aria-hidden="true"></i></button>` : ""}
         </header>
         <div class="journalinator-body jn-format-notice-body">${privateIncompatibleNoticeHTML(t)}</div>`;
       return root;
@@ -1786,7 +1796,7 @@ export default class JournalApp extends ApplicationV2 {
         return;
       }
     }
-    const editorInput = result.querySelector(".jn-card-text-input, .jn-block-input");
+    const editorInput = result.querySelector(".jn-source-input, .jn-card-text-input, .jn-block-input");
     if (editorInput) editorInput.focus({ preventScroll: true });
     else if (this.#focusedCanvasRenders.has(result) && document.activeElement === document.body) {
       const canvasRoot = this.#view === "private" ? this.#private.canvas.root : this.#canvas.root;
@@ -1868,9 +1878,16 @@ export default class JournalApp extends ApplicationV2 {
       });
     });
 
-    root.querySelector(".journalinator-private-new")?.addEventListener("click", () => {
+    root.querySelector(".journalinator-private-new")?.addEventListener("click", event => {
       this.#private.canvas.deactivatePinTool();
-      this.#private.createNoteAt({ ...this.#private.canvas.newCardPosition(), title: t("JN.Private.NewNoteTitle") });
+      const position = this.#private.canvas.newCardPosition();
+      const rect = event.currentTarget.getBoundingClientRect?.();
+      this.#private.openCreationMenuAt({
+        ...position,
+        clientX: rect?.left,
+        clientY: rect?.bottom,
+        anchor: event.currentTarget
+      });
     });
     root.querySelector(".journalinator-private-add-label")?.addEventListener("click", () => {
       this.#private.canvas.deactivatePinTool();
@@ -2078,7 +2095,7 @@ export default class JournalApp extends ApplicationV2 {
     const query = String(title ?? "").trim();
     if (this.#view === "private") {
       this.#clearSearch();
-      this.#private.createNoteAt({ ...this.#private.canvas.newCardPosition(), title: query });
+      await this.#private.createFromQuery(query, { ...this.#private.canvas.newCardPosition() });
       return;
     }
     if (!this.#sharedWritable()) {

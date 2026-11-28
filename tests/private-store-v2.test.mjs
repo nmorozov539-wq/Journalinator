@@ -6,6 +6,8 @@ import {
   WORKSPACE_FORMAT, NOTE_SCHEMA_VERSION, PrivateIncompatibleFormat
 } from "../scripts/store/private-store.mjs";
 import { seedForNote } from "../scripts/skins/registry.mjs";
+import { getLayout } from "../scripts/layouts/registry.mjs";
+import { originFromBox } from "../scripts/sizing/geometry.mjs";
 
 const MODULE_ID = "fvtt-journalinator";
 const owner = makeUser("StoreOwner000001", { name: "Owner" });
@@ -78,7 +80,12 @@ test("makeNote builds the v2 shape and a sizing card with seeded tilt", () => {
 
   assert.deepEqual(card.sizing, { mode: "auto", width: null, minHeight: null });
   assert.equal(Number.isFinite(card.autoSizeOrigin.x), true);
-  assert.equal(card.autoSizeOrigin.y, card.y);
+  assert.equal(Number.isFinite(card.autoSizeOrigin.y), true);
+  const initialBox = {
+    x: card.x, y: card.y, w: getLayout(note.layout).widths[0],
+    h: getLayout(note.layout).minHeight, rotation: card.rotation
+  };
+  assert.deepEqual(card.autoSizeOrigin, originFromBox(initialBox, card.rotation));
   assert.equal(Number.isFinite(card.rotation), true);
   assert.equal(Object.hasOwn(card, "width"), false);
   assert.equal(Object.hasOwn(card, "height"), false);

@@ -15,6 +15,7 @@ import { getLayout, isLayout } from "../layouts/registry.mjs";
 import {
   isFont, isPaper, resolveSkin, seededSkin, tiltForSkin
 } from "../skins/registry.mjs";
+import { originFromBox } from "../sizing/geometry.mjs";
 import { templateSkin } from "../templates.mjs";
 import {
   MAX_TRANSFER_NOTES, MAX_TRANSFER_TEXT, importPrivateTransfer
@@ -1224,7 +1225,9 @@ class PrivateStore {
         x: spot.x,
         y: spot.y,
         sizing: { mode: "auto", width: null, minHeight: null },
-        autoSizeOrigin: { x: spot.x + width / 2, y: spot.y },
+        // Initial main-pin (rotated top-center) world point, matching shared creation and
+        // T10 geometry, so the first automatic render cannot shift a tilted private card.
+        autoSizeOrigin: originFromBox({ x: spot.x, y: spot.y, w: width, h: height }, rotation),
         rotation,
         ports: [...DEFAULT_CARD_PORTS],
         anchors: {

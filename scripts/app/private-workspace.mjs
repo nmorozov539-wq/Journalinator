@@ -1,7 +1,6 @@
 import JournalCanvas from "./canvas.mjs";
 import PrivateNoteEditor from "./private-editor.mjs";
-import { privateStore, MAX_TITLE_LENGTH } from "../store/private-store.mjs";
-import { CARD_STYLES } from "../styles/registry.mjs";
+import { privateStore } from "../store/private-store.mjs";
 import { linkAnchors, moveThreadPin } from "../card-ports.mjs";
 import {
   anchorSide, mergeNearbyMinorAnchors, minorOnEdge, nearestMinorAnchor, promoteLegacyLinkAnchors,
@@ -11,68 +10,60 @@ import { boardPinRef, normalizePinLink, resolvePin, validPinPosition } from "../
 import { isLinkColor, normalizeLinkColor } from "../link-colors.mjs";
 import {
   LINK_ENDS, LINK_MATERIALS, LINK_PATTERNS, LINK_SLACK, LINK_THICKNESS, MAX_CARD_ANCHORS,
-  NOTE_FONT_KEYS, PICTURE_LAYOUTS, PIN_STYLES, PRESENTATION_STYLES,
-  defaultLinkCosmetics, isGeneratedTitle, legacyStylePresentation, resolveAttachment,
-  resolvePresentation, sanitizeCardAnchors, stripSecretPrefix
+  PIN_STYLES, defaultLinkCosmetics, resolveAttachment
 } from "../presentation.mjs";
-import { noteCreationPresentation, noteCreationStyle } from "./note-dialog.mjs";
+import { getCreationChoice, openCreationMenu } from "./creation-menu.mjs";
+import { createNoteFromQuery } from "../templates.mjs";
+import { getLayout } from "../layouts/registry.mjs";
+import { resolveSkin } from "../skins/registry.mjs";
+import { originFromBox, validAutoOrigin } from "../sizing/geometry.mjs";
 import { attachedStampIds, DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, stampUrl } from "../stamps.mjs";
 import { toggleTaskListItem } from "../markdown.mjs";
+import { openHistoryDialog } from "./history-dialog.mjs";
+import { PrivateEditCoordinator, createPrivateTransport } from "../private/private-session.mjs";
+import { deletePrivateHistory } from "../private/private-history.mjs";
+import { noteAuthorName, noteDateText, noteSearchExcerpt, noteSearchLabel } from "./note-search.mjs";
 import { t } from "../i18n.mjs";
 
 const { DialogV2 } = foundry.applications.api;
 const esc = text => foundry.utils.escapeHTML(String(text ?? ""));
 
-/** The private tab's canvas, editor, selection, trash, and clipboard actions. */
+function clamp(value, min, max, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.min(max, Math.max(min, Math.round(number))) : fallback;
+}
+
+/** The private tab's v2 canvas, shared editor, selection, history, trash and clipboard actions. */
 export default class PrivateWorkspace {
-  constructor({ onChange, onSelectionChange, onSend, onStamp, onPinToolChange } = {}) {
+  constructor({
+    onChange, onSelectionChange, onSend, onStamp, onPinToolChange, onCopy
+  } = {}) {
     this.onChange = onChange ?? (() => {});
     this.onSelectionChange = onSelectionChange ?? (() => {});
     this.onSend = onSend ?? (() => {});
     this.onStamp = onStamp ?? (() => {});
     this.onPinToolChange = onPinToolChange ?? (() => {});
+    this.onCopy = onCopy ?? (() => {});
     this.page = null;
     this.workspace = null;
     this.selectedNoteId = null;
     this.history = [];
+    this.clipboard = [];
     this.deleteConfirmPending = false;
     this.dimMatch = () => true;
 
     this.canvas = new JournalCanvas({
       onSelectNote: id => {
         this.selectedNoteId = id;
-        this.editor.open(id);
-        this.editor.render();
         this.onSelectionChange(this.getSelectedNoteIds());
       },
-      onReadCardText: (id, kind) => {
-        const note = this.getNote(id);
-        if (!note) return "";
-        if (kind === "heading") return note.system.targetHeading;
-        if (kind === "label") return note.system.label ?? "";
-        return note.name;
-      },
-      onSaveCardText: (id, kind, value) => {
-        if (kind === "heading") return this.updateNote(id, { targetHeading: value });
-        if (kind === "label") return this.updateNote(id, { label: value });
-        return this.updateNote(id, { title: value });
-      },
-      onEditCardBlock: (id, blockId, slot) => this.editor.editBoardBlock(id, blockId, slot),
-      onEditCardImage: id => this.editor.editNoteImage(id),
-      onEditCardBackground: id => this.editor.editNoteImage(id, true),
-      onEditNote: id => {
-        this.selectedNoteId = id;
-        this.editor.open(id);
-        this.editor.render();
-        const slot = this.canvas.cardEls.get(id)?.querySelector(".jn-card-block");
-        if (slot && this.selectedNoteId === id) this.editor.editFirstBlock(id, slot);
-      },
-      onCreateNoteAt: (x, y, options) => this.createNoteAt({ ...options, x, y }),
+      onEditNote: (id, point) => this.beginEditing(id, point),
+      onCreateNoteAt: (x, y) => this.openCreationMenuAt({ x, y }),
       onPinToolChange: active => this.onPinToolChange(active),
       onMoveCard: (id, x, y) => this.moveCard(id, x, y),
+      onMoveCards: moves => this.moveCards(moves),
       onResizeCard: (id, width, height) => this.resizeCard(id, width, height),
-      onResetCardSize: id => this.resizeCard(id, null, null),
-      onToggleTask: (id, blockId, index) => this.toggleTask(id, blockId, index),
+      onToggleTask: (id, index) => this.toggleTask(id, index),
       onDeleteNote: id => this.deleteNotes([id]),
       onAddLabelAt: (x, y) => this.addLabel({ x, y }),
       onRemoveLabel: id => this.removeLabel(id),
@@ -88,22 +79,23 @@ export default class PrivateWorkspace {
       onMoveCardAnchor: (noteId, anchorId, x, y) => this.moveCardAnchor(noteId, anchorId, x, y),
       onRemoveCardAnchor: (noteId, anchorId) => this.removeCardAnchor(noteId, anchorId),
       onBoardPinAction: action => this.boardPinAction(action),
-      onSetPresentation: (ids, fields) => this.setNotesPresentation(ids, fields),
-      onSetAttachment: (ids, fields) => this.setNotesAttachment(ids, fields)
+      onSetLayout: (ids, layout) => this.applyAppearance(ids, { layout }),
+      onSetAppearance: (ids, patch) => this.applyAppearance(ids, patch),
+      onChooseBackground: ids => this.chooseBackground(ids),
+      onAutoSize: ids => this.autoSizeNotes(ids),
+      onHistory: id => this.openHistory(id),
+      onSendNote: id => this.onSend(id),
+      onCopyNotes: ids => this.copyNotes(ids),
+      onDeleteNotes: ids => this.deleteNotes(ids)
     });
 
     this.editor = new PrivateNoteEditor({
+      getPage: () => this.page,
       getNote: id => this.getNote(id),
-      updateNote: (id, patch) => this.updateNote(id, patch),
-      deleteNote: id => this.deleteNotes([id]),
-      getBacklinks: id => this.getBacklinks(id),
-      onFocusNote: id => this.focusNote(id),
-      // Private main-pin disabling is shared-canvas-only: links cannot be redistributed locally,
-      // so the toggle is qualified/disabled while any private link references this main pin.
-      mainPinLocked: id => this.#mainPinReferenced(id),
-      setMainPinEnabled: (id, enabled) => this.setMainPinEnabled(id, enabled),
-      onSend: id => this.onSend(id),
-      onStamp: (id, trigger) => this.onStamp(id, trigger)
+      reloadWorkspace: () => this.reloadWorkspace(),
+      onNoteChanged: () => this.onSelectionChange(this.getSelectedNoteIds()),
+      onClosed: info => this.#onEditorClosed(info),
+      onState: () => this.#positionEditorChrome()
     });
   }
 
@@ -120,12 +112,16 @@ export default class PrivateWorkspace {
     if (this.selectedNoteId && !this.workspace?.notes?.[this.selectedNoteId]) this.selectedNoteId = null;
   }
 
+  #page() {
+    return this.page ? privateStore.findById(this.page.id) ?? this.page : null;
+  }
+
   notes() {
     return this.page && this.workspace ? privateStore.noteViews(this.page, this.workspace) : [];
   }
 
   layout() {
-    return this.workspace?.layout ?? { cards: {}, labels: {}, viewport: null };
+    return this.workspace?.layout ?? { cards: {}, labels: {}, pins: {}, pinLinks: {}, viewport: null };
   }
 
   getNote(id) {
@@ -134,22 +130,27 @@ export default class PrivateWorkspace {
     return note ? privateStore.noteView(this.page, note) : null;
   }
 
+  #noteLabel(noteId) {
+    const note = this.getNote(noteId);
+    return note ? noteSearchLabel(note) : "";
+  }
+
   getBacklinks(noteId) {
     if (!this.workspace?.notes?.[noteId]) return [];
     const found = new Map();
     for (const note of Object.values(this.workspace.notes)) {
       if (note.id === noteId) continue;
-      if (note.links?.some(link => link.targetId === noteId)) found.set(note.id, note.title);
+      if (note.links?.some(link => link.targetId === noteId)) found.set(note.id, this.#noteLabel(note.id));
     }
     const self = this.workspace.notes[noteId];
     for (const link of self.links ?? []) {
       const target = this.workspace.notes[link.targetId];
-      if (target) found.set(target.id, target.title);
+      if (target) found.set(target.id, this.#noteLabel(target.id));
     }
     return [...found].map(([id, name]) => ({ id, name }));
   }
 
-  renderInto(canvasSlot, editorSlot) {
+  renderInto(canvasSlot) {
     if (!this.page) return;
     this.canvas.mount(canvasSlot);
     this.canvas.selectedNoteId = this.selectedNoteId;
@@ -164,9 +165,35 @@ export default class PrivateWorkspace {
       deferGeometry: true,
       dimMatch: this.dimMatch
     });
-    this.editor.open(this.selectedNoteId);
-    this.editor.mount(editorSlot);
-    this.editor.render();
+    if (this.editor.isEditing) {
+      const card = this.canvas.cardEls.get(this.editor.noteId);
+      if (card) {
+        this.canvas.setEditingNote(this.editor.noteId);
+        card.classList.add("jn-editing");
+        if (this.editor.root.parentElement !== card) card.appendChild(this.editor.root);
+      }
+    }
+  }
+
+  /** Local canvas-only refresh used during editing; never rebuilds the app or editor DOM. */
+  refreshCanvas() {
+    if (!this.page || !this.canvas.root.isConnected) return;
+    this.canvas.selectedNoteId = this.selectedNoteId;
+    this.canvas.update(this.notes(), this.layout(), { dimMatch: this.dimMatch });
+    if (this.editor.isEditing) {
+      this.canvas.setEditingNote(this.editor.noteId);
+      this.canvas.cardEls.get(this.editor.noteId)?.classList.add("jn-editing");
+    }
+  }
+
+  /** Re-reads confirmed workspace data after an editor/transport write. */
+  reloadWorkspace() {
+    const page = this.#page();
+    if (!page) return;
+    this.page = page;
+    this.workspace = privateStore.read(page);
+    if (this.selectedNoteId && !this.workspace.notes[this.selectedNoteId]) this.selectedNoteId = null;
+    this.refreshCanvas();
   }
 
   setDimMatch(match) {
@@ -185,9 +212,30 @@ export default class PrivateWorkspace {
     return this.selectedNoteId && this.workspace?.notes?.[this.selectedNoteId] ? [this.selectedNoteId] : [];
   }
 
-  async #save(mutator) {
+  getSelectedLabelIds() {
+    return this.canvas.getSelectedLabelIds();
+  }
+
+  #box(card, note) {
+    const definition = getLayout(note?.layout);
+    if (card?.sizing?.mode === "manual"
+        && Number.isFinite(card.sizing.width) && Number.isFinite(card.sizing.minHeight)) {
+      return { x: card.x, y: card.y, w: card.sizing.width, h: card.sizing.minHeight,
+        rotation: card.rotation ?? 0 };
+    }
+    return {
+      x: Number.isFinite(card?.x) ? card.x : 0,
+      y: Number.isFinite(card?.y) ? card.y : 0,
+      w: Number.isFinite(card?.width) && card.width > 0 ? card.width : definition.widths[definition.widths.length - 1],
+      h: Number.isFinite(card?.height) && card.height > 0 ? card.height : definition.minHeight,
+      rotation: Number.isFinite(card?.rotation) ? card.rotation : 0
+    };
+  }
+
+  async #save(mutator, { silent = false } = {}) {
     if (!this.page) return false;
-    const rev = privateStore.flags(this.page).rev ?? 0;
+    const page = this.#page();
+    const rev = privateStore.flags(page).rev ?? 0;
     const data = foundry.utils.deepClone(this.workspace);
     try {
       mutator(data);
@@ -197,8 +245,6 @@ export default class PrivateWorkspace {
         ...Object.values(data.notes ?? {}),
         ...(data.trash ?? []).map(entry => entry?.note).filter(Boolean)
       ];
-      // Promote old point-only endpoints before merging, so they stop rendering as small SVG
-      // dots and any endpoints landing on one spot fold into a single pin.
       const promoted = this.#pinsEnabled()
         ? promoteLegacyLinkAnchors(data.layout?.cards ?? {}, owners)
         : { cards: data.layout?.cards ?? {}, changed: [], links: [] };
@@ -222,145 +268,141 @@ export default class PrivateWorkspace {
           if (pinLink) Object.assign(pinLink, { source, target });
         }
       }
-      const result = await privateStore.save(this.page, data, rev);
+      const result = await privateStore.save(page, data, rev);
       this.workspace = result.workspace;
-      this.onChange();
+      if (!silent) this.onChange();
       return true;
     } catch (err) {
       ui.notifications?.warn(err.message);
-      this.setPage(privateStore.findById(this.page.id));
-      this.onChange();
+      try { this.reloadWorkspace(); } catch { /* keep the last confirmed workspace */ }
+      if (!silent) this.onChange();
       return false;
     }
   }
 
-  async createNoteAt({
-    x = 0, y = 0, style, kind = "note", title = "", immediate = false, presentation, label = ""
-  } = {}) {
+  /** Opens the shared Blank/Document/Profile menu, anchored to a toolbar button or board point. */
+  openCreationMenuAt({ x = 0, y = 0, clientX, clientY, anchor = null } = {}) {
     if (!this.page) return null;
+    const rect = this.canvas.root.getBoundingClientRect?.() ?? { left: 0, top: 0 };
+    const screenX = Number.isFinite(clientX) && clientX > 0
+      ? clientX
+      : rect.left + this.canvas.view.x + x * this.canvas.view.k;
+    const screenY = Number.isFinite(clientY) && clientY > 0
+      ? clientY
+      : rect.top + this.canvas.view.y + y * this.canvas.view.k;
+    return openCreationMenu({
+      anchor,
+      clientX: screenX,
+      clientY: screenY,
+      t,
+      onChoose: templateId => { void this.createFromTemplate(templateId, { x, y }); }
+    });
+  }
+
+  async createFromTemplate(templateId, { x = 0, y = 0 } = {}) {
+    if (!this.page) return null;
+    const choice = getCreationChoice(templateId);
+    return this.#createNote({
+      body: choice.body,
+      layout: choice.layout,
+      skin: choice.skin,
+      x,
+      y,
+      focus: choice.focus
+    });
+  }
+
+  /** Quick-switcher creation: typed text is a real first-line heading; empty is Blank. */
+  createFromQuery(query, { x = 0, y = 0 } = {}) {
+    const created = createNoteFromQuery(query);
+    return this.#createNote({ ...created, x, y });
+  }
+
+  async #createNote({ body = "", layout = "plain", skin = null, x = 0, y = 0, focus = "body-start" }) {
     const cards = this.workspace?.layout?.cards ?? {};
-    const resolvedStyle = noteCreationStyle({ kind, style, presentation });
-    const fields = noteCreationPresentation({ kind, style, presentation });
-    const { note, card } = privateStore.makeNote({
-      title, kind, style: resolvedStyle, x, y, cards, notes: this.workspace?.notes ?? {}
-    });
-    const noteLabel = typeof label === "string" ? label : "";
-    const resolved = resolvePresentation({
-      name: note.title,
-      system: { ...note, label: noteLabel, presentation: { ...(note.presentation ?? {}), ...fields } }
-    });
-    const { label: _ignored, ...presentationFields } = resolved;
-    note.label = noteLabel;
-    note.presentation = presentationFields;
-    note.schemaVersion = 1;
+    const notes = this.workspace?.notes ?? {};
+    const { note, card } = privateStore.makeNote({ body, layout, skin, x, y, cards, notes });
     const ok = await this.#save(data => {
       data.notes[note.id] = note;
       data.layout.cards[note.id] = card;
-    });
+    }, { silent: true });
     if (!ok) return null;
     this.selectedNoteId = note.id;
-    this.onChange();
+    this.canvas.selectedNoteId = note.id;
+    this.refreshCanvas();
+    await this.beginEditing(note.id, null, focus, privateStore.noteView(this.page, note));
     return note.id;
   }
 
-  async updateNote(id, patch) {
+  /** Compatibility entry point for old create-button calls; always a Blank template. */
+  createNoteAt({ x = 0, y = 0, templateId = "blank" } = {}) {
+    return this.createFromTemplate(templateId, { x, y });
+  }
+
+  async beginEditing(noteId, point = null, focus = null, noteOverride = null) {
+    if (!noteId || !this.page) return { ok: false };
+    if (this.editor.isEditing) {
+      if (this.editor.noteId === noteId) {
+        if (point) this.editor.editor?.focusAtPoint(point.clientX, point.clientY);
+        else if (focus) this.editor.focusDestination(focus);
+        return { ok: true };
+      }
+      await this.editor.close();
+    }
+    const note = noteOverride ?? this.getNote(noteId);
+    const card = this.canvas.cardEls.get(noteId);
+    if (!note || !card) return { ok: false, reason: "missing" };
+    this.selectedNoteId = noteId;
+    this.canvas.selectedNoteId = noteId;
+    this.canvas.setEditingNote(noteId);
+    card.classList.add("jn-editing");
+    const result = await this.editor.open(noteId, { host: card, note, point, focus });
+    if (!result?.ok) {
+      this.canvas.setEditingNote(null);
+      card.classList.remove("jn-editing");
+      this.onSelectionChange(this.getSelectedNoteIds());
+      return result;
+    }
+    this.#positionEditorChrome();
+    this.onSelectionChange(this.getSelectedNoteIds());
+    return result;
+  }
+
+  #positionEditorChrome() {
+    const noteId = this.editor.noteId;
+    const card = noteId ? this.canvas.cardEls.get(noteId) : null;
+    const toolbar = this.editor.editor?.root?.querySelector?.(".jn-editor-toolbar");
+    if (!card || !toolbar) return;
+    const rootRect = this.canvas.root.getBoundingClientRect?.() ?? { top: 0 };
+    const toolbarRect = toolbar.getBoundingClientRect?.() ?? { top: 0 };
+    this.editor.editor.root.classList.toggle("jn-toolbar-below",
+      toolbarRect.top < (rootRect.top ?? 0) + 8);
+  }
+
+  #onEditorClosed({ noteId } = {}) {
+    this.canvas.setEditingNote(null);
+    this.canvas.cardEls.get(noteId)?.classList.remove("jn-editing");
+    try { this.reloadWorkspace(); } catch { /* incompatible reload is handled by the app */ }
+    this.onSelectionChange(this.getSelectedNoteIds());
+  }
+
+  /** Narrow metadata write for the pin extras; body/text never goes through here. */
+  async updateNote(id, patch = {}) {
     if (!this.workspace?.notes?.[id]) return false;
     return this.#save(data => {
       const note = data.notes[id];
       if (!note) return;
-      const oldTitle = String(note.title ?? "");
-      const oldBare = stripSecretPrefix(oldTitle).trim();
-      const resolved = resolvePresentation({ name: oldTitle, system: note });
-      const { label: resolvedLabel, ...presentationFields } = resolved;
-      let label = resolvedLabel;
-      let presentationTouched = false;
-      let labelTouched = false;
-      const presentation = { ...presentationFields };
-
-      if (typeof patch.title === "string") {
-        const title = patch.title.slice(0, 200);
-        note.title = title;
-        if (!isGeneratedTitle(title)) {
-          presentation.nameGenerated = false;
-          if (!label || label === oldBare) label = stripSecretPrefix(title).trim();
-          presentationTouched = true;
-        }
-      }
-      if (typeof patch.label === "string") {
-        label = patch.label.slice(0, MAX_TITLE_LENGTH);
-        labelTouched = true;
-      }
-      if (patch.presentation && typeof patch.presentation === "object") {
-        const fields = patch.presentation;
-        if (PRESENTATION_STYLES.includes(fields.extendedStyle)) presentation.extendedStyle = fields.extendedStyle;
-        if (NOTE_FONT_KEYS.includes(fields.font)) presentation.font = fields.font;
-        if (PICTURE_LAYOUTS.includes(fields.pictureLayout)) presentation.pictureLayout = fields.pictureLayout;
-        if (typeof fields.forceExtended === "boolean") presentation.forceExtended = fields.forceExtended;
-        if (typeof fields.torn === "boolean") presentation.torn = fields.torn;
-        if (typeof fields.heading === "string") presentation.heading = fields.heading.slice(0, 80);
-        if (typeof fields.nameGenerated === "boolean") presentation.nameGenerated = fields.nameGenerated;
-        presentationTouched = true;
-      }
-      if (typeof patch.targetHeading === "string") {
-        note.targetHeading = patch.targetHeading.slice(0, 80);
-        presentation.heading = note.targetHeading.trim();
-        presentationTouched = true;
-      }
-      if (patch.kind === "note" || patch.kind === "location") note.kind = patch.kind;
-      if (Object.hasOwn(CARD_STYLES, patch.style)) {
-        note.style = patch.style;
-        Object.assign(presentation, legacyStylePresentation(patch.style));
-        presentationTouched = true;
-      }
-      if (presentationTouched || labelTouched) {
-        note.presentation = presentation;
-        note.label = label.slice(0, MAX_TITLE_LENGTH);
-        note.schemaVersion = 1;
-      }
-      if ("image" in patch) note.image = patch.image;
-      if ("backgroundImage" in patch) note.backgroundImage = patch.backgroundImage;
       if (patch.attachment && typeof patch.attachment === "object" && !Array.isArray(patch.attachment)) {
-        const current = resolveAttachment({ system: { attachment: note.attachment } });
+        const current = resolveAttachment({ attachment: note.attachment });
         note.attachment = resolveAttachment({
-          system: { attachment: { ...current, ...patch.attachment } }
+          attachment: { ...current, ...patch.attachment }
         });
-        note.schemaVersion = 1;
       }
-      if (Array.isArray(patch.blocks) && patch.blocks.length) note.blocks = patch.blocks;
       note.updatedAt = Date.now();
     });
   }
 
-  /**
-   * Cosmetic presentation batch for the floating toolbar. One save for the whole selection and
-   * only the allowlisted presentation fields; labels, blocks, images and links stay untouched.
-   */
-  setNotesPresentation(ids, fields = {}) {
-    const targets = ids.filter(id => this.workspace?.notes?.[id]);
-    if (!targets.length || !fields || typeof fields !== "object") return false;
-    const allowed = {};
-    if (PRESENTATION_STYLES.includes(fields.extendedStyle)) allowed.extendedStyle = fields.extendedStyle;
-    if (NOTE_FONT_KEYS.includes(fields.font)) allowed.font = fields.font;
-    if (PICTURE_LAYOUTS.includes(fields.pictureLayout)) allowed.pictureLayout = fields.pictureLayout;
-    if (typeof fields.torn === "boolean") allowed.torn = fields.torn;
-    if (typeof fields.forceExtended === "boolean" && targets.length === 1) {
-      allowed.forceExtended = fields.forceExtended;
-    }
-    if (!Object.keys(allowed).length) return false;
-    return this.#save(data => {
-      for (const id of targets) {
-        const note = data.notes[id];
-        if (!note) continue;
-        const resolved = resolvePresentation({ name: note.title, system: note });
-        const { label: _ignored, ...presentationFields } = resolved;
-        note.presentation = { ...presentationFields, ...allowed };
-        note.schemaVersion = 1;
-        note.updatedAt = Date.now();
-      }
-    });
-  }
-
-  /** Cosmetic pin appearance only; pin enable and snap radii stay out of bulk edits. */
+  /** @deprecated Kept for callers that still patch pin attachment fields. */
   setNotesAttachment(ids, fields = {}) {
     const targets = ids.filter(id => this.workspace?.notes?.[id]);
     if (!targets.length || !PIN_STYLES.includes(fields.pinStyle)) return false;
@@ -368,52 +410,330 @@ export default class PrivateWorkspace {
       for (const id of targets) {
         const note = data.notes[id];
         if (!note) continue;
-        const current = resolveAttachment({ system: { attachment: note.attachment } });
+        const current = resolveAttachment({ attachment: note.attachment });
         note.attachment = resolveAttachment({
-          system: { attachment: { ...current, pinStyle: fields.pinStyle } }
+          attachment: { ...current, pinStyle: fields.pinStyle }
         });
-        note.schemaVersion = 1;
         note.updatedAt = Date.now();
       }
     });
   }
 
-  toggleTask(noteId, blockId, index) {
-    const note = this.workspace?.notes?.[noteId];
-    const block = note?.blocks.find(item => item.blockId === blockId);
-    if (!block) return;
-    const text = toggleTaskListItem(block.text, index);
-    if (text === null) return;
-    const blocks = note.blocks.map(item => item.blockId === blockId ? { ...item, text } : item);
-    return this.updateNote(noteId, { blocks });
+  /** Short local lease around one private write (no GM, no shared preview). */
+  async #withLease(noteId, action, { checkpoint = true } = {}) {
+    const page = this.#page();
+    if (!page || !this.workspace?.notes?.[noteId]) return null;
+    const coordinator = new PrivateEditCoordinator({
+      worldId: game.world?.id ?? "",
+      userId: game.user?.id ?? "",
+      workspacePageId: page.id,
+      noteId
+    });
+    const transport = createPrivateTransport({
+      privateStore,
+      pageProvider: () => this.#page(),
+      workspacePage: page,
+      noteId,
+      userId: game.user?.id ?? "",
+      coordinator
+    });
+    let grant = null;
+    try {
+      grant = await transport.begin({ noteId });
+      if (grant?.type !== "noteEditGranted") {
+        ui.notifications?.warn(t("JN.Lock.LockedAction"));
+        return null;
+      }
+      return await action(transport, grant);
+    } finally {
+      if (grant?.type === "noteEditGranted") {
+        try {
+          if (checkpoint) await transport.end({ noteId, lease: grant.lease });
+          else coordinator.release();
+        } catch (error) {
+          console.error("Journalinator: private lease release failed", error);
+        }
+      }
+    }
   }
 
-  async addLabel({ x = 0, y = 0, text = t("JN.Label.Default"), size = 14, color = "", stamp = "", noteId = "", corner = DEFAULT_STAMP_CORNER } = {}) {
-    const id = foundry.utils.randomID();
-    await this.#save(data => {
-      data.layout.labels[id] = {
-        text: String(text ?? ""), x, y, size, color: String(color ?? ""), stamp, noteId,
-        corner: isStampCorner(corner) ? corner : DEFAULT_STAMP_CORNER
+  /** Layout/skin only; body, revision and links stay untouched. */
+  async applyAppearance(ids, patch = {}) {
+    const targets = (Array.isArray(ids) ? ids : []).filter(id => this.workspace?.notes?.[id]);
+    if (!targets.length || !patch || typeof patch !== "object") return false;
+    let applied = false;
+    for (const noteId of targets) {
+      const note = this.workspace.notes[noteId];
+      const layout = patch.layout === "profile" || patch.layout === "plain"
+        ? patch.layout
+        : (note.layout === "profile" ? "profile" : "plain");
+      const clean = {};
+      for (const key of ["paper", "font", "torn", "backgroundImage"]) {
+        if (Object.hasOwn(patch, key)) clean[key] = patch[key];
+      }
+      const skin = resolveSkin({ ...resolveSkin(note.skin), ...clean });
+      const reply = await this.#withLease(noteId, transport => transport.appearance({
+        noteId, layout, skin
+      }), { checkpoint: false });
+      if (reply?.type === "noteAppearanceAck") applied = true;
+    }
+    if (applied) {
+      try { this.reloadWorkspace(); } catch { /* app handles incompatible reload */ }
+      this.onSelectionChange(this.getSelectedNoteIds());
+    }
+    return applied;
+  }
+
+  async chooseBackground(ids) {
+    const target = (Array.isArray(ids) ? ids : [])[0];
+    const note = this.workspace?.notes?.[target];
+    if (!note) return false;
+    const current = resolveSkin(note.skin).backgroundImage ?? "";
+    const { promptImageSource } = await import("./image-dialog.mjs");
+    const src = await promptImageSource(
+      t("JN.Skin.BackgroundImage"),
+      current,
+      t("JN.Skin.BackgroundHint")
+    );
+    if (src === null || src === undefined) return false;
+    return this.applyAppearance([target], { backgroundImage: src.trim() || null });
+  }
+
+  /** Auto clears manual overrides; the stable origin is the rotated main-pin world point. */
+  async autoSizeNotes(ids) {
+    const targets = (Array.isArray(ids) ? ids : []).filter(id => this.workspace?.layout?.cards?.[id]);
+    if (!targets.length) return false;
+    return this.#save(data => {
+      for (const noteId of targets) {
+        const card = data.layout.cards[noteId];
+        if (!card) continue;
+        const note = data.notes[noteId];
+        const measured = this.canvas.cardBox(noteId);
+        const origin = validAutoOrigin(card.autoSizeOrigin)
+          ? { ...card.autoSizeOrigin }
+          : originFromBox(measured ?? this.#box(card, note), card.rotation ?? 0);
+        card.sizing = { mode: "auto", width: null, minHeight: null };
+        card.autoSizeOrigin = origin;
+      }
+    });
+  }
+
+  /** Checkbox click outside editing: one short private lease and one revisioned body save. */
+  async toggleTask(noteId, index) {
+    const note = this.workspace?.notes?.[noteId];
+    if (!note) return false;
+    const body = toggleTaskListItem(note.body ?? "", index);
+    if (typeof body !== "string") return false;
+    const reply = await this.#withLease(noteId, (transport, grant) => transport.save({
+      noteId,
+      lease: grant.lease,
+      sequence: 1,
+      baseRevision: Number.isInteger(grant.revision) ? grant.revision : note.revision,
+      body
+    }));
+    if (reply?.type === "noteSaveAck") {
+      try { this.reloadWorkspace(); } catch { /* app handles incompatible reload */ }
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Private adapters for the shared history dialog. `recordPreRestore` writes the mandatory
+   * checkpoint through the workspace CAS; the transport is rebuilt afterwards so its captured
+   * workspace revision includes that checkpoint, then begin/save/end run through T7a.
+   */
+  #historySession(noteId) {
+    const page = this.#page();
+    let coordinator = null;
+    let transport = null;
+    const newTransport = () => {
+      coordinator ??= new PrivateEditCoordinator({
+        worldId: game.world?.id ?? "",
+        userId: game.user?.id ?? "",
+        workspacePageId: page?.id ?? "",
+        noteId
+      });
+      transport = createPrivateTransport({
+        privateStore,
+        pageProvider: () => this.#page(),
+        workspacePage: page,
+        noteId,
+        userId: game.user?.id ?? "",
+        coordinator
+      });
+      return transport;
+    };
+    const request = async message => {
+      if (!page) return { type: "timeout" };
+      if (message?.type === "beginNoteEdit") {
+        return newTransport().begin({ noteId });
+      }
+      if (message?.type === "saveNoteBody") {
+        const active = transport ?? newTransport();
+        if (!active.lease) await active.begin({ noteId });
+        return active.save({
+          noteId,
+          lease: message.lease,
+          sequence: message.sequence,
+          baseRevision: Number.isInteger(message.baseRevision)
+            ? message.baseRevision
+            : privateStore.read(this.#page()).notes[noteId]?.revision ?? 0,
+          body: message.body
+        });
+      }
+      if (message?.type === "endNoteEdit") {
+        if (!transport) return { type: "noteEditEnded", noteId, released: false, saved: false };
+        return transport.end({
+          noteId,
+          lease: message.lease,
+          sequence: message.sequence,
+          baseRevision: message.baseRevision,
+          body: message.body
+        });
+      }
+      return { type: "timeout" };
+    };
+    const recordPreRestore = async (targetNoteId, body, revision, authorId) => {
+      const currentPage = this.#page();
+      if (!currentPage || targetNoteId !== noteId) return;
+      const status = privateStore.inspectWorkspace(currentPage);
+      if (!status.ok) throw new Error(t("JN.Notices.Incompatible"));
+      const result = await privateStore.recordPreRestore(currentPage, noteId, {
+        body,
+        revision: Number.isInteger(revision) ? revision : 0,
+        authorId: authorId || game.user?.id || "",
+        at: Date.now()
+      }, { expectedRev: status.rev });
+      // The checkpoint moved the workspace rev; the restore save must re-begin on the new data.
+      transport = null;
+      return result;
+    };
+    return { request, recordPreRestore };
+  }
+
+  /** Shared history modal with workspace-local adapters; never touches shared history. */
+  openHistory(noteId) {
+    const page = this.page;
+    const note = this.getNote(noteId);
+    if (!page || !note) return null;
+    const adapters = this.#historySession(noteId);
+    return openHistoryDialog({
+      noteId,
+      note,
+      list: () => privateStore.listHistory(page, noteId),
+      recordPreRestore: adapters.recordPreRestore,
+      requestEditReply: adapters.request,
+      currentAuthorId: game.user?.id ?? "",
+      isLocked: () => false,
+      notify: (level, message) => ui.notifications?.[level]?.(message),
+      onRestored: () => {
+        try { this.reloadWorkspace(); } catch { /* app handles incompatible reload */ }
+        this.onChange();
+      },
+      t
+    });
+  }
+
+  moveCard(id, x, y) {
+    const card = this.workspace?.layout?.cards?.[id];
+    if (!card || !Number.isFinite(x) || !Number.isFinite(y)) return false;
+    return this.#save(data => {
+      const target = data.layout.cards[id];
+      if (!target) return;
+      const dx = x - (target.x ?? 0);
+      const dy = y - (target.y ?? 0);
+      const note = data.notes[id];
+      const measured = this.canvas.cardBox(id);
+      const origin = validAutoOrigin(target.autoSizeOrigin)
+        ? target.autoSizeOrigin
+        : originFromBox(measured ?? this.#box(target, note), target.rotation ?? 0);
+      target.x = x;
+      target.y = y;
+      target.autoSizeOrigin = { x: origin.x + dx, y: origin.y + dy };
+    });
+  }
+
+  moveCards(moves) {
+    if (!Array.isArray(moves) || !moves.length) return false;
+    return this.#save(data => {
+      for (const move of moves) {
+        const target = data.layout.cards[move?.noteId];
+        if (!target || !Number.isFinite(move.x) || !Number.isFinite(move.y)) continue;
+        const dx = move.x - (target.x ?? 0);
+        const dy = move.y - (target.y ?? 0);
+        const measured = this.canvas.cardBox(move.noteId);
+        const origin = validAutoOrigin(target.autoSizeOrigin)
+          ? target.autoSizeOrigin
+          : originFromBox(measured ?? this.#box(target, data.notes[move.noteId]), target.rotation ?? 0);
+        target.x = move.x;
+        target.y = move.y;
+        target.autoSizeOrigin = { x: origin.x + dx, y: origin.y + dy };
+      }
+    });
+  }
+
+  /** Resize enters manual sizing; automatic origin is retained for a later Auto toggle. */
+  resizeCard(id, width, height) {
+    if (!this.workspace?.layout?.cards?.[id]) return false;
+    return this.#save(data => {
+      const card = data.layout.cards[id];
+      if (!card) return;
+      card.sizing = {
+        mode: "manual",
+        width: clamp(width, 160, 800, 300),
+        minHeight: clamp(height, 80, 1600, 120)
       };
     });
-    return id;
   }
 
-  async updateLabel(labelId, fields) {
+  deleteNotes(ids) {
+    const noteIds = ids.filter(id => this.workspace?.notes?.[id]);
+    if (!noteIds.length) return false;
+    const undoId = foundry.utils.randomID();
+    const deletedAt = Date.now();
     return this.#save(data => {
-      const label = data.layout.labels[labelId];
-      if (!label) return;
-      if (typeof fields.text === "string") label.text = fields.text.slice(0, 500);
-      if (Number.isFinite(fields.x)) label.x = fields.x;
-      if (Number.isFinite(fields.y)) label.y = fields.y;
-      if (Number.isFinite(fields.size)) label.size = Math.max(8, Math.min(96, fields.size));
-      if (Object.values(STAMP_COLORS).includes(fields.color)) label.color = fields.color;
-      if (label.stamp && isStampCorner(fields.corner)) label.corner = fields.corner;
+      for (const id of noteIds) {
+        const note = data.notes[id];
+        if (!note) continue;
+        // History stays with the trash entry; only permanent deletion removes it.
+        data.trash.unshift({ note, card: data.layout.cards[id] ?? null, deletedAt, undoId });
+        delete data.notes[id];
+        delete data.layout.cards[id];
+      }
+    }).then(ok => {
+      if (!ok) return false;
+      this.history.push({ noteIds, undoId });
+      if (this.history.length > 20) this.history.shift();
+      if (noteIds.includes(this.selectedNoteId)) this.selectedNoteId = null;
+      this.canvas.clearSelection();
+      ui.notifications?.info(t("JN.Delete.Notice", { count: noteIds.length }));
+      this.onChange();
+      return true;
     });
   }
 
-  async removeLabels(labelIds) {
-    return this.#save(data => {
+  async deleteSelected() {
+    const labelIds = this.getSelectedLabelIds();
+    const noteIds = this.getSelectedNoteIds();
+    if (!labelIds.length && !noteIds.length) return;
+    if (noteIds.length > 1) {
+      if (this.deleteConfirmPending) return;
+      this.deleteConfirmPending = true;
+      let confirmed;
+      try {
+        confirmed = await DialogV2.confirm({
+          window: { title: t("JN.Delete.ConfirmTitle") },
+          content: `<p>${t("JN.Delete.ConfirmMultiplePrivate", { count: noteIds.length })}</p>`
+        });
+      } finally {
+        this.deleteConfirmPending = false;
+      }
+      if (!confirmed) return;
+    }
+    const undoId = foundry.utils.randomID();
+    const deletedAt = Date.now();
+    const ok = await this.#save(data => {
       for (const id of labelIds) {
         const label = data.layout.labels[id];
         if (!label) continue;
@@ -421,41 +741,174 @@ export default class PrivateWorkspace {
           ? attachedStampIds(data.layout.labels, label.noteId) : [id];
         for (const removeId of ids) delete data.layout.labels[removeId];
       }
+      for (const id of noteIds) {
+        const note = data.notes[id];
+        if (!note) continue;
+        data.trash.unshift({ note, card: data.layout.cards[id] ?? null, deletedAt, undoId });
+        delete data.notes[id];
+        delete data.layout.cards[id];
+      }
+    });
+    if (!ok) return;
+    if (noteIds.length) {
+      this.history.push({ noteIds, undoId });
+      if (this.history.length > 20) this.history.shift();
+    }
+    if (noteIds.includes(this.selectedNoteId)) this.selectedNoteId = null;
+    this.canvas.clearSelection();
+    if (noteIds.length) ui.notifications?.info(t("JN.Delete.Notice", { count: noteIds.length }));
+    this.onChange();
+  }
+
+  async undo() {
+    const deletion = this.history.pop();
+    if (!deletion) return;
+    await this.#save(data => {
+      const keep = [];
+      for (const entry of data.trash) {
+        if (entry.undoId !== deletion.undoId) { keep.push(entry); continue; }
+        data.notes[entry.note.id] = entry.note;
+        if (entry.card) data.layout.cards[entry.note.id] = entry.card;
+      }
+      data.trash = keep;
+    });
+    this.onChange();
+  }
+
+  async restoreTrash(key) {
+    await this.#save(data => {
+      const keep = [];
+      for (const entry of data.trash) {
+        const matches = entry.undoId === key || (!entry.undoId && entry.note?.id === key);
+        if (key && !matches) { keep.push(entry); continue; }
+        data.notes[entry.note.id] = entry.note;
+        if (entry.card) data.layout.cards[entry.note.id] = entry.card;
+      }
+      data.trash = keep;
+    });
+    this.onChange();
+  }
+
+  /** Emptying the trash permanently deletes those notes and their private history. */
+  async emptyTrash() {
+    const ids = (this.workspace?.trash ?? []).map(entry => entry?.note?.id).filter(Boolean);
+    await this.#save(data => {
+      data.trash = [];
+      if (ids.length) {
+        const result = deletePrivateHistory(data, ids);
+        data.history = result.workspace.history;
+      }
+    });
+    this.onChange();
+  }
+
+  async openTrash() {
+    const trashed = (this.workspace?.trash ?? [])
+      .filter(entry => entry?.note?.id)
+      .map(entry => ({ ...entry, key: entry.undoId ?? entry.note.id }));
+    const grouped = new Map();
+    for (const entry of trashed) {
+      if (!grouped.has(entry.key)) grouped.set(entry.key, []);
+      grouped.get(entry.key).push(entry);
+    }
+    const rows = [...grouped].map(([key, entries]) => {
+      const note = entries[0]?.note;
+      const view = note ? privateStore.noteView(this.page, note) : null;
+      const label = view ? noteSearchLabel(view) : t("JN.Search.EmptyNote");
+      const excerpt = view ? noteSearchExcerpt(view) : "";
+      const author = view ? noteAuthorName(view) : "";
+      const created = view ? noteDateText(view, "created") : "";
+      const deletedAt = entries.find(entry => Number.isFinite(entry.deletedAt))?.deletedAt;
+      const date = Number.isFinite(deletedAt)
+        ? new Date(deletedAt).toLocaleString(game.i18n?.lang || undefined) : "";
+      const meta = date
+        ? t("JN.Trash.DeletedByYouAt", { date: esc(date) })
+        : t("JN.Trash.MetadataUnknown");
+      const details = [excerpt, author, created].filter(Boolean).join(" · ");
+      return `
+      <div class="jn-trash-row">
+        <span class="jn-trash-title">${esc(label)}</span>
+        ${details ? `<span class="jn-trash-excerpt">${esc(details)}</span>` : ""}
+        <span class="jn-trash-meta">${meta}</span>
+        <button type="button" class="jn-trash-restore" data-id="${key}">${t("JN.Common.Restore")}</button></div>`;
+    }).join("") || `<p class="journalinator-empty">${t("JN.Trash.Empty")}</p>`;
+    await DialogV2.wait({
+      window: { title: t("JN.Trash.Title") },
+      content: (grouped.size ? `<p class="jn-trash-hint">${t("JN.Trash.RecoverableHint")}</p>` : "")
+        + `<div class="jn-trash-list">${rows}</div>` +
+        (grouped.size ? `<button type="button" class="jn-trash-empty">${t("JN.Trash.EmptyButton")}</button>` : ""),
+      buttons: [{ action: "close", label: t("JN.Common.Close"), default: true }],
+      rejectClose: false,
+      render: (event, dialog) => {
+        dialog.element.querySelectorAll(".jn-trash-restore").forEach(button => {
+          button.addEventListener("click", async () => {
+            await this.restoreTrash(button.dataset.id);
+            dialog.close();
+          });
+        });
+        dialog.element.querySelector(".jn-trash-empty")?.addEventListener("click", async () => {
+          const confirmed = await DialogV2.confirm({
+            window: { title: t("JN.Trash.EmptyConfirmTitle") },
+            content: `<p>${t("JN.Trash.EmptyConfirm")}</p>`
+          });
+          if (confirmed) await this.emptyTrash();
+          dialog.close();
+        });
+      }
     });
   }
 
-  removeLabel(labelId) {
-    return this.removeLabels([labelId]);
+  /** In-memory v2 clipboard for the private canvas. */
+  copyNotes(ids) {
+    const entries = (Array.isArray(ids) ? ids : [])
+      .map(id => this.workspace?.notes?.[id])
+      .filter(Boolean)
+      .map(note => ({
+        body: note.body,
+        layout: note.layout,
+        skin: resolveSkin(note.skin)
+      }));
+    if (!entries.length) return false;
+    this.clipboard = entries;
+    this.onCopy?.(entries);
+    ui.notifications?.info(t("JN.Clipboard.Copied", { count: entries.length }));
+    return true;
   }
 
-  async editLabel(labelId) {
-    const label = this.workspace?.layout?.labels?.[labelId];
-    if (!label || label.stamp) return;
-    const text = await DialogV2.prompt({
-      window: { title: t("JN.Prompt.EditLabel") },
-      content: `<input type="text" name="value" autofocus value="${esc(label.text)}">`,
-      ok: { label: t("JN.Common.OK"), callback: (event, button) => button.form.elements.value.value.trim() },
-      rejectClose: false
+  async pasteNotes(entries, { x = 0, y = 0 } = {}) {
+    if (!this.page || !Array.isArray(entries) || !entries.length) return [];
+    const ids = [];
+    const ok = await this.#save(data => {
+      for (const entry of entries) {
+        const { note, card } = privateStore.makeNote({
+          body: typeof entry?.body === "string" ? entry.body : "",
+          layout: entry?.layout === "profile" ? "profile" : "plain",
+          skin: entry?.skin ?? null,
+          x, y,
+          cards: data.layout.cards,
+          notes: data.notes
+        });
+        data.notes[note.id] = note;
+        data.layout.cards[note.id] = card;
+        ids.push(note.id);
+      }
     });
-    if (text === null) return;
-    if (!text) return this.removeLabel(labelId);
-    return this.updateLabel(labelId, { text });
+    if (!ok || !ids.length) return [];
+    this.selectedNoteId = ids.at(-1);
+    this.onChange();
+    return ids;
   }
 
-  async attachStamp(noteId, stamp, color = STAMP_COLORS.red, corner = DEFAULT_STAMP_CORNER) {
-    if (!stampUrl(stamp) || !this.workspace?.notes?.[noteId]) return;
-    return this.#save(data => {
-      const ids = attachedStampIds(data.layout.labels, noteId);
-      const id = ids[0] ?? foundry.utils.randomID();
-      for (const duplicate of ids.slice(1)) delete data.layout.labels[duplicate];
-      const previous = data.layout.labels[id];
-      data.layout.labels[id] = {
-        text: "", x: 0, y: 0, size: 14,
-        color: Object.values(STAMP_COLORS).includes(color) ? color : STAMP_COLORS.red,
-        stamp, noteId,
-        corner: isStampCorner(corner) ? corner : previous?.corner ?? DEFAULT_STAMP_CORNER
-      };
-    });
+  async pasteClipboard(position = {}) {
+    if (!this.clipboard.length) return [];
+    return this.pasteNotes(this.clipboard, position);
+  }
+
+  destroy() {
+    void this.editor.destroy();
+    this.canvas.disconnectGeometry();
+    this.canvas.root.remove();
+    this.editor.root.remove();
   }
 
   #anchorPoint(value) {
@@ -529,13 +982,13 @@ export default class PrivateWorkspace {
     // silently materialize a new minor. The plain point/side fallback is used instead.
     if (!this.#pinsEnabled()) return "";
     if (spec?.kind !== "minor" || !Number.isFinite(spec.x) || !Number.isFinite(spec.y)) return "";
-    const box = { ...card, w: card.width ?? 190, h: card.height ?? 90 };
+    const box = this.#box(card, data.notes[noteId]);
     const reuse = nearestMinorAnchor(box, card.anchors ?? {}, spec);
     if (reuse) return reuse.id;
     const anchors = { ...(card.anchors ?? {}) };
     if (Object.keys(anchors).length >= MAX_CARD_ANCHORS) return "";
     const id = `minor-${foundry.utils.randomID()}`;
-    const point = minorOnEdge(spec, { w: card.width ?? 190, h: card.height ?? 90 });
+    const point = minorOnEdge(spec, box);
     anchors[id] = {
       kind: "minor",
       x: point.x,
@@ -576,9 +1029,9 @@ export default class PrivateWorkspace {
       const layout = data.layout;
       layout.pins ??= {};
       layout.pinLinks ??= {};
-      const boxes = new Map(Object.entries(layout.cards).map(([id, card]) => [id, {
-        ...card, w: card.width ?? 190, h: card.height ?? 90
-      }]));
+      const boxes = new Map(Object.entries(layout.cards).map(([id, card]) => [
+        id, this.#box(card, data.notes[id])
+      ]));
       if (action.type === "add") {
         if (action.noteId && !layout.cards[action.noteId]) return;
         if (!validPinPosition(action.noteId, action.x, action.y)) return;
@@ -666,8 +1119,9 @@ export default class PrivateWorkspace {
     if (!card) return null;
     if (anchor.kind !== "minor" || !Number.isFinite(anchor.x) || !Number.isFinite(anchor.y)) return null;
     if (Object.keys(card.anchors ?? {}).length >= MAX_CARD_ANCHORS) return null;
-    const reuse = nearestMinorAnchor({ ...card, w: card.width ?? 190, h: card.height ?? 90 },
-      card.anchors ?? {}, minorOnEdge(anchor, { w: card.width ?? 190, h: card.height ?? 90 }));
+    const currentBox = this.#box(card, this.workspace.notes[noteId]);
+    const reuse = nearestMinorAnchor(currentBox,
+      card.anchors ?? {}, minorOnEdge(anchor, currentBox));
     if (reuse) return reuse.id;
     const id = `minor-${foundry.utils.randomID()}`;
     const ok = await this.#save(data => {
@@ -675,7 +1129,7 @@ export default class PrivateWorkspace {
       if (!target) return;
       const anchors = { ...(target.anchors ?? {}) };
       if (Object.keys(anchors).length >= MAX_CARD_ANCHORS) return;
-      const point = minorOnEdge(anchor, { w: target.width ?? 190, h: target.height ?? 90 });
+      const point = minorOnEdge(anchor, this.#box(target, data.notes[noteId]));
       anchors[id] = {
         kind: "minor",
         x: point.x,
@@ -693,11 +1147,12 @@ export default class PrivateWorkspace {
       const card = data.layout.cards[noteId];
       const anchor = this.#cardAnchor(card, anchorId);
       if (!anchor || anchor.kind === "main") return;
-      const moved = minorOnEdge({ ...anchor, x, y }, { w: card.width ?? 190, h: card.height ?? 90 });
+      const box = this.#box(card, data.notes[noteId]);
+      const moved = minorOnEdge({ ...anchor, x, y }, box);
       const anchors = { ...(card.anchors ?? {}) };
       anchors[anchorId] = moved;
       card.anchors = anchors;
-      const side = anchorSide(moved, { w: card.width ?? 190, h: card.height ?? 90 });
+      const side = anchorSide(moved, box);
       // Keep every private link (including a trashed owner's, which returns on restore) pointing
       // at the moved anchor through its normalized point/side fallback.
       const owners = [
@@ -789,9 +1244,7 @@ export default class PrivateWorkspace {
         const anchor = this.#cardAnchor(sourceCard, fields.sourceAnchorId);
         if (anchor) {
           link.sourcePoint = { x: anchor.x, y: anchor.y };
-          link.sourceSide = anchorSide(anchor, {
-            w: sourceCard.width ?? 190, h: sourceCard.height ?? 90
-          });
+          link.sourceSide = anchorSide(anchor, this.#box(sourceCard, data.notes[noteId]));
         }
       }
       if (targetAnchorChange) {
@@ -799,9 +1252,7 @@ export default class PrivateWorkspace {
         const anchor = this.#cardAnchor(targetCard, fields.targetAnchorId);
         if (anchor) {
           link.targetPoint = { x: anchor.x, y: anchor.y };
-          link.targetSide = anchorSide(anchor, {
-            w: targetCard.width ?? 190, h: targetCard.height ?? 90
-          });
+          link.targetSide = anchorSide(anchor, this.#box(targetCard, data.notes[link.targetId]));
         }
       }
       const pins = moveThreadPin(link.pins, fields.pinMove);
@@ -822,269 +1273,4 @@ export default class PrivateWorkspace {
     });
   }
 
-  async moveCard(id, x, y) {
-    if (!Number.isFinite(x) || !Number.isFinite(y) || !this.workspace?.layout?.cards?.[id]) return;
-    return this.#save(data => {
-      const card = data.layout.cards[id];
-      if (card) { card.x = x; card.y = y; }
-    });
-  }
-
-  async resizeCard(id, width, height) {
-    if (!this.workspace?.layout?.cards?.[id]) return;
-    return this.#save(data => {
-      const card = data.layout.cards[id];
-      if (card) { card.width = width; card.height = height; }
-    });
-  }
-
-  async deleteNotes(ids) {
-    const noteIds = ids.filter(id => this.workspace?.notes?.[id]);
-    if (!noteIds.length) return;
-    const undoId = foundry.utils.randomID();
-    const deletedAt = Date.now();
-    const ok = await this.#save(data => {
-      for (const id of noteIds) {
-        const note = data.notes[id];
-        if (!note) continue;
-        data.trash.unshift({ note, card: data.layout.cards[id] ?? null, deletedAt, undoId });
-        delete data.notes[id];
-        delete data.layout.cards[id];
-      }
-    });
-    if (!ok) return;
-    this.history.push({ noteIds, undoId });
-    if (this.history.length > 20) this.history.shift();
-    if (noteIds.includes(this.selectedNoteId)) this.selectedNoteId = null;
-    this.canvas.clearSelection();
-    ui.notifications?.info(t("JN.Delete.Notice", { count: noteIds.length }));
-    this.onChange();
-  }
-
-  async deleteSelected() {
-    const labelIds = this.getSelectedLabelIds();
-    const noteIds = this.getSelectedNoteIds();
-    if (!labelIds.length && !noteIds.length) return;
-    if (noteIds.length > 1) {
-      // A second Delete while the first confirmation is open must not stack another dialog or
-      // delete the same selection twice.
-      if (this.deleteConfirmPending) return;
-      this.deleteConfirmPending = true;
-      let confirmed;
-      try {
-        confirmed = await DialogV2.confirm({
-          window: { title: t("JN.Delete.ConfirmTitle") },
-          content: `<p>${t("JN.Delete.ConfirmMultiplePrivate", { count: noteIds.length })}</p>`
-        });
-      } finally {
-        this.deleteConfirmPending = false;
-      }
-      if (!confirmed) return;
-    }
-    const undoId = foundry.utils.randomID();
-    const deletedAt = Date.now();
-    const ok = await this.#save(data => {
-      for (const id of labelIds) {
-        const label = data.layout.labels[id];
-        if (!label) continue;
-        const ids = label.noteId && stampUrl(label.stamp)
-          ? attachedStampIds(data.layout.labels, label.noteId) : [id];
-        for (const removeId of ids) delete data.layout.labels[removeId];
-      }
-      for (const id of noteIds) {
-        const note = data.notes[id];
-        if (!note) continue;
-        data.trash.unshift({ note, card: data.layout.cards[id] ?? null, deletedAt, undoId });
-        delete data.notes[id];
-        delete data.layout.cards[id];
-      }
-    });
-    if (!ok) return;
-    if (noteIds.length) {
-      this.history.push({ noteIds, undoId });
-      if (this.history.length > 20) this.history.shift();
-    }
-    if (noteIds.includes(this.selectedNoteId)) this.selectedNoteId = null;
-    this.canvas.clearSelection();
-    if (noteIds.length) ui.notifications?.info(t("JN.Delete.Notice", { count: noteIds.length }));
-    this.onChange();
-  }
-
-  getSelectedLabelIds() {
-    return this.canvas.getSelectedLabelIds();
-  }
-
-  async undo() {
-    const deletion = this.history.pop();
-    if (!deletion) return;
-    await this.#save(data => {
-      const keep = [];
-      for (const entry of data.trash) {
-        if (entry.undoId !== deletion.undoId) { keep.push(entry); continue; }
-        data.notes[entry.note.id] = entry.note;
-        if (entry.card) data.layout.cards[entry.note.id] = entry.card;
-      }
-      data.trash = keep;
-    });
-    this.onChange();
-  }
-
-  async restoreTrash(key) {
-    await this.#save(data => {
-      const keep = [];
-      for (const entry of data.trash) {
-        // Older trash entries have no undoId. openTrash falls back to the note id as the row key,
-        // so accept either identifier here too.
-        const matches = entry.undoId === key || (!entry.undoId && entry.note?.id === key);
-        if (key && !matches) { keep.push(entry); continue; }
-        data.notes[entry.note.id] = entry.note;
-        if (entry.card) data.layout.cards[entry.note.id] = entry.card;
-      }
-      data.trash = keep;
-    });
-    this.onChange();
-  }
-
-  async emptyTrash() {
-    await this.#save(data => { data.trash = []; });
-    this.onChange();
-  }
-
-  async openStats() {
-    const notes = Object.values(this.workspace?.notes ?? {});
-    const chars = notes.reduce((total, note) =>
-      total + note.blocks.reduce((sum, block) => sum + block.text.length, 0), 0);
-    const trashed = this.workspace?.trash?.length ?? 0;
-    const styles = {};
-    const styleKey = note => {
-      if (note.kind === "location") return "location";
-      return resolvePresentation({ name: note.title, system: note }).extendedStyle;
-    };
-    const styleLabel = key => key === "location" ? "JN.Kind.Location"
-      : key === "document" ? "JN.Style.Document"
-        : key === "target" ? "JN.Style.Target" : "JN.Style.Memo";
-    for (const note of notes) {
-      const style = styleKey(note);
-      styles[style] = (styles[style] ?? 0) + 1;
-    }
-    await DialogV2.wait({
-      window: { title: t("JN.Private.StatsTitle") },
-      content: `
-        <p class="jn-private-stats-excluded">${t("JN.Private.StatsExcluded")}</p>
-        <p>${t("JN.Private.StatsNotes", { count: notes.length })}</p>
-        <p>${t("JN.Private.StatsChars", { count: chars })}</p>
-        <p>${t("JN.Private.StatsTrash", { count: trashed })}</p>
-        <div class="journalinator-meta">${t("JN.Private.StatsStyles")}</div>
-        ${Object.entries(styles).map(([style, count]) =>
-          `<div class="jn-stat-bar"><span>${esc(t(styleLabel(style)))}</span><em>${count}</em></div>`
-        ).join("") || `<p class="journalinator-empty">${t("JN.Common.NoneYet")}</p>`}`,
-      buttons: [{ action: "close", label: t("JN.Common.Close"), default: true }],
-      rejectClose: false
-    });
-  }
-
-  async openTrash() {
-    // A legacy card-only trash entry has no note to restore, so it cannot be a usable row.
-    const trashed = (this.workspace?.trash ?? [])
-      .filter(entry => entry?.note?.id)
-      .map(entry => ({ ...entry, key: entry.undoId ?? entry.note.id }));
-    const grouped = new Map();
-    for (const entry of trashed) {
-      if (!grouped.has(entry.key)) grouped.set(entry.key, []);
-      grouped.get(entry.key).push(entry);
-    }
-    const rows = [...grouped].map(([key, entries]) => {
-      const deletedAt = entries.find(entry => Number.isFinite(entry.deletedAt))?.deletedAt;
-      const date = Number.isFinite(deletedAt)
-        ? new Date(deletedAt).toLocaleString(game.i18n?.lang || undefined) : "";
-      const meta = date
-        ? t("JN.Trash.DeletedByYouAt", { date: esc(date) })
-        : t("JN.Trash.MetadataUnknown");
-      return `
-      <div class="jn-trash-row">
-        <span class="jn-trash-title">${esc(entries.map(entry => entry.note.title || t("JN.Private.NewNoteTitle")).join(", "))}</span>
-        <span class="jn-trash-meta">${meta}</span>
-        <button type="button" class="jn-trash-restore" data-id="${key}">${t("JN.Common.Restore")}</button></div>`;
-    }).join("") || `<p class="journalinator-empty">${t("JN.Trash.Empty")}</p>`;
-    await DialogV2.wait({
-      window: { title: t("JN.Trash.Title") },
-      content: (grouped.size ? `<p class="jn-trash-hint">${t("JN.Trash.RecoverableHint")}</p>` : "")
-        + `<div class="jn-trash-list">${rows}</div>` +
-        (grouped.size ? `<button type="button" class="jn-trash-empty">${t("JN.Trash.EmptyButton")}</button>` : ""),
-      buttons: [{ action: "close", label: t("JN.Common.Close"), default: true }],
-      rejectClose: false,
-      render: (event, dialog) => {
-        dialog.element.querySelectorAll(".jn-trash-restore").forEach(button => {
-          button.addEventListener("click", async () => {
-            await this.restoreTrash(button.dataset.id);
-            dialog.close();
-          });
-        });
-        dialog.element.querySelector(".jn-trash-empty")?.addEventListener("click", async () => {
-          const confirmed = await DialogV2.confirm({
-            window: { title: t("JN.Trash.EmptyConfirmTitle") },
-            content: `<p>${t("JN.Trash.EmptyConfirm")}</p>`
-          });
-          if (confirmed) await this.emptyTrash();
-          dialog.close();
-        });
-      }
-    });
-  }
-
-  async pasteNotes(entries, { x = 0, y = 0 } = {}) {
-    if (!this.page || !Array.isArray(entries) || !entries.length) return [];
-    const ids = [];
-    const ok = await this.#save(data => {
-      for (const entry of entries) {
-        const { note, card } = privateStore.makeNote({
-          title: entry?.title, kind: entry?.kind, style: entry?.style, x, y,
-          cards: data.layout.cards, notes: data.notes
-        });
-        const texts = Array.isArray(entry?.blocks) && entry.blocks.length ? entry.blocks : [""];
-        note.blocks = texts.map(text => ({ blockId: foundry.utils.randomID(), text: String(text ?? "") }));
-        if (typeof entry?.targetHeading === "string") note.targetHeading = entry.targetHeading.slice(0, 80);
-        if (typeof entry?.label === "string") note.label = entry.label.slice(0, MAX_TITLE_LENGTH);
-        if (entry?.presentation && typeof entry.presentation === "object") {
-          const presentation = resolvePresentation({
-            name: entry?.title ?? note.title,
-            system: { ...note, presentation: { ...(note.presentation ?? {}), ...entry.presentation } }
-          });
-          const { label: _ignored, ...presentationFields } = presentation;
-          note.presentation = presentationFields;
-        }
-        if (entry?.attachment && typeof entry.attachment === "object") {
-          note.attachment = resolveAttachment({
-            system: { attachment: { ...(note.attachment ?? {}), ...entry.attachment } }
-          });
-        }
-        if (Number.isInteger(entry?.schemaVersion) && entry.schemaVersion > 0) {
-          note.schemaVersion = entry.schemaVersion;
-        }
-        const pastedAnchors = sanitizeCardAnchors(entry?.card?.anchors ?? entry?.anchors);
-        if (Object.keys(pastedAnchors).length) {
-          // Copied minors may keep their creator; the main pin is local identity and is stamped
-          // from the private owner, never from pasted client data.
-          if (pastedAnchors.main) {
-            pastedAnchors.main = { ...pastedAnchors.main, createdBy: privateStore.ownerId(this.page) || "" };
-          }
-          card.anchors = { ...card.anchors, ...pastedAnchors };
-        }
-        data.notes[note.id] = note;
-        data.layout.cards[note.id] = card;
-        ids.push(note.id);
-      }
-    });
-    if (!ok || !ids.length) return [];
-    this.selectedNoteId = ids.at(-1);
-    this.onChange();
-    return ids;
-  }
-
-  destroy() {
-    this.editor.close();
-    this.canvas.disconnectGeometry();
-    this.canvas.root.remove();
-    this.editor.root.remove();
-  }
 }
