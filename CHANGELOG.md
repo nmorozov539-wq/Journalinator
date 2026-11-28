@@ -18,6 +18,29 @@ This development build replaces the note system. It is not a release and has not
 - Removed: the GM secret/vault system, secret notes and hidden blocks/links, Location notes, actor linking, the statistics window and rankings, the old block/paragraph editor, and typed `[[wikilink]]` creation.
 - Clean break: there is no migration or legacy adapter. Older shared or private data is shown with a read-only notice and is left unchanged. Use a fresh test world or ask the host to reset Journalinator data.
 
+## 0.9.7 — Link overhaul
+
+- Thread controls now live only on the right panel, next to the note controls. The floating menu
+  that opened when you tapped a thread is gone. The panel works on every kind of thread (drawn
+  between pins, or note links), shows each control's current value, and has a new actions group
+  for delete, GM hide/hint, route detach and clearing free pins.
+- Fixed the controls that appeared to do nothing. Threads drawn between pins used a separate,
+  stripped-down renderer; they now share one with note links, so ends (loose tails), alternating
+  colors, material and pattern all show. The alternating pattern finally has an accent-color
+  picker in the Pattern group.
+- Threads no longer carry text labels (place a small note next to a thread instead). Existing
+  labels disappear from the board; the stored data is kept.
+- Loose threads now hang like a rope: the thread is a single smooth curve that leaves each pin
+  steeply and sags under gravity, instead of being pulled down in the middle. Hang is the old
+  Slack, as a share of the span with no 100 px cap; near-vertical threads bow sideways.
+- New link style (the "pen"): a menu next to the Pin tool picks the style new threads start with,
+  from the four built-in presets or your own saved presets. With the Pin tool on and nothing
+  selected, the right panel tunes it. The draw preview now shows the real thread.
+- Shortcuts: while dragging a new thread, the mouse wheel changes thickness and Alt+wheel changes
+  hang. The same keys work over the selected thread.
+- Dragging a thread or pin to the edge of the board now scrolls the camera.
+- Fixed dropping a note onto a thread to route it, which needed an update for the new curve.
+
 ## 0.9.6 — Pin selection
 
 - Box selection now includes free board pins. Selecting an attached pin selects its owning note,

@@ -1,20 +1,22 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="320" height="320" viewBox="0 0 320 320">
   <defs>
-    <filter id="cork-coarse" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="sRGB">
-      <feTurbulence type="fractalNoise" baseFrequency="0.03" numOctaves="2" seed="3" stitchTiles="stitch"/>
-      <feColorMatrix type="matrix" values="0 0 0 0 0.36  0 0 0 0 0.22  0 0 0 0 0.11  0 0 0 1.4 -0.4"/>
+    <!-- Soft, low-contrast cork: broad tonal drift, a quiet speckle, and a few sparse lighter
+         granules. Contrast is deliberately low so notes and threads, not the board, own the eye. -->
+    <filter id="cork-coarse" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.018" numOctaves="3" seed="3" stitchTiles="stitch"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.20  0 0 0 0 0.12  0 0 0 0 0.06  0 0 0 0.9 -0.28"/>
     </filter>
-    <filter id="cork-fine" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="sRGB">
-      <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="3" seed="7" stitchTiles="stitch"/>
-      <feColorMatrix type="matrix" values="0 0 0 0 0.16  0 0 0 0 0.08  0 0 0 0 0.03  0 0 0 1.6 -0.55"/>
+    <filter id="cork-fine" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.55" numOctaves="2" seed="7" stitchTiles="stitch"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.10  0 0 0 0 0.06  0 0 0 0 0.03  0 0 0 0.9 -0.34"/>
     </filter>
-    <filter id="cork-fleck" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="sRGB">
-      <feTurbulence type="fractalNoise" baseFrequency="0.8" numOctaves="2" seed="11" stitchTiles="stitch"/>
-      <feColorMatrix type="matrix" values="0 0 0 0 0.72  0 0 0 0 0.5  0 0 0 0 0.3  0 0 0 2.4 -1.2"/>
+    <filter id="cork-fleck" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.35" numOctaves="2" seed="11" stitchTiles="stitch"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.62  0 0 0 0 0.45  0 0 0 0 0.30  0 0 0 2.6 -1.55"/>
     </filter>
   </defs>
-  <rect width="320" height="320" fill="#7b5233"/>
+  <rect width="320" height="320" fill="#5f4230"/>
   <rect width="320" height="320" filter="url(#cork-coarse)"/>
   <rect width="320" height="320" filter="url(#cork-fine)"/>
-  <rect width="320" height="320" filter="url(#cork-fleck)"/>
+  <rect width="320" height="320" filter="url(#cork-fleck)" opacity=".55"/>
 </svg>

@@ -68,6 +68,10 @@ Hooks.once("init", () => {
     hint: t("JN.Settings.PinsEnabledHint"),
     scope: "world", config: true, type: Boolean, default: true
   });
+  // The link pen: the look new threads start with, plus the player's saved presets.
+  game.settings.register(MODULE_ID, "linkPen", {
+    scope: "client", config: false, type: Object, default: {}
+  });
   game.settings.register(MODULE_ID, "customThemes", {
     scope: "client", config: false, type: Object, default: {}
   });

@@ -6,7 +6,14 @@ import {
   minorOnEdge, nearestAnchor, nearestMinorAnchor, validAnchorId
 } from "../anchors.mjs";
 import { boardPinRef, pinRef, resolvePin } from "../board-pins.mjs";
-import { looseTails, pinnedThreadPath, threadLayerSpecs, ThreadMotion, THREAD_PRESETS } from "../link-thread.mjs";
+import { pinnedThreadPath, threadLayerSpecs, ThreadMotion } from "../link-thread.mjs";
+import { threadClasses, threadStrokes, threadStyle, updateThreadTails } from "../thread-render.mjs";
+import {
+  applyPenPreset, normalizePen, PEN_STYLE_KEYS, penCreateFields, removePenPreset, savePenPreset,
+  updatePenStyle, wheelAdjust, wheelSteps
+} from "../link-pen.mjs";
+import { bindPresetList, renderPresetList } from "./pen-presets-ui.mjs";
+import { edgePanVelocity } from "../edge-pan.mjs";
 import { LINK_COLOR_SLOTS, normalizeLinkColor } from "../link-colors.mjs";
 import PatchNotesPanel from "./patch-notes.mjs";
 import { t } from "../i18n.mjs";
@@ -63,13 +70,13 @@ function isProtectedUiTarget(target) {
 const ROUTE_DROP_RADIUS = 18;
 
 /**
- * Distance from a world point to the existing thread geometry, using the hit path's cubic
- * commands. This is only called while a card drag is live and once on drop; it never rebuilds
+ * Distance from a world point to the existing thread geometry, using the hit path's quadratic
+ * (`Q`, the current hanging curve) and cubic (`C`, older saved geometry) commands. This is only called while a card drag is live and once on drop; it never rebuilds
  * the SVG or writes to the DOM.
  */
 function distanceToThreadPath(d, point) {
   if (typeof d !== "string" || !d) return Infinity;
-  const tokens = d.match(/[MC]|-?\d*\.?\d+(?:[eE][-+]?\d+)?/g) ?? [];
+  const tokens = d.match(/[MCQ]|-?\d*\.?\d+(?:[eE][-+]?\d+)?/g) ?? [];
   const distanceSq = (x, y) => (x - point.x) ** 2 + (y - point.y) ** 2;
   let cursor = null;
   let minimum = Infinity;
@@ -82,6 +89,25 @@ function distanceToThreadPath(d, point) {
       if (!Number.isFinite(x) || !Number.isFinite(y)) break;
       cursor = { x, y };
       minimum = Math.min(minimum, distanceSq(x, y));
+      continue;
+    }
+    if (command === "Q") {
+      const control = { x: Number(tokens[index++]), y: Number(tokens[index++]) };
+      const end = { x: Number(tokens[index++]), y: Number(tokens[index++]) };
+      if (!cursor || ![control.x, control.y, end.x, end.y].every(Number.isFinite)) {
+        cursor = cursor ?? end;
+        continue;
+      }
+      const start = cursor;
+      const steps = 14;
+      for (let step = 0; step <= steps; step++) {
+        const t = step / steps;
+        const u = 1 - t;
+        const x = u * u * start.x + 2 * u * t * control.x + t * t * end.x;
+        const y = u * u * start.y + 2 * u * t * control.y + t * t * end.y;
+        minimum = Math.min(minimum, distanceSq(x, y));
+      }
+      cursor = end;
       continue;
     }
     if (command !== "C") break;
@@ -110,15 +136,18 @@ function distanceToThreadPath(d, point) {
 // `selectedLinkId`, so choosing another thread replaces it and the link popover edits one link.
 // (Multi-note cosmetic batches remain supported through `selectedNoteIds`.)
 const LINK_TOOL_GROUPS = Object.freeze({
-  material: { icon: "fa-layer-group", label: "JN.Link.Material" },
+  presets: { icon: "fa-wand-magic-sparkles", label: "JN.Link.Presets" },
+  color: { icon: "fa-palette", label: "JN.Link.Color.default" },
   thickness: { icon: "fa-grip-lines", label: "JN.Link.Thickness" },
   slack: { icon: "fa-wind", label: "JN.Link.Slack" },
-  color: { icon: "fa-palette", label: "JN.Link.Color.default" },
+  material: { icon: "fa-layer-group", label: "JN.Link.Material" },
   pattern: { icon: "fa-bars-staggered", label: "JN.Link.Pattern" },
   ends: { icon: "fa-scissors", label: "JN.Link.Ends" },
-  label: { icon: "fa-tag", label: "JN.Link.Label" },
-  presets: { icon: "fa-wand-magic-sparkles", label: "JN.Link.Presets" }
+  actions: { icon: "fa-ellipsis", label: "JN.Link.Actions" }
 });
+// The pen (the style new threads start with) has every look control, but no per-link actions.
+const PEN_TOOL_GROUPS = Object.freeze(Object.fromEntries(
+  Object.entries(LINK_TOOL_GROUPS).filter(([group]) => group !== "actions")));
 
 /**
  * The note canvas: pan/zoom viewport, absolutely-positioned cards, free text labels, and now
@@ -151,12 +180,19 @@ export default class JournalCanvas {
     this.unmeasuredCards = new Set();
     this.labelEls = new Map();
     this.linksById = new Map();
+    // Link pen (the look new threads start with) and the transient state of wheel/edge-pan input.
+    this.pen = normalizePen(null);
+    this.lastPointer = null;
+    this.edgePanFrame = null;
+    this.wheelEdit = null;
+    this.wheelHint = null;
+    this.wheelHintTimer = null;
+    this.previewGeometry = null;
     this.threads = new Map();
     this.linkSignature = null;
     this.linkGroupEls = new Map();
     this.linkHitEls = new Map();
     this.maskShapeEls = new Map();
-    this.toolbarDismiss = null;
     this.pinDrag = null;
     this.pinTool = false;
     this.pinInteraction = null;
@@ -245,7 +281,6 @@ export default class JournalCanvas {
       </div>
       <div class="jn-selection-box"></div>
       <div class="jn-context-menu"></div>
-      <div class="jn-link-toolbar"></div>
       <div class="jn-floating-toolbar" role="toolbar" aria-orientation="vertical" aria-label="${t("JN.Toolbar.Title")}" hidden></div>
       <div class="jn-floating-popover" role="dialog" aria-label="${t("JN.Toolbar.Title")}" hidden></div>
       <div class="jn-link-placement-hint" role="status" hidden></div>
@@ -257,7 +292,6 @@ export default class JournalCanvas {
     this.linkHits = this.root.querySelector(".jn-link-hits");
     this.selectionBox = this.root.querySelector(".jn-selection-box");
     this.contextMenu = this.root.querySelector(".jn-context-menu");
-    this.linkToolbar = this.root.querySelector(".jn-link-toolbar");
     this.linkPlacementHint = this.root.querySelector(".jn-link-placement-hint");
     this.floatingToolbar = this.root.querySelector(".jn-floating-toolbar");
     this.floatingPopover = this.root.querySelector(".jn-floating-popover");
@@ -493,9 +527,7 @@ export default class JournalCanvas {
     this.groupPinOverrides.clear();
     if (this.linkDrawTimer !== null) this.linkDrawCancel?.(this.linkDrawTimer);
     this.linkDrawTimer = null;
-    this.#unbindToolbarDismiss();
     this.#closeFloatingPopover();
-    this.#hideLinkToolbar();
     this.floatingToolbar.hidden = true;
     this.floatingToolbar.replaceChildren();
     this.floatingToolbarSignature = "none";
@@ -503,6 +535,10 @@ export default class JournalCanvas {
     if (this.zoomFrame !== null) this.root.ownerDocument.defaultView.cancelAnimationFrame(this.zoomFrame);
     this.threadFrame = this.threadTime = null;
     this.zoomFrame = null;
+    this.#stopEdgePan();
+    this.root.ownerDocument.defaultView?.clearTimeout(this.wheelHintTimer);
+    if (this.wheelEdit?.timer) this.root.ownerDocument.defaultView?.clearTimeout(this.wheelEdit.timer);
+    this.wheelEdit = null;
     this.threads.clear();
     this.pinDrag = null;
     this.#cancelPinDragFrame();
@@ -525,7 +561,7 @@ export default class JournalCanvas {
       this.cardEls.get(note._id)?.classList.toggle("jn-dimmed", !dimMatch(note));
     }
     this.#drawLinks();
-    this.#syncLinkToolbar();
+    this.#syncFloatingToolbar();
   }
 
   #warnReadOnly() {
@@ -1067,20 +1103,17 @@ export default class JournalCanvas {
       const start = this.#pinPoint(link.source, boxes), end = this.#pinPoint(link.target, boxes);
       if (!start || !end) continue;
       const cosmetics = resolveLinkCosmetics(link);
-      const { path: d, center } = pinnedThreadPath({ ...start, nx: 0, ny: 0 },
-        { ...end, nx: 0, ny: 0 }, [], null, cosmetics.slack);
+      const { path: d, center, start: aimedStart, end: aimedEnd } = pinnedThreadPath(
+        { ...start, nx: 0, ny: 0 }, { ...end, nx: 0, ny: 0 }, [], null, cosmetics.slack);
       const safeId = foundry.utils.escapeHTML(id);
       const specs = threadLayerSpecs(cosmetics.material, cosmetics.thickness);
-      const color = normalizeLinkColor(link.color);
-      pieces.push(`<g data-pin-link="${safeId}" class="jn-link-color-${color || "default"}
-        jn-link-material-${specs.material} jn-link-pattern-${cosmetics.pattern}
-        ${this.selectedLinkId === id ? "jn-link-selected" : ""}"
-        style="--jn-thread-k:${specs.k};--jn-thread-width:${cosmetics.thickness}"><g class="jn-link-strokes">
-        ${specs.layers.map(layer => `<path class="jn-thread-layer jn-thread-${layer.role}"
-          style="--jn-layer-width:${layer.widthFactor};--jn-layer-opacity:${layer.opacity};--jn-layer-dx:${layer.dx};--jn-layer-dy:${layer.dy}"
-          d="${d}"/>`).join("")}</g>
+      // Same renderer as note links, so every cosmetic (ends, alternating dye, material,
+      // pattern) behaves identically on a link drawn between pins.
+      pieces.push(`<g data-pin-link="${safeId}"
+        class="${threadClasses({ color: link.color, cosmetics, extra: [this.selectedLinkId === id ? "jn-link-selected" : ""] })}"
+        style="${threadStyle(specs)}">
+        ${threadStrokes({ d, cosmetics, start: aimedStart, end: aimedEnd })}
         <path class="jn-pin-link-hit" data-id="${safeId}" d="${d}"/>
-        ${link.label ? `<text class="jn-link-label" x="${center.x}" y="${center.y + 4}">${foundry.utils.escapeHTML(link.label)}</text>` : ""}
         </g>`);
       this.linksById.set(id, { ...link, id, sourceId: null, boardPinLink: true,
         mx: center.x, my: center.y });
@@ -1091,8 +1124,8 @@ export default class JournalCanvas {
       {
         group,
         lines: [...group.querySelectorAll(".jn-thread-layer")],
-        hit: group.querySelector(".jn-pin-link-hit"),
-        label: group.querySelector(".jn-link-label")
+        tails: [...group.querySelectorAll(".jn-thread-tail")],
+        hit: group.querySelector(".jn-pin-link-hit")
       }
     ]));
   }
@@ -1114,17 +1147,15 @@ export default class JournalCanvas {
         return;
       }
       const cosmetics = resolveLinkCosmetics(link);
-      const { path: d, center } = pinnedThreadPath({ ...start, nx: 0, ny: 0 },
-        { ...end, nx: 0, ny: 0 }, [], null, cosmetics.slack);
+      const { path: d, center, start: aimedStart, end: aimedEnd } = pinnedThreadPath(
+        { ...start, nx: 0, ny: 0 }, { ...end, nx: 0, ny: 0 }, [], null, cosmetics.slack);
       for (const line of entry.lines) line.setAttribute("d", d);
+      updateThreadTails(entry.tails, aimedStart, aimedEnd);
       entry.hit?.setAttribute("d", d);
-      entry.label?.setAttribute("x", center.x);
-      entry.label?.setAttribute("y", center.y + 4);
       const stored = this.linksById.get(id);
       if (stored) {
         stored.mx = center.x;
         stored.my = center.y;
-        if (id === this.selectedLinkId) this.#positionLinkToolbar(stored);
       }
     }
   }
@@ -1230,6 +1261,12 @@ export default class JournalCanvas {
     image.src = url;
     image.alt = t(`JN.Stamp.${data.stamp}`);
     image.style.setProperty("--jn-seal-color", this.#stampColor(data.color));
+    // Ink stamps are painted through the glyph's alpha (see stylized.css), so the art URL is
+    // also exposed as a custom property. Tilt is derived from the id so it is stable per stamp.
+    image.style.setProperty("--jn-stamp-url", `url("${url}")`);
+    let hash = 0;
+    for (const ch of String(labelId)) hash = (hash * 31 + ch.charCodeAt(0)) | 0;
+    image.style.setProperty("--jn-stamp-tilt", `${(Math.abs(hash) % 17) - 8}deg`);
     image.classList.toggle("jn-stamp-colored", !!data.color);
     image.title = image.alt;
     image.draggable = false;
@@ -1330,7 +1367,7 @@ export default class JournalCanvas {
     // geometry of the existing SVG nodes instead of re-parsing the whole innerHTML string.
     if (signature === this.linkSignature && this.#linkStructureReady(links)
         && this.#updateLinkGeometry(links, boxes, animate, dimmedIds)) {
-      this.#syncLinkToolbar();
+      this.#syncFloatingToolbar();
       return;
     }
 
@@ -1343,50 +1380,32 @@ export default class JournalCanvas {
       const { p, r, cosmetics, pins, routePoints, waypoints, motion } = this.#resolveThread(entry, boxes, animate);
       threads.set(link.id, { start: p, end: r, pins, routePoints, waypoints, motion });
       const { path: d, center: { x: mx, y: my }, start, end } = pinnedThreadPath(p, r, waypoints, motion, cosmetics.slack);
-      const color = normalizeLinkColor(link.color);
-      const colorClass = color ? `jn-link-color-${color}` : "jn-link-color-default";
-      const accentClass = `jn-link-accent-${cosmetics.secondaryColor || "default"}`;
-      const specs = threadLayerSpecs(cosmetics.material, cosmetics.thickness);
-      const roleClass = role => `jn-thread-${role.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)}`;
-      const layerPaths = () => specs.layers.map(layer => `<path class="jn-thread-layer ${roleClass(layer.role)}" d="${d}"
-        style="--jn-layer-width:${layer.widthFactor};--jn-layer-opacity:${layer.opacity};--jn-layer-dx:${layer.dx};--jn-layer-dy:${layer.dy}"/>`).join("");
-      const accentStack = cosmetics.pattern === "alternating"
-        ? `<g class="jn-link-stack jn-link-stack-accent">${layerPaths()}</g>`
-        : "";
-      const tails = cosmetics.ends === "loose"
-        ? looseTails(start, end).map(tail =>
-          `<path class="jn-thread-tail${tail.role === "tailFine" ? " jn-thread-tail-fine" : ""}" d="${tail.d}"/>`).join("")
-        : "";
       // No arrowheads and no direction UI: a thread is an undirected visual relationship.
       const endpoint = (anchor, attached) => `<circle class="jn-thread-pin${attached ? " jn-thread-pin-attached" : ""}" cx="${anchor.x - anchor.nx * THREAD_PIN_RADIUS}"
           cy="${anchor.y - anchor.ny * THREAD_PIN_RADIUS}"/>`;
       const dimmed = dimmedIds.has(note._id) || dimmedIds.has(link.targetId);
-      const pattern = cosmetics.pattern;
       const selected = link.id === this.selectedLinkId;
       const linkId = foundry.utils.escapeHTML(String(link.id ?? ""));
+      const specs = threadLayerSpecs(cosmetics.material, cosmetics.thickness);
 
-      const linkClasses = [
-        colorClass,
-        accentClass,
-        `jn-link-material-${specs.material}`,
-        `jn-link-pattern-${pattern}`,
-        `jn-link-ends-${cosmetics.ends}`,
-        selected ? "jn-link-selected" : "",
-        this.routeDrop?.linkId === link.id ? "jn-link-drop-target" : "",
-        dimmed ? "jn-link-dimmed" : "",
-      ].filter(Boolean).join(" ");
-      const k = Math.round(specs.k * 10000) / 10000;
-      body += `<g data-id="${linkId}" class="${linkClasses}"
-          style="--jn-thread-k:${k};--jn-thread-width:${specs.thickness}">
-        <g class="jn-link-strokes">
-          <g class="jn-link-stack jn-link-stack-primary">${layerPaths()}</g>
-          ${accentStack}
-          ${tails}
-        </g>
+      const linkClasses = threadClasses({
+        color: link.color, cosmetics, hidden: !!link.hidden,
+        extra: [
+          selected ? "jn-link-selected" : "",
+          this.routeDrop?.linkId === link.id ? "jn-link-drop-target" : "",
+          dimmed ? "jn-link-dimmed" : "",
+          link.hidden ? "jn-link-hidden" : "",
+          link.hint ? "jn-link-hint" : ""
+        ]
+      });
+      // Threads carry no text. Notes placed next to a thread say what it means; a hinted
+      // thread keeps only its spark so GM hints stay findable.
+      body += `<g data-id="${linkId}" class="${linkClasses}" style="${threadStyle(specs)}">
+        ${threadStrokes({ d, cosmetics, start, end, hidden: !!link.hidden })}
         ${endpoint(start, !!link.sourcePinRef || this.#visibleEndpointPin(note._id, link.sourceAnchorId))}
         ${endpoint(end, !!link.targetPinRef || this.#visibleEndpointPin(link.targetId, link.targetAnchorId))}
         ${pins.map((pin, index) => `<circle class="jn-thread-pin jn-board-pin" data-pin-index="${index}" cx="${pin.x}" cy="${pin.y}"/>`).join("")}
-        ${link.label ? `<text class="jn-link-label" x="${mx}" y="${my + 4}">${foundry.utils.escapeHTML(link.label)}</text>` : ""}
+        ${link.hint ? `<text class="jn-link-label" x="${mx}" y="${my + 4}">&#10022;</text>` : ""}
       </g>`;
       hits += `<path class="jn-link-hit" data-id="${linkId}" d="${d}"/>`;
 
@@ -1750,7 +1769,7 @@ export default class JournalCanvas {
       return [
         String(link.id), note._id, link.targetId, normalizeLinkColor(link.color),
         cosmetics.secondaryColor, cosmetics.material, cosmetics.thickness, cosmetics.pattern,
-        cosmetics.ends, link.label ?? "",
+        cosmetics.ends, link.hidden ? 1 : 0, link.hint ? 1 : 0,
         savedPins.length, link.id === this.selectedLinkId ? 1 : 0, dimmed ? 1 : 0,
         sourceSide, targetSide, link.sourceAnchorId ?? "", link.targetAnchorId ?? "",
         link.sourcePinRef ?? "", link.targetPinRef ?? "",
@@ -1801,12 +1820,7 @@ export default class JournalCanvas {
         markers: previous?.markers ?? [...group.querySelectorAll("[data-pin-index]")]
       };
       for (const line of thread.lines) line.setAttribute("d", d);
-      if (thread.tails.length) {
-        const tailPaths = looseTails(start, end);
-        thread.tails.forEach((tail, index) => {
-          if (tailPaths[index]) tail.setAttribute("d", tailPaths[index].d);
-        });
-      }
+      updateThreadTails(thread.tails, start, end);
       thread.endpointPins.forEach((pin, index) => {
         const anchor = index === 0 ? start : end;
         pin.setAttribute("cx", anchor.x - anchor.nx * THREAD_PIN_RADIUS);
@@ -1965,12 +1979,7 @@ export default class JournalCanvas {
   #paintThread(id, thread) {
     const { path, center, start, end } = pinnedThreadPath(thread.start, thread.end, thread.waypoints ?? thread.pins, thread.motion);
     thread.lines?.forEach(line => line.setAttribute("d", path));
-    if (thread.tails?.length) {
-      const tailPaths = looseTails(start, end);
-      thread.tails.forEach((tail, index) => {
-        if (tailPaths[index]) tail.setAttribute("d", tailPaths[index].d);
-      });
-    }
+    updateThreadTails(thread.tails, start, end);
     thread.endpointPins?.forEach((pin, index) => {
       const anchor = index === 0 ? start : end;
       pin.setAttribute("cx", anchor.x - anchor.nx * THREAD_PIN_RADIUS);
@@ -1988,7 +1997,6 @@ export default class JournalCanvas {
     const link = this.linksById.get(id);
     link.mx = center.x;
     link.my = center.y;
-    if (id === this.selectedLinkId) this.#positionLinkToolbar(link);
   }
 
   /** Limits expensive SVG rebuilds to one per animation-sized interval while dragging. */
@@ -2083,50 +2091,19 @@ export default class JournalCanvas {
     this.#syncPinPositions();
     this.#drawLinks();
     this.#drawPinLinks();
-    this.#syncLinkToolbar();
+    this.#syncFloatingToolbar();
     this.#syncFloatingToolbar();
   }
 
-  #positionLinkToolbar(link) {
-    const bounds = this.root.getBoundingClientRect();
-    const menu = this.linkToolbar;
-    const width = menu.offsetWidth;
-    const height = menu.offsetHeight;
-    const x = link.mx * this.view.k + this.view.x;
-    const y = link.my * this.view.k + this.view.y;
-    menu.style.left = `${Math.max(6, Math.min(x - width / 2, bounds.width - width - 6))}px`;
-    menu.style.top = `${Math.max(6, Math.min(y - height - 12, bounds.height - height - 6))}px`;
-  }
-
-  #bindToolbarDismiss() {
-    if (this.toolbarDismiss) return;
-    const doc = this.root.ownerDocument;
-    this.toolbarDismiss = ev => {
-      if (this.linkToolbar.contains(ev.target)) return;
-      if (ev.target.closest?.(".jn-floating-toolbar, .jn-floating-popover")) return;
-      this.#closeLinkToolbar();
-    };
-    doc.addEventListener("pointerdown", this.toolbarDismiss, true);
-  }
-
-  #unbindToolbarDismiss() {
-    if (!this.toolbarDismiss) return;
-    this.root.ownerDocument.removeEventListener("pointerdown", this.toolbarDismiss, true);
-    this.toolbarDismiss = null;
-  }
-
-  #hideLinkToolbar() {
-    this.linkToolbar.style.display = "none";
-    delete this.linkToolbar.dataset.linkId;
-    this.#unbindToolbarDismiss();
-  }
-
-  /** Closes the panel; Escape/focus return goes back to the link's source card or the canvas. */
+  /**
+   * Deselects the link (and with it the right-panel inspector). `restoreFocus` is for Escape:
+   * focus goes back to the link's source card or the canvas.
+   */
   #closeLinkToolbar({ restoreFocus = false } = {}) {
     const link = this.selectedLinkId ? this.linksById.get(this.selectedLinkId) : null;
     this.selectedLinkId = null;
     this.#syncLinkSelection();
-    this.#hideLinkToolbar();
+    this.#syncFloatingToolbar();
     if (!restoreFocus) return;
     const card = link?.sourceId ? this.cardEls.get(link.sourceId) : null;
     const target = card?.querySelector("[data-card-text]:not([hidden])") ?? this.root;
@@ -2158,157 +2135,6 @@ export default class JournalCanvas {
     else this.callbacks.onDeleteLink?.(link.sourceId, link.id);
   }
 
-  #syncLinkToolbar() {
-    const link = this.selectedLinkId ? this.linksById.get(this.selectedLinkId) : null;
-    if (!link || this.readOnly) { this.#hideLinkToolbar(); return; }
-
-    const wasOpen = this.linkToolbar.style.display === "flex"
-      && this.linkToolbar.dataset.linkId === String(link.id);
-    this.linkToolbar.style.display = "flex";
-    this.linkToolbar.dataset.linkId = String(link.id);
-    this.#bindToolbarDismiss();
-    const currentColor = normalizeLinkColor(link.color);
-    const cosmetics = resolveLinkCosmetics(link);
-    const secondary = cosmetics.secondaryColor;
-    const swatch = slot => {
-      const label = t(slot ? `JN.Link.Color.${slot}` : "JN.Link.Color.default");
-      return `<button type="button" class="jn-link-color jn-link-swatch-${slot || "default"}${slot === currentColor ? " on" : ""}"
-        data-color="${slot}" title="${label}" aria-label="${label}" aria-pressed="${slot === currentColor}"></button>`;
-    };
-    const secondarySwatch = slot => {
-      const label = t(slot ? `JN.Link.Secondary.${slot}` : "JN.Link.Secondary.default");
-      return `<button type="button" class="jn-link-color jn-link-secondary jn-link-secondary-${slot || "default"}${slot === secondary ? " on" : ""}"
-        data-secondary="${slot}" title="${label}" aria-label="${label}" aria-pressed="${slot === secondary}"></button>`;
-    };
-    const label = id => t(`JN.Link.Preset.${id.charAt(0).toUpperCase()}${id.slice(1)}`);
-    const presets = Object.entries(THREAD_PRESETS).map(([id, preset]) =>
-      `<button type="button" class="jn-link-preset" data-preset="${id}"
-        title="${label(id)} · ${preset.thickness.toFixed(1)} px · ${Math.round(preset.slack * 100)}%">${label(id)}</button>`).join("");
-    const options = (values, selected, prefix) => values.map(value =>
-      `<option value="${value}"${value === selected ? " selected" : ""}>${t(`JN.Link.${prefix}.${value}`)}</option>`).join("");
-    this.linkToolbar.innerHTML = `
-      <div class="jn-link-row jn-link-presets" role="group" aria-label="${t("JN.Link.Presets")}">${presets}</div>
-      <div class="jn-link-row">
-        <label class="jn-link-field">
-          <span>${t("JN.Link.Material")}</span>
-          <select class="jn-link-material" title="${t("JN.Link.Material")}">
-            ${options(["linen", "double"], cosmetics.material, "MaterialOption")}
-          </select>
-        </label>
-        <label class="jn-link-field">
-          <span>${t("JN.Link.Thickness")} <output class="jn-link-thickness-out">${cosmetics.thickness.toFixed(1)} px</output></span>
-          <input type="range" class="jn-link-thickness" min="0.8" max="5" step="0.1"
-            value="${cosmetics.thickness}" title="${t("JN.Link.Thickness")}" aria-label="${t("JN.Link.Thickness")}">
-        </label>
-        <label class="jn-link-field">
-          <span>${t("JN.Link.Slack")} <output class="jn-link-slack-out">${Math.round(cosmetics.slack * 100)}%</output></span>
-          <input type="range" class="jn-link-slack" min="0" max="25" step="1"
-            value="${Math.round(cosmetics.slack * 100)}" title="${t("JN.Link.Slack")}" aria-label="${t("JN.Link.Slack")}">
-        </label>
-      </div>
-      <div class="jn-link-row">
-        <label class="jn-link-field">
-          <span>${t("JN.Link.Pattern")}</span>
-          <select class="jn-link-pattern" title="${t("JN.Link.Pattern")}">
-            ${options(["continuous", "interrupted", "alternating"], cosmetics.pattern, "PatternOption")}
-          </select>
-        </label>
-        <label class="jn-link-field">
-          <span>${t("JN.Link.Ends")}</span>
-          <select class="jn-link-ends" title="${t("JN.Link.Ends")}">
-            ${options(["standard", "loose"], cosmetics.ends, "EndOption")}
-          </select>
-        </label>
-      </div>
-      <div class="jn-link-row">
-        <span class="jn-link-colors" role="group" aria-label="${t("JN.Link.Color.default")}">${LINK_COLOR_OPTIONS.map(swatch).join("")}</span>
-        <span class="jn-link-colors jn-link-secondary-colors" role="group" aria-label="${t("JN.Link.SecondaryColor")}">${LINK_COLOR_OPTIONS.map(secondarySwatch).join("")}</span>
-        <input type="text" class="jn-link-label-input" placeholder="${t("JN.Link.Label")}" value="${foundry.utils.escapeHTML(link.label ?? "")}">
-      </div>
-      <div class="jn-link-row jn-link-actions">
-        ${link.boardPinLink ? "" : this.#clearBoardPinsButton(link)}
-        ${link.boardPinLink ? "" : this.#routeDetachButtons(link)}
-        <button type="button" class="jn-link-delete" title="${t("JN.Link.Delete")}">✕</button>
-      </div>
-    `;
-    this.#positionLinkToolbar(link);
-
-    const update = fields => link.boardPinLink
-      ? this.callbacks.onBoardPinAction?.({ type: "updateLink", linkId: link.id, fields })
-      : this.callbacks.onUpdateLink?.(link.sourceId, link.id, fields);
-    // Commit on change (blur), not per keystroke: one socket message and one world write
-    // per label edit, matching the block-save rule in spec §6.2.
-    this.linkToolbar.querySelector(".jn-link-label-input").onchange = ev => update({ label: ev.target.value });
-    this.linkToolbar.querySelectorAll(".jn-link-color:not(.jn-link-secondary)").forEach(btn => {
-      btn.onclick = () => update({ color: btn.dataset.color });
-    });
-    // Accent dye is an independent field: these swatches never touch the primary `color`.
-    this.linkToolbar.querySelectorAll(".jn-link-secondary").forEach(btn => {
-      btn.onclick = () => update({ secondaryColor: btn.dataset.secondary });
-    });
-
-    const material = this.linkToolbar.querySelector(".jn-link-material");
-    const thickness = this.linkToolbar.querySelector(".jn-link-thickness");
-    const slack = this.linkToolbar.querySelector(".jn-link-slack");
-    const pattern = this.linkToolbar.querySelector(".jn-link-pattern");
-    const ends = this.linkToolbar.querySelector(".jn-link-ends");
-    const thicknessOut = this.linkToolbar.querySelector(".jn-link-thickness-out");
-    const slackOut = this.linkToolbar.querySelector(".jn-link-slack-out");
-    // Range input only updates its readout; the write happens once on change (pointer release).
-    thickness.oninput = () => { thicknessOut.textContent = `${Number(thickness.value).toFixed(1)} px`; };
-    slack.oninput = () => { slackOut.textContent = `${Math.round(Number(slack.value))}%`; };
-    thickness.onchange = () => update({ thickness: Number(thickness.value) });
-    slack.onchange = () => update({ slack: Number(slack.value) / 100 });
-    material.onchange = () => update({ material: material.value });
-    pattern.onchange = () => update({ pattern: pattern.value });
-    ends.onchange = () => update({ ends: ends.value });
-
-    // Presets set only their three defaults plus a neutral pattern/end treatment. Every other
-    // parameter stays independently controlled.
-    this.linkToolbar.querySelectorAll(".jn-link-preset").forEach(btn => {
-      btn.onclick = () => {
-        const preset = THREAD_PRESETS[btn.dataset.preset];
-        if (!preset) return;
-        material.value = preset.material;
-        thickness.value = String(preset.thickness);
-        thicknessOut.textContent = `${preset.thickness.toFixed(1)} px`;
-        slack.value = String(Math.round(preset.slack * 100));
-        slackOut.textContent = `${Math.round(preset.slack * 100)}%`;
-        pattern.value = "continuous";
-        ends.value = "standard";
-        update({
-          material: preset.material,
-          thickness: preset.thickness,
-          slack: preset.slack,
-          pattern: "continuous",
-          ends: "standard"
-        });
-      };
-    });
-    this.linkToolbar.querySelectorAll(".jn-link-detach").forEach(btn => {
-      btn.onclick = () => {
-        const undoId = foundry.utils.randomID();
-        this.callbacks.onDetachRouteNote?.(link.sourceId, link.id, btn.dataset.routeNoteId, undoId);
-        this.#closeLinkToolbar();
-      };
-    });
-    this.linkToolbar.querySelector(".jn-link-clear-pins")?.addEventListener("click", () => {
-      this.callbacks.onClearThreadPins?.(link.sourceId, link.id);
-      this.#closeLinkToolbar();
-    });
-    this.linkToolbar.querySelector(".jn-link-delete").onclick = () => {
-      this.#requestDeleteLink(link);
-      this.#closeLinkToolbar();
-    };
-
-    // Opening the panel moves focus to its first control; later geometry/pin syncs rebuild the
-    // markup but must not steal focus back from whatever control the user is using.
-    if (!wasOpen) {
-      const first = this.linkToolbar.querySelector("button, select, input");
-      first?.focus?.({ preventScroll: true });
-    }
-  }
-
   /** Selection is a class toggle, so clicking a thread never forces a full SVG rebuild. */
   #syncLinkSelection() {
     for (const group of this.root.querySelectorAll(".jn-links g[data-id], .jn-pin-links g[data-pin-link]")) {
@@ -2323,12 +2149,20 @@ export default class JournalCanvas {
 
   #floatingSelection() {
     const link = this.selectedLinkId ? this.linksById.get(this.selectedLinkId) : null;
-    return link ? { kind: "link", link, ids: [], notes: [] } : null;
+    if (link) return { kind: "link", link, ids: [], notes: [] };
+    // With the Pin tool armed and nothing selected, the panel edits the pen: the look every
+    // newly drawn thread starts with.
+    if (this.pinTool && !this.readOnly) return { kind: "pen", ids: [], notes: [] };
+    return null;
   }
 
   #syncFloatingToolbar() {
     const selection = this.#floatingSelection();
-    const signature = selection ? `link:${selection.link.id}:${this.readOnly ? 1 : 0}` : "none";
+    const signature = selection
+      ? (selection.kind === "link"
+        ? `link:${selection.link.id}:${this.readOnly ? 1 : 0}:${selection.link.boardPinLink ? 1 : 0}`
+        : "pen")
+      : "none";
     if (signature === this.floatingToolbarSignature) {
       this.#syncSelectionBar();
       return;
@@ -2405,18 +2239,22 @@ export default class JournalCanvas {
   }
 
   #floatingButtons(selection) {
-    if (selection.kind !== "link") return [];
-    return Object.entries(LINK_TOOL_GROUPS).map(([group, definition]) =>
-      this.#floatingButton(group, definition, this.readOnly));
+    if (selection.kind === "link" || selection.kind === "pen") {
+      const groups = selection.kind === "pen" ? PEN_TOOL_GROUPS : LINK_TOOL_GROUPS;
+      return Object.entries(groups).map(([group, definition]) =>
+        this.#floatingButton(group, definition, this.readOnly));
+    }
+    return [];
   }
 
   #openFloatingPopover(group, button) {
     const selection = this.#floatingSelection();
     if (!selection) return;
-    if (selection.kind !== "link" || !LINK_TOOL_GROUPS[group]) return;
+    if (selection.kind === "link" && !LINK_TOOL_GROUPS[group]) return;
+    if (selection.kind === "pen" && !PEN_TOOL_GROUPS[group]) return;
     if (this.readOnly) return;
 
-    const payload = this.#linkPopover(group, selection.link);
+    const payload = this.#linkPopover(group, this.#linkTarget(selection));
     if (!payload) return;
 
     this.#closeFloatingPopover();
@@ -2547,137 +2385,218 @@ export default class JournalCanvas {
     </label>`;
   }
 
-  #linkPopover(group, link) {
-    const update = fields => this.callbacks.onUpdateLink?.(link.sourceId, link.id, fields);
-    const cosmetics = resolveLinkCosmetics(link);
-    const esc = text => foundry.utils.escapeHTML(text);
-    if (group === "material") {
+  // --- Link pen -----------------------------------------------------------------------------
+  // The pen is the style new threads start with. It lives in a client setting shared by both
+  // canvases; when no callback is wired (tests, embedded use) the canvas keeps its own copy.
+
+  #getPen() {
+    const stored = this.callbacks.getLinkPen?.();
+    if (stored) return normalizePen(stored);
+    return normalizePen(this.pen);
+  }
+
+  #setPen(pen) {
+    this.pen = normalizePen(pen);
+    this.callbacks.onLinkPenChange?.(this.pen);
+    this.#refreshLinkPreviewStyle();
+  }
+
+  /** What a right-panel control edits: the selected thread, or the pen when none is selected. */
+  #linkTarget(selection) {
+    if (selection.kind === "pen") {
       return {
-        title: t("JN.Link.Material"),
+        kind: "pen", link: null, values: { ...this.#getPen().current },
+        update: fields => this.#setPen(updatePenStyle(this.#getPen(), fields))
+      };
+    }
+    const link = selection.link;
+    return {
+      kind: "link", link,
+      values: { ...resolveLinkCosmetics(link), color: normalizeLinkColor(link.color) },
+      update: fields => (link.boardPinLink
+        ? this.callbacks.onBoardPinAction?.({ type: "updateLink", linkId: link.id, fields })
+        : this.callbacks.onUpdateLink?.(link.sourceId, link.id, fields))
+    };
+  }
+
+  #linkPopover(group, target) {
+    const esc = text => foundry.utils.escapeHTML(String(text ?? ""));
+    const values = target.values;
+    // Keep the popover's own state truthful between writes: the document round-trip only
+    // refreshes the board, never an open popover.
+    const commit = fields => { Object.assign(values, fields); target.update(fields); };
+    // A pen is local, so it can follow a slider live; a real thread writes once on release.
+    const live = target.kind === "pen";
+    const range = (name, label, min, max, step, value, shown, toField) => ({
+      title: label,
+      html: `<label class="jn-ft-field"><span>${esc(label)}
+          <output class="jn-ft-${name}-out">${shown(value)}</output></span>
+          <input type="range" class="jn-ft-${name}" min="${min}" max="${max}" step="${step}" value="${value}"
+            aria-label="${esc(label)}"></label>`,
+      bind: el => {
+        const input = el.querySelector(`.jn-ft-${name}`);
+        const out = el.querySelector(`.jn-ft-${name}-out`);
+        input.oninput = () => {
+          out.textContent = shown(Number(input.value));
+          if (live) commit(toField(Number(input.value)));
+        };
+        input.onchange = () => commit(toField(Number(input.value)));
+      }
+    });
+
+    if (group === "material" || group === "ends") {
+      const isMaterial = group === "material";
+      const field = isMaterial ? "material" : "ends";
+      const values_ = isMaterial ? ["linen", "double"] : ["standard", "loose"];
+      const labelKey = isMaterial ? "JN.Link.Material" : "JN.Link.Ends";
+      const optionKey = isMaterial ? "JN.Link.MaterialOption" : "JN.Link.EndOption";
+      return {
+        title: t(labelKey),
         html: this.#selectField({
-          className: "jn-ft-material", label: t("JN.Link.Material"), value: cosmetics.material, mixed: false,
-          options: [["linen", t("JN.Link.MaterialOption.linen")], ["double", t("JN.Link.MaterialOption.double")]]
+          className: `jn-ft-${group}`, label: t(labelKey), value: values[field], mixed: false,
+          options: values_.map(value => [value, t(`${optionKey}.${value}`)])
         }),
         bind: el => {
-          el.querySelector(".jn-ft-material").onchange = event => update({ material: event.target.value });
+          el.querySelector(`.jn-ft-${group}`).onchange = event => commit({ [field]: event.target.value });
         }
       };
     }
     if (group === "thickness") {
-      const value = cosmetics.thickness.toFixed(1);
-      return {
-        title: t("JN.Link.Thickness"),
-        html: `<label class="jn-ft-field"><span>${esc(t("JN.Link.Thickness"))}
-          <output class="jn-ft-thickness-out">${value} px</output></span>
-          <input type="range" class="jn-ft-thickness" min="0.8" max="5" step="0.1" value="${value}"
-            aria-label="${esc(t("JN.Link.Thickness"))}"></label>`,
-        bind: el => {
-          const thickness = el.querySelector(".jn-ft-thickness");
-          const out = el.querySelector(".jn-ft-thickness-out");
-          thickness.oninput = () => { out.textContent = `${Number(thickness.value).toFixed(1)} px`; };
-          thickness.onchange = () => update({ thickness: Number(thickness.value) });
-        }
-      };
+      return range("thickness", t("JN.Link.Thickness"), 0.8, 5, 0.1, values.thickness.toFixed(1),
+        value => `${Number(value).toFixed(1)} px`, value => ({ thickness: value }));
     }
     if (group === "slack") {
-      const value = String(Math.round(cosmetics.slack * 100));
-      return {
-        title: t("JN.Link.Slack"),
-        html: `<label class="jn-ft-field"><span>${esc(t("JN.Link.Slack"))}
-          <output class="jn-ft-slack-out">${value}%</output></span>
-          <input type="range" class="jn-ft-slack" min="0" max="25" step="1" value="${value}"
-            aria-label="${esc(t("JN.Link.Slack"))}"></label>`,
-        bind: el => {
-          const slack = el.querySelector(".jn-ft-slack");
-          const out = el.querySelector(".jn-ft-slack-out");
-          slack.oninput = () => { out.textContent = `${Math.round(Number(slack.value))}%`; };
-          slack.onchange = () => update({ slack: Number(slack.value) / 100 });
-        }
-      };
+      return range("slack", t("JN.Link.Slack"), 0, 25, 1, Math.round(values.slack * 100),
+        value => `${Math.round(Number(value))}%`, value => ({ slack: value / 100 }));
     }
     if (group === "color") {
-      const current = normalizeLinkColor(link.color);
-      const swatches = LINK_COLOR_OPTIONS.map(slot => {
-        const label = t(slot ? `JN.Link.Color.${slot}` : "JN.Link.Color.default");
+      const swatches = (field, prefix, labelKey, current) => LINK_COLOR_OPTIONS.map(slot => {
+        const label = t(slot ? `${labelKey}.${slot}` : `${labelKey}.default`);
         return `<button type="button" class="jn-ft-swatch jn-ft-swatch-${slot || "default"}${slot === current ? " on" : ""}"
-          data-color="${esc(slot)}" title="${esc(label)}" aria-label="${esc(label)}"
+          data-field="${field}" data-color="${esc(slot)}" title="${esc(label)}" aria-label="${esc(label)}"
           aria-pressed="${slot === current}"></button>`;
       }).join("");
       return {
         title: t("JN.Link.Color.default"),
-        html: `<span class="jn-ft-colors" role="group" aria-label="${esc(t("JN.Link.Color.default"))}">${swatches}</span>`,
+        html: `<span class="jn-ft-colors" role="group" aria-label="${esc(t("JN.Link.Color.default"))}">${
+          swatches("color", "color", "JN.Link.Color", values.color)}</span>`,
         bind: el => {
           el.querySelectorAll(".jn-ft-swatch").forEach(button => {
-            button.onclick = () => update({ color: button.dataset.color });
-          });
-        }
-      };
-    }
-    if (group === "pattern" || group === "ends") {
-      const isPattern = group === "pattern";
-      const values = isPattern
-        ? ["continuous", "interrupted", "alternating"]
-        : ["standard", "loose"];
-      const labelKey = isPattern ? "JN.Link.PatternOption" : "JN.Link.EndOption";
-      return {
-        title: t(isPattern ? "JN.Link.Pattern" : "JN.Link.Ends"),
-        html: this.#selectField({
-          className: `jn-ft-${group}`, label: t(isPattern ? "JN.Link.Pattern" : "JN.Link.Ends"),
-          value: isPattern ? cosmetics.pattern : cosmetics.ends, mixed: false,
-          options: values.map(value => [value, t(`${labelKey}.${value}`)])
-        }),
-        bind: el => {
-          el.querySelector(`.jn-ft-${group}`).onchange = event => {
-            update(isPattern ? { pattern: event.target.value } : { ends: event.target.value });
-          };
-        }
-      };
-    }
-    if (group === "label") {
-      return {
-        title: t("JN.Link.Label"),
-        html: `<label class="jn-ft-field"><span>${esc(t("JN.Link.Label"))}</span>
-          <input type="text" class="jn-ft-link-label" maxlength="200" value="${esc(link.label ?? "")}"
-            placeholder="${esc(t("JN.Link.Label"))}" aria-label="${esc(t("JN.Link.Label"))}"></label>`,
-        bind: el => {
-          // Commit on change, matching the link toolbar: one socket write per committed label.
-          el.querySelector(".jn-ft-link-label").onchange = event => update({ label: event.target.value });
-        }
-      };
-    }
-    if (group === "presets") {
-      const label = id => t(`JN.Link.Preset.${id.charAt(0).toUpperCase()}${id.slice(1)}`);
-      const presets = Object.entries(THREAD_PRESETS).map(([id, preset]) =>
-        `<button type="button" class="jn-ft-preset" data-preset="${id}"
-          title="${esc(label(id))} · ${preset.thickness.toFixed(1)} px · ${Math.round(preset.slack * 100)}%">${esc(label(id))}</button>`).join("");
-      return {
-        title: t("JN.Link.Presets"),
-        html: `<div class="jn-ft-presets" role="group" aria-label="${esc(t("JN.Link.Presets"))}">${presets}</div>`,
-        bind: el => {
-          el.querySelectorAll(".jn-ft-preset").forEach(button => {
             button.onclick = () => {
-              const preset = THREAD_PRESETS[button.dataset.preset];
-              if (!preset) return;
-              update({
-                material: preset.material,
-                thickness: preset.thickness,
-                slack: preset.slack,
-                pattern: "continuous",
-                ends: "standard"
+              commit({ color: button.dataset.color });
+              el.querySelectorAll(".jn-ft-swatch").forEach(other => {
+                const on = other === button;
+                other.classList.toggle("on", on);
+                other.setAttribute("aria-pressed", String(on));
               });
             };
           });
         }
       };
     }
+    if (group === "pattern") {
+      const accent = LINK_COLOR_OPTIONS.map(slot => {
+        const label = t(slot ? `JN.Link.Secondary.${slot}` : "JN.Link.Secondary.default");
+        return `<button type="button" class="jn-ft-swatch jn-ft-swatch-${slot || "default"}${slot === values.secondaryColor ? " on" : ""}"
+          data-color="${esc(slot)}" title="${esc(label)}" aria-label="${esc(label)}"
+          aria-pressed="${slot === values.secondaryColor}"></button>`;
+      }).join("");
+      return {
+        title: t("JN.Link.Pattern"),
+        html: `${this.#selectField({
+          className: "jn-ft-pattern", label: t("JN.Link.Pattern"), value: values.pattern, mixed: false,
+          options: ["continuous", "interrupted", "alternating"]
+            .map(value => [value, t(`JN.Link.PatternOption.${value}`)])
+        })}
+          <div class="jn-ft-accent" ${values.pattern === "alternating" ? "" : "hidden"}>
+            <span class="jn-ft-sub">${esc(t("JN.Link.SecondaryColor"))}</span>
+            <span class="jn-ft-colors" role="group" aria-label="${esc(t("JN.Link.SecondaryColor"))}">${accent}</span>
+          </div>`,
+        bind: el => {
+          const accentBox = el.querySelector(".jn-ft-accent");
+          el.querySelector(".jn-ft-pattern").onchange = event => {
+            accentBox.hidden = event.target.value !== "alternating";
+            commit({ pattern: event.target.value });
+          };
+          el.querySelectorAll(".jn-ft-accent .jn-ft-swatch").forEach(button => {
+            button.onclick = () => {
+              commit({ secondaryColor: button.dataset.color });
+              el.querySelectorAll(".jn-ft-accent .jn-ft-swatch").forEach(other => {
+                const on = other === button;
+                other.classList.toggle("on", on);
+                other.setAttribute("aria-pressed", String(on));
+              });
+            };
+          });
+        }
+      };
+    }
+    if (group === "presets") return this.#presetsPopover(target, commit);
+    if (group === "actions" && target.kind === "link") return this.#linkActionsPopover(target.link);
     return null;
+  }
+
+  /** Built-in and saved presets. The same list backs the toolbar's pen menu. */
+  #presetsPopover(target, commit) {
+    const esc = text => foundry.utils.escapeHTML(String(text ?? ""));
+    const builtInLabel = id => t(`JN.Link.Preset.${id.charAt(0).toUpperCase()}${id.slice(1)}`);
+    return {
+      title: t("JN.Link.Presets"),
+      html: `<div class="jn-ft-presets-body"></div>`,
+      bind: el => {
+        const host = el.querySelector(".jn-ft-presets-body");
+        const draw = () => {
+          const pen = this.#getPen();
+          host.innerHTML = renderPresetList({ pen, current: target.values, builtInLabel, t, esc });
+          bindPresetList(host, {
+            pen,
+            apply: id => {
+              const next = applyPenPreset({ ...pen, current: target.values }, id).current;
+              commit(Object.fromEntries(PEN_STYLE_KEYS.map(key => [key, next[key]])));
+              draw();
+            },
+            save: name => { this.#setPen(savePenPreset(this.#getPen(), name, target.values)); draw(); },
+            remove: id => { this.#setPen(removePenPreset(this.#getPen(), id)); draw(); }
+          });
+        };
+        draw();
+      }
+    };
+  }
+
+  /** Per-link actions: route detach, free pins, GM controls and delete. */
+  #linkActionsPopover(initial) {
+    let link = initial;
+    const deleteButton = `<button type="button" class="jn-ft-action jn-link-delete danger" title="${t("JN.Link.Delete")}">
+      <i class="fa-solid fa-trash" aria-hidden="true"></i> ${t("JN.Link.Delete")}</button>`;
+    const extras = link.boardPinLink ? ""
+      : `${this.#clearBoardPinsButton(link)}${this.#routeDetachButtons(link)}`;
+    return {
+      title: t("JN.Link.Actions"),
+      html: `<div class="jn-ft-actions">${extras}${deleteButton}</div>`,
+      bind: el => {
+        const done = () => this.#closeFloatingPopover();
+        const click = (selector, fn) => {
+          const button = el.querySelector(selector);
+          if (button) button.onclick = () => { fn(); done(); };
+        };
+        click(".jn-link-clear-pins", () => this.callbacks.onClearThreadPins?.(link.sourceId, link.id));
+        el.querySelectorAll(".jn-link-detach").forEach(button => {
+          button.onclick = () => {
+            this.callbacks.onDetachRouteNote?.(link.sourceId, link.id, button.dataset.routeNoteId, foundry.utils.randomID());
+            done();
+          };
+        });
+        click(".jn-link-delete", () => { this.#requestDeleteLink(link); this.#closeLinkToolbar(); });
+      }
+    };
   }
 
   /** Clear the free board waypoints when a split is blocked by them; route data is untouched. */
   #clearBoardPinsButton(link) {
     if (typeof this.callbacks.onClearThreadPins !== "function") return "";
     if (!Array.isArray(link.pins) || link.pins.length === 0) return "";
-    return `<button type="button" class="jn-link-clear-pins" title="${t("JN.Route.ClearPins")}">${t("JN.Route.ClearPins")}</button>`;
+    return `<button type="button" class="jn-ft-action jn-link-clear-pins" title="${t("JN.Route.ClearPins")}">${t("JN.Route.ClearPins")}</button>`;
   }
 
   /** Optional detach action for each note routed through this thread (Route A waypoint). */
@@ -2691,10 +2610,11 @@ export default class JournalCanvas {
       const note = this.notes.find(item => item._id === entry?.noteId);
       const name = note?.system?.label?.trim?.() || note?.name || "";
       const suffix = name ? ` · ${foundry.utils.escapeHTML(name)}` : "";
-      return `<button type="button" class="jn-link-detach" data-route-note-id="${foundry.utils.escapeHTML(String(entry?.noteId ?? ""))}"
+      return `<button type="button" class="jn-ft-action jn-link-detach" data-route-note-id="${foundry.utils.escapeHTML(String(entry?.noteId ?? ""))}"
         title="${t("JN.Route.Detach")}">${t("JN.Route.Detach")}${suffix}</button>`;
     }).join("");
   }
+
 
   #centerOnContent() {
     const positions = Object.values(this.layout.cards ?? {});
@@ -2754,7 +2674,7 @@ export default class JournalCanvas {
     this.view.y = (rect.height - height * this.view.k) / 2 - y0 * this.view.k;
     this.hasCentered = true;
     this.#applyTransform();
-    this.#syncLinkToolbar();
+    this.#syncFloatingToolbar();
     return true;
   }
 
@@ -2821,7 +2741,7 @@ export default class JournalCanvas {
     this.view.y = py - (py - this.view.y) * k / this.view.k;
     this.view.k = k;
     this.#applyTransform();
-    this.#syncLinkToolbar();
+    this.#syncFloatingToolbar();
   }
 
   #toWorld(clientX, clientY, rect = null) {
@@ -2832,15 +2752,56 @@ export default class JournalCanvas {
     };
   }
 
+  /**
+   * The draw preview is a real thread in the pen's look (material, thickness, dye, hang, ends),
+   * so what you see while dragging is what the link will be.
+   */
   #startLinkPreview() {
-    this.previewPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    this.previewPath.setAttribute("class", "jn-link-preview");
+    this.previewPath = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    this.previewGeometry = null;
+    this.#restylePreview();
     this.svg.appendChild(this.previewPath);
+  }
+
+  #restylePreview() {
+    const group = this.previewPath;
+    if (!group) return;
+    const style = this.#getPen().current;
+    const cosmetics = resolveLinkCosmetics(style);
+    const specs = threadLayerSpecs(cosmetics.material, cosmetics.thickness);
+    group.setAttribute("class", `jn-link-preview ${threadClasses({ color: style.color, cosmetics })}`);
+    group.setAttribute("style", threadStyle(specs));
+    const geometry = this.previewGeometry;
+    if (!geometry) { group.replaceChildren(); return; }
+    this.#paintPreview(geometry.start, geometry.end, geometry.pins, true);
+  }
+
+  /** Re-skins a live preview after the pen changed (wheel shortcut, right-panel edit). */
+  #refreshLinkPreviewStyle() {
+    if (this.previewPath) this.#restylePreview();
+  }
+
+  /** Moves the preview thread; markup is rebuilt only when the pen's look changed. */
+  #paintPreview(start, end, pins = [], rebuild = false) {
+    const group = this.previewPath;
+    if (!group) return;
+    const cosmetics = resolveLinkCosmetics(this.#getPen().current);
+    const { path: d, start: aimedStart, end: aimedEnd } = pinnedThreadPath(
+      { ...start, nx: start.nx ?? 0, ny: start.ny ?? 0 }, { ...end, nx: end.nx ?? 0, ny: end.ny ?? 0 },
+      pins, null, cosmetics.slack);
+    this.previewGeometry = { start, end, pins };
+    if (rebuild || !group.firstElementChild) {
+      group.innerHTML = threadStrokes({ d, cosmetics, start: aimedStart, end: aimedEnd });
+      return;
+    }
+    group.querySelectorAll(".jn-thread-layer").forEach(line => line.setAttribute("d", d));
+    updateThreadTails([...group.querySelectorAll(".jn-thread-tail")], aimedStart, aimedEnd);
   }
 
   #endLinkPreview() {
     this.previewPath?.remove();
     this.previewPath = null;
+    this.previewGeometry = null;
     this.previewPin?.remove();
     this.previewPin = null;
   }
@@ -2855,7 +2816,7 @@ export default class JournalCanvas {
     this.#syncPinSelection();
     this.#syncLinkSelection();
     for (const [id, el] of this.cardEls) el.classList.toggle("selected", this.selectedNoteIds.has(id));
-    this.#syncLinkToolbar();
+    this.#syncFloatingToolbar();
     this.#syncFloatingToolbar();
     this.callbacks.onSelectNote(primary);
   }
@@ -2933,12 +2894,130 @@ export default class JournalCanvas {
     this.contextMenu.innerHTML = "";
   }
 
+  // --- Wheel style shortcuts ------------------------------------------------------------------
+
+  /** "pen" while a thread is being drawn, "link" over the selected thread, otherwise null. */
+  #wheelStyleTarget(ev) {
+    if (this.readOnly) return null;
+    if (this.pinInteraction?.mode === "thread") return "pen";
+    const hit = ev.target.closest?.(".jn-link-hit, .jn-pin-link-hit");
+    if (hit && this.selectedLinkId && hit.dataset.id === this.selectedLinkId) return "link";
+    return null;
+  }
+
+  #wheelStyle(ev, scope) {
+    const steps = wheelSteps(ev);
+    if (!steps) return;
+    const options = { alt: ev.altKey, steps };
+    if (scope === "pen") {
+      const pen = this.#getPen();
+      const fields = wheelAdjust(pen.current, options);
+      this.#setPen(updatePenStyle(pen, fields));
+      this.#showWheelHint(ev, fields);
+      return;
+    }
+    const link = this.linksById.get(this.selectedLinkId);
+    if (!link) return;
+    const now = Date.now();
+    let edit = this.wheelEdit;
+    // A burst of notches is one edit: it keeps a running value (the document round trip lags)
+    // and is written at most every 120 ms, plus once more when the burst ends.
+    if (!edit || edit.id !== link.id || now - edit.touched > 600) {
+      edit = this.wheelEdit = {
+        id: link.id, values: { ...resolveLinkCosmetics(link) }, pending: {}, last: 0, timer: null, touched: now
+      };
+    }
+    const fields = wheelAdjust(edit.values, options);
+    Object.assign(edit.values, fields);
+    Object.assign(edit.pending, fields);
+    edit.touched = now;
+    this.#showWheelHint(ev, fields);
+    const flush = () => {
+      edit.timer = null;
+      if (!Object.keys(edit.pending).length) return;
+      const pending = edit.pending;
+      edit.pending = {};
+      edit.last = Date.now();
+      const current = this.linksById.get(edit.id);
+      if (!current) return;
+      if (current.boardPinLink) this.callbacks.onBoardPinAction?.({ type: "updateLink", linkId: current.id, fields: pending });
+      else this.callbacks.onUpdateLink?.(current.sourceId, current.id, pending);
+    };
+    if (now - edit.last >= 120) flush();
+    else if (edit.timer === null) {
+      edit.timer = this.root.ownerDocument.defaultView.setTimeout(flush, 120 - (now - edit.last));
+    }
+  }
+
+  /** A small readout beside the cursor so a wheel adjustment is never blind. */
+  #showWheelHint(ev, fields) {
+    const win = this.root.ownerDocument.defaultView;
+    let hint = this.wheelHint;
+    if (!hint?.isConnected) {
+      hint = this.wheelHint = this.root.ownerDocument.createElement("div");
+      hint.className = "jn-wheel-hint";
+      hint.setAttribute("role", "status");
+      this.root.append(hint);
+    }
+    hint.textContent = "slack" in fields
+      ? `${t("JN.Link.Slack")} ${Math.round(fields.slack * 100)}%`
+      : `${t("JN.Link.Thickness")} ${fields.thickness.toFixed(1)} px`;
+    const bounds = this.root.getBoundingClientRect();
+    hint.style.left = `${ev.clientX - bounds.left + 16}px`;
+    hint.style.top = `${ev.clientY - bounds.top + 16}px`;
+    hint.hidden = false;
+    win.clearTimeout(this.wheelHintTimer);
+    this.wheelHintTimer = win.setTimeout(() => { hint.hidden = true; }, 800);
+  }
+
+  // --- Edge pan -------------------------------------------------------------------------------
+
+  /** True while a pin drag (new thread or moving a pin) may auto-scroll the camera. */
+  #edgePanWanted() {
+    return !!this.pinInteraction && (this.pinInteraction.mode === "thread" || this.pinInteraction.mode === "move");
+  }
+
+  #startEdgePan() {
+    if (this.edgePanFrame !== null && this.edgePanFrame !== undefined) return;
+    const win = this.root.ownerDocument.defaultView;
+    if (!win?.requestAnimationFrame || !this.#edgePanWanted() || !this.lastPointer) return;
+    const rect = this.root.getBoundingClientRect();
+    const velocity = edgePanVelocity(this.lastPointer.x, this.lastPointer.y, rect);
+    if (!velocity.x && !velocity.y) return;
+    this.edgePanFrame = win.requestAnimationFrame(() => this.#edgePanTick());
+  }
+
+  #edgePanTick() {
+    this.edgePanFrame = null;
+    // A detached canvas must never keep scrolling a camera nobody can see.
+    if (!this.root.isConnected || !this.#edgePanWanted() || !this.lastPointer) return;
+    const rect = this.root.getBoundingClientRect();
+    const velocity = edgePanVelocity(this.lastPointer.x, this.lastPointer.y, rect);
+    if (!velocity.x && !velocity.y) return;
+    // Velocity already points the way the world should slide (opposite the pointer).
+    this.view.x += velocity.x;
+    this.view.y += velocity.y;
+    this.#applyTransform();
+    // The pointer has not moved but the world under it has: redraw the drag from the same
+    // screen point so the thread (or pin) follows the camera.
+    this.#updatePinInteraction({ clientX: this.lastPointer.x, clientY: this.lastPointer.y });
+    this.#startEdgePan();
+  }
+
+  #stopEdgePan() {
+    if (this.edgePanFrame === null || this.edgePanFrame === undefined) return;
+    this.root.ownerDocument.defaultView.cancelAnimationFrame(this.edgePanFrame);
+    this.edgePanFrame = null;
+  }
+
   togglePinTool() {
     if (this.readOnly) return this.#warnReadOnly();
     this.pinTool = !this.pinTool;
     this.root.classList.toggle("jn-placing-pin", this.pinTool);
     this.callbacks.onPinToolChange?.(this.pinTool);
     if (!this.pinTool) this.#cancelPinInteraction();
+    // With the tool armed and nothing selected the right panel edits the pen.
+    this.#syncFloatingToolbar();
   }
 
   deactivatePinTool() {
@@ -3028,6 +3107,7 @@ export default class JournalCanvas {
   #cancelPinInteraction({ pending = false } = {}) {
     if (!this.pinInteraction) return;
     this.#cancelPinDragFrame();
+    this.#stopEdgePan();
     const ghost = this.pinInteraction.ghost;
     this.pinInteraction = null;
     if (!pending) this.pinOverride = null;
@@ -3048,9 +3128,7 @@ export default class JournalCanvas {
     const point = this.#toWorld(ev.clientX, ev.clientY, state.rect);
     if (state.mode === "thread") {
       const start = this.#pinPoint(state.sourceRef);
-      if (start && this.previewPath) this.previewPath.setAttribute("d", pinnedThreadPath(
-        { ...start, nx: 0, ny: 0 }, { ...point, nx: 0, ny: 0 }, []
-      ).path);
+      if (start && this.previewPath) this.#paintPreview({ ...start, nx: 0, ny: 0 }, { ...point, nx: 0, ny: 0 });
     } else {
       this.pinOverride = { ref: state.sourceRef, point: { ...point, nx: 0, ny: 0, movable: true } };
       for (const pin of this.root.querySelectorAll("[data-pin-ref]")) {
@@ -3097,7 +3175,9 @@ export default class JournalCanvas {
         this.#cancelPinInteraction();
         return;
       }
-      this.callbacks.onBoardPinAction?.({ type: "connect", source: state.sourceRef, target });
+      this.callbacks.onBoardPinAction?.({
+        type: "connect", source: state.sourceRef, target, style: penCreateFields(this.#getPen())
+      });
     }
     this.#cancelPinInteraction();
   }
@@ -3349,7 +3429,7 @@ export default class JournalCanvas {
     if (!start || !this.previewPin || !this.previewPath) return;
     this.previewPin.setAttribute("cx", start.x - start.nx * THREAD_PIN_RADIUS);
     this.previewPin.setAttribute("cy", start.y - start.ny * THREAD_PIN_RADIUS);
-    this.previewPath.setAttribute("d", pinnedThreadPath(start, cursor, this.linkPlacement.pins).path);
+    this.#paintPreview(start, cursor, this.linkPlacement.pins);
   }
 
   #pinElement(noteId, anchorId) {
@@ -3567,7 +3647,7 @@ export default class JournalCanvas {
 
     this.root.addEventListener("click", ev => {
       if (isProtectedUiTarget(ev.target)) return;
-      if (ev.button !== 0 || ev.target.closest(`.jn-context-menu, .jn-link-toolbar, .jn-floating-toolbar, .jn-floating-popover, .jn-selection-bar, .jn-route-chooser, ${PATCH_NOTES_SELECTOR}, input, textarea`)) return;
+      if (ev.button !== 0 || ev.target.closest(`.jn-context-menu, .jn-floating-toolbar, .jn-floating-popover, .jn-selection-bar, .jn-route-chooser, ${PATCH_NOTES_SELECTOR}, input, textarea`)) return;
       if (!this.linkPlacement) return;
       ev.preventDefault();
       ev.stopPropagation();
@@ -3662,6 +3742,14 @@ export default class JournalCanvas {
       if (ev.target.closest(".jn-route-chooser")) return;
       if (ev.target.closest(".jn-floating-toolbar, .jn-floating-popover")) return;
       if (ev.target.closest(".jn-card input, .jn-card textarea") && !ev.ctrlKey) return;
+      // Style shortcuts: while drawing a thread the wheel sets the pen's thickness (Alt: hang);
+      // over the selected thread it does the same to that thread. Everywhere else it zooms.
+      const wheelTarget = this.#wheelStyleTarget(ev);
+      if (wheelTarget) {
+        ev.preventDefault();
+        this.#wheelStyle(ev, wheelTarget);
+        return;
+      }
       ev.preventDefault();
       this.#closeContextMenu();
       this.#zoomAt(ev.clientX, ev.clientY, this.view.k * Math.exp(-ev.deltaY * 0.0015));
@@ -3740,13 +3828,12 @@ export default class JournalCanvas {
       if (ev.target.closest(".jn-floating-toolbar, .jn-floating-popover, .jn-selection-bar")) return;
       if (!this.linkPlacement && !ev.altKey
           && ev.target.closest(".jn-note-body a[href], .jn-note-body input[type=\"checkbox\"]")) return;
-      if (this.linkPlacement && ev.button === 0 && !ev.target.closest(".jn-context-menu, .jn-link-toolbar, input, textarea")) {
+      if (this.linkPlacement && ev.button === 0 && !ev.target.closest(".jn-context-menu, input, textarea")) {
         ev.preventDefault();
         lastBoardClick = null;
         return;
       }
       if (ev.target.closest(".jn-card input, .jn-card textarea")) return;
-      if (ev.target.closest(".jn-link-toolbar")) return;
       if (ev.target.closest(".jn-context-menu")) return;
       // A plain press does not become a gesture yet: no pointer capture, no preventDefault,
       // so the browser still delivers the native click/dblclick to the card text. Capture is
@@ -3870,6 +3957,8 @@ export default class JournalCanvas {
     });
 
     this.root.addEventListener("pointermove", ev => {
+      this.lastPointer = { x: ev.clientX, y: ev.clientY };
+      if (this.pinInteraction) this.#startEdgePan();
       if (this.pinInteraction) {
         // Do not call elementFromPoint during a pin drag: it can force a synchronous layout
         // before the ghost's new transform is painted. The target under the captured pointer is
@@ -3990,7 +4079,7 @@ export default class JournalCanvas {
         this.view.x = drag.vx + dx;
         this.view.y = drag.vy + dy;
         this.#applyTransform();
-        this.#syncLinkToolbar();
+        this.#syncFloatingToolbar();
       } else if (drag.type === "selection") {
         this.#showSelectionBox(drag.sx, drag.sy, ev.clientX, ev.clientY);
       }
@@ -4185,7 +4274,7 @@ export default class JournalCanvas {
           this.lastLinkClick = null;
           this.selectedLinkId = null;
           this.#syncLinkSelection();
-          this.#syncLinkToolbar();
+          this.#syncFloatingToolbar();
         } else {
           this.#highlightLabels([]);
           this.lastLinkClick = { id: drag.id, at: now };
@@ -4195,7 +4284,7 @@ export default class JournalCanvas {
           for (const el of this.cardEls.values()) el.classList.remove("selected");
           this.#syncLinkSelection();
           this.callbacks.onSelectNote(null);
-          this.#syncLinkToolbar();
+          this.#syncFloatingToolbar();
         }
       } else if (drag.type === "selection") {
         this.#finishSelection(drag, ev.clientX, ev.clientY);

@@ -681,75 +681,9 @@
 }
 .jn-canvas .jn-thread-mask-shape.jn-thread-mask-active {
   fill: var(--jn-sc-thread-fade-fill, #262626);
-}
+}/* --- Link toolbar: screen-space, independent appearance controls --------------------------- */
 
-/* --- Link toolbar: screen-space, independent appearance controls --------------------------- */
 
-.jn-canvas .jn-link-toolbar {
-  flex-wrap: wrap;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 4px;
-  width: min(420px, 92vw);
-  max-width: 92vw;
-  padding: 7px;
-}
-.jn-canvas .jn-link-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 5px;
-}
-.jn-canvas .jn-link-toolbar .jn-link-presets button {
-  flex: 1 1 auto;
-  font-size: 11px;
-  padding: 4px 6px;
-}
-.jn-canvas .jn-link-field {
-  display: flex;
-  flex: 1 1 110px;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  color: var(--jn-muted);
-  font-size: 10px;
-  letter-spacing: .02em;
-}
-.jn-canvas .jn-link-field output {
-  color: var(--jn-text);
-  font-variant-numeric: tabular-nums;
-}
-.jn-canvas .jn-link-toolbar select {
-  min-width: 0;
-  padding: 4px 6px;
-  border: 1px solid var(--jn-line);
-  border-radius: 6px;
-  background: var(--jn-bg);
-  color: var(--jn-text);
-}
-.jn-canvas .jn-link-toolbar input[type="range"] {
-  width: 100%;
-  margin: 0;
-  accent-color: var(--jn-acc);
-}
-.jn-canvas .jn-link-toolbar .jn-link-label-input { flex: 1 1 120px; width: auto; }
-.jn-canvas .jn-link-actions { justify-content: flex-end; }
-.jn-canvas .jn-link-toolbar .jn-link-swatch-default {
-  /* "" means "use the theme's default dye" (currently thread dye 1). A two-tone chip keeps it
-     visually distinct from the explicit link1 swatch even when both resolve to that same dye. */
-  background: linear-gradient(135deg,
-    var(--jn-sc-thread-1, var(--jn-link-1, #b85d4d)) 0 50%,
-    var(--jn-sc-thread-accent, #d8c49d) 50% 100%);
-}
-.jn-canvas .jn-link-toolbar .jn-link-swatch-link1 { background: var(--jn-link-1); }
-.jn-canvas .jn-link-toolbar .jn-link-swatch-link2 { background: var(--jn-link-2); }
-.jn-canvas .jn-link-toolbar .jn-link-swatch-link3 { background: var(--jn-link-3); }
-.jn-canvas .jn-link-toolbar .jn-link-secondary-default {
-  background: var(--jn-sc-thread-accent, #d8c49d);
-}
-.jn-canvas .jn-link-toolbar .jn-link-secondary-link1 { background: var(--jn-link-1); }
-.jn-canvas .jn-link-toolbar .jn-link-secondary-link2 { background: var(--jn-link-2); }
-.jn-canvas .jn-link-toolbar .jn-link-secondary-link3 { background: var(--jn-link-3); }
 
 @media (prefers-reduced-motion: reduce) {
   .jn-canvas .jn-thread-mask-shape {
@@ -1348,6 +1282,70 @@
 .jn-ft-preset:hover {
   border-color: #e4c07a;
 }
+.jn-ft-preset-row {
+  display: inline-flex;
+  align-items: stretch;
+}
+.jn-ft-preset-row .jn-ft-preset { border-radius: 6px; }
+.jn-ft-preset-row.on .jn-ft-preset { border-color: #e4c07a; box-shadow: inset 0 0 0 1px #e4c07a; }
+.jn-ft-preset-row .jn-ft-preset-delete + .jn-ft-preset,
+.jn-ft-preset-row:has(.jn-ft-preset-delete) .jn-ft-preset {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.jn-ft-preset-delete {
+  padding: 0 7px;
+  border: 1px solid #55432f;
+  border-left: 0;
+  border-radius: 0 6px 6px 0;
+  background: #241d16;
+  color: #cdbfa9;
+  cursor: pointer;
+}
+.jn-ft-preset-delete:hover,
+.jn-ft-preset-delete:focus-visible { color: #ff9c8c; border-color: #e4c07a; }
+.jn-ft-sub {
+  display: block;
+  margin: 8px 0 4px;
+  color: #cdbfa9;
+  font-size: 0.85em;
+}
+.jn-ft-save {
+  display: flex;
+  gap: 5px;
+  margin-top: 8px;
+}
+.jn-ft-save .jn-ft-preset-name { flex: 1 1 auto; min-width: 0; }
+.jn-ft-preset-save,
+.jn-ft-action {
+  padding: 5px 8px;
+  border: 1px solid #55432f;
+  border-radius: 6px;
+  background: #241d16;
+  color: #ece0cc;
+  cursor: pointer;
+  text-align: left;
+}
+.jn-ft-preset-save:hover,
+.jn-ft-action:hover { border-color: #e4c07a; }
+.jn-ft-actions { display: grid; gap: 5px; }
+.jn-ft-action.danger { color: #ff9c8c; }
+.jn-ft-action.jn-link-reveal,
+.jn-ft-action.jn-link-hide { color: var(--jn-gm, #c9a7ff); }
+.jn-ft-action.jn-link-hint-toggle.on { background: var(--jn-hint, #e4c07a); color: #1b140d; }
+.jn-wheel-hint {
+  position: absolute;
+  z-index: 40;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(27, 20, 13, 0.92);
+  color: #ece0cc;
+  font: 600 12px system-ui;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.jn-wheel-hint[hidden] { display: none; }
+.jn-pen-panel { min-width: 230px; }
 .jn-ft-note {
   margin: 0;
   color: #cdbfa9;
@@ -1425,4 +1423,49 @@
 .jn-canvas .jn-card-profile .jn-note-body h1.jn-note-title,
 .jn-canvas .jn-card-profile .jn-note-body .jn-profile-caption {
   text-align: center;
+
+/* --- Stamps: rubber-stamp ink ----------------------------------------------------------------
+ * Stamps are big, flat ink impressions rather than wax discs. The bundled glyph supplies only
+ * the shape (its alpha); colour comes from the stamp's stored colour, deepened toward a dark ink,
+ * and multiplied into the paper so the note's text and grain show through. A second, noisy mask
+ * leaves the uneven coverage of a real pad. Stored colour values are unchanged. */
+.jn-canvas .jn-stamp {
+  --jn-ink: color-mix(in srgb, var(--jn-seal-color, #b85347) 62%, #1b0f08);
+  --jn-ink-noise: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n' x='0' y='0' width='100%25' height='100%25'><feTurbulence type='fractalNoise' baseFrequency='.07 .09' numOctaves='3' seed='5' stitchTiles='stitch'/><feColorMatrix type='matrix' values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 -9 7.4'/></filter><rect width='160' height='160' filter='url(%23n)'/></svg>");
+  box-sizing: border-box;
+  display: block;
+  width: 108px;
+  height: 108px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  /* The <img> art is pushed out of its own box (clipped) so only the masked colour shows. */
+  object-fit: none;
+  object-position: 300% 300%;
+  background: var(--jn-ink);
+  box-shadow: none;
+  mask-image: var(--jn-stamp-url), var(--jn-ink-noise);
+  mask-size: contain, 160px 160px;
+  mask-repeat: no-repeat, repeat;
+  mask-position: center, 0 0;
+  mask-composite: intersect;
+  -webkit-mask-composite: source-in;
+  mix-blend-mode: multiply;
+  opacity: .96;
+  transform: rotate(var(--jn-stamp-tilt, -6deg));
+  cursor: pointer;
+}
+.jn-canvas .jn-stamp.jn-stamp-private { border: 0; opacity: .6; }
+
+/* Attached stamps hang off the corner and land on the paper like a real impression. */
+.jn-canvas .jn-card-stamps { bottom: -16px; right: -10px; z-index: 4; }
+.jn-canvas .jn-card[data-seal-corner^="top-"] .jn-card-stamps { top: -16px; bottom: auto; }
+.jn-canvas .jn-card[data-seal-corner$="-left"] .jn-card-stamps { left: -10px; right: auto; }
+/* Ink sits over the text instead of pushing it aside. */
+.jn-canvas .jn-card[data-seal-corner] .jn-card-title,
+.jn-canvas .jn-card.jn-being-edited[data-seal-corner] .jn-card-title { padding-left: 0; padding-right: 0; }
+.jn-canvas .jn-card-stamps .jn-stamp.jn-label-selected,
+.jn-canvas .jn-label .jn-stamp.jn-label-selected {
+  outline: 2px dashed var(--jn-acc);
+  outline-offset: 2px;
 }

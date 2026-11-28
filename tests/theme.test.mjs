@@ -55,10 +55,10 @@ test("stylized uses the reference materials and emits the complete token contrac
 
   for (const name of STYLIZED_TOKENS) assert.ok(name in vars, `${name} missing`);
 
-  assert.equal(vars["--jn-sc-cork"], "#7b5233");
+  assert.equal(vars["--jn-sc-cork"], "#5f4230");
   assert.equal(vars["--jn-sc-cork-size"], "320px");
   assert.match(vars["--jn-sc-cork-tile"], /^url\(".*assets\/stylized\/cork\.svg"\)$/);
-  assert.equal(vars["--jn-sc-board-border"], "#5a402d");
+  assert.equal(vars["--jn-sc-board-border"], "#3f2c20");
   assert.equal(vars["--jn-sc-board-radius"], "8px");
   assert.match(vars["--jn-sc-board-light"], /^rgba\(255, 225, 160, 0\.12\)$/);
   assert.equal(vars["--jn-sc-board-vignette"], "rgba(8, 4, 0, 0.55)");
@@ -517,7 +517,7 @@ test("applyTheme writes data attributes and custom properties for the stylized p
   assert.equal(root.dataset.boardPattern, "none");
   assert.equal(root.style.values["--jn-bg"], "#e7ddc6");
   assert.equal(root.style.values["--jn-style-sticky-surface"], "#f6e6a6");
-  assert.equal(root.style.values["--jn-sc-cork"], "#7b5233");
+  assert.equal(root.style.values["--jn-sc-cork"], "#5f4230");
   assert.equal(root.style.values["--jn-sc-paper-memo"], "#ead9b4");
 });
 

@@ -26,6 +26,9 @@ import { clientSessionId } from "../edit-session.mjs";
 import { resolveSkin } from "../skins/registry.mjs";
 import { promptImageSource } from "./image-dialog.mjs";
 import { toggleTaskListItem } from "../markdown.mjs";
+import { getLinkPen, setLinkPen } from "../pen-store.mjs";
+import { applyPenPreset, removePenPreset, savePenPreset } from "../link-pen.mjs";
+import { bindPresetList, renderPresetList } from "./pen-presets-ui.mjs";
 
 /** The saved theme choice, resolved to a registered theme. `scene` is generated on demand. */
 async function resolveThemeChoice(id) {
@@ -182,6 +185,40 @@ export function collectCopyableNotes(notes, ids, isLocked = () => false) {
   };
 }
 
+/** The link-style menu that sits beside the Pin tool: default look, built-in and own presets. */
+function penMenuMarkup(className, disabled = false) {
+  const label = t("JN.Pen.Menu");
+  return `<details class="jn-toolbar-dropdown jn-pen-menu ${className}">
+    <summary class="jn-toolbar-icon" ${tooltipAttrs(label)}${disabled ? " inert" : ""}>
+      <i class="fa-solid fa-bezier-curve" aria-hidden="true"></i></summary>
+    <div class="jn-toolbar-panel jn-pen-panel">
+      <div class="jn-menu-heading">${t("JN.Pen.Title")}</div>
+      <div class="jn-pen-body"></div>
+      <p class="jn-ft-note">${t("JN.Pen.Hint")}</p>
+    </div>
+  </details>`;
+}
+
+/** Fills and rebinds the pen menu each time it opens, so it always shows the live pen. */
+function bindPenMenu(root, className) {
+  const details = root.querySelector(`.${className}`);
+  if (!details) return;
+  const body = details.querySelector(".jn-pen-body");
+  const esc = text => foundry.utils.escapeHTML(String(text ?? ""));
+  const builtInLabel = id => t(`JN.Link.Preset.${id.charAt(0).toUpperCase()}${id.slice(1)}`);
+  const draw = () => {
+    const pen = getLinkPen();
+    body.innerHTML = renderPresetList({ pen, current: pen.current, builtInLabel, t, esc });
+    bindPresetList(body, {
+      apply: id => { setLinkPen(applyPenPreset(getLinkPen(), id)); draw(); },
+      save: name => { setLinkPen(savePenPreset(getLinkPen(), name)); draw(); },
+      remove: id => { setLinkPen(removePenPreset(getLinkPen(), id)); draw(); }
+    });
+  };
+  details.addEventListener("toggle", () => { if (details.open) draw(); });
+  draw();
+}
+
 const { ApplicationV2 } = foundry.applications.api;
 
 /**
@@ -321,6 +358,10 @@ export default class JournalApp extends ApplicationV2 {
       requestWrite({ type: "moveCardAnchor", noteId, anchorId, x, y }),
     onRemoveCardAnchor: (noteId, anchorId) => requestWrite({ type: "removeCardAnchor", noteId, anchorId }),
     onBoardPinAction: action => requestWrite({ type: "boardPinAction", action }),
+    getLinkPen: () => getLinkPen(),
+    onLinkPenChange: pen => setLinkPen(pen),
+    // Route A keeps the original link and appends a main-pin waypoint; Route B is an atomic
+    // split whose undo id becomes usable only after the GM's writeApplied acknowledgement.
     onRouteNoteOnLink: (sourceId, linkId, noteId, mode, index, undoId) =>
       requestWrite({ type: "routeNoteOnLink", sourceId, linkId, noteId, mode, index, undoId }),
     onDetachRouteNote: (sourceId, linkId, noteId, undoId) =>
@@ -1563,6 +1604,7 @@ export default class JournalApp extends ApplicationV2 {
         ${toolbarButton("journalinator-new", "fa-note-sticky", t("JN.TopBar.NewNote"), offline)}
         ${toolbarButton("journalinator-add-label", "fa-font", t("JN.TopBar.AddLabel"), offline)}
         ${toolbarButton("journalinator-add-pin", "fa-thumbtack", t("JN.Pin.Tool"), offline, null, this.#canvas.pinTool)}
+        ${penMenuMarkup("journalinator-pen-menu", offline)}
       </div>
       <div class="jn-toolbar-group">
         <details class="jn-toolbar-dropdown journalinator-filters${this.#filterAuthors.size || this.#layoutFilter ? " on" : ""}">
@@ -1593,6 +1635,7 @@ export default class JournalApp extends ApplicationV2 {
         ${privatePage ? toolbarButton("journalinator-private-new", "fa-note-sticky", t("JN.TopBar.NewNote")) : ""}
         ${privatePage ? toolbarButton("journalinator-private-add-label", "fa-font", t("JN.TopBar.AddLabel")) : ""}
         ${privatePage ? toolbarButton("journalinator-private-add-pin", "fa-thumbtack", t("JN.Pin.Tool"), false, null, this.#private.canvas.pinTool) : ""}
+        ${privatePage ? penMenuMarkup("journalinator-private-pen-menu") : ""}
       </div>
       <div class="jn-toolbar-group">
         <details class="jn-toolbar-dropdown journalinator-filters${this.#layoutFilter ? " on" : ""}">
@@ -1912,6 +1955,8 @@ export default class JournalApp extends ApplicationV2 {
       this.#canvas.addLabelButton();
     });
     root.querySelector(".journalinator-add-pin")?.addEventListener("click", () => this.#canvas.togglePinTool());
+    bindPenMenu(root, "journalinator-pen-menu");
+    bindPenMenu(root, "journalinator-private-pen-menu");
 
     root.querySelector(".journalinator-trash")?.addEventListener("click", () => {
       if (this.#view === "private") this.#private.openTrash();

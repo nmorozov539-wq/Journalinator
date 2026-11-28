@@ -1953,7 +1953,10 @@ async function handleMessage(message, senderUserId) {
         const targetNotes = pinRefNoteIds(action.target, pins);
         if (!unlockedOrReject([...sourceNotes, ...targetNotes], senderUserId)) return;
         const linkId = foundry.utils.randomID();
-        pinLinks[linkId] = normalizePinLink({ source: action.source, target: action.target });
+        // The sender's pen style is untrusted input like everything else: normalizePinLink keeps
+        // only the whitelisted cosmetic fields and re-validates every value.
+        pinLinks[linkId] = normalizePinLink(
+          { source: action.source, target: action.target }, action.style);
         await layout.update({ "system.pinLinks": pinLinks });
         fireThreadCreated({
           noteId: sourceNotes[0] ?? "",

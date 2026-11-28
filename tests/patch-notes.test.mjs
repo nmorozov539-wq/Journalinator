@@ -68,9 +68,9 @@ test("the module changelog covers every released version from 0.8.0", () => {
     "the rewrite section is intentionally pre-release and does not bump the module version");
   const released = sections.filter(section => section.id !== "unreleased");
   const versions = released.filter(section => section.version).map(section => section.version);
-  assert.equal(latestPatchNoteId(released), "v0.9.6");
+  assert.equal(latestPatchNoteId(released), "v0.9.7");
   for (const expected of ["0.8.0", "0.8.1", "0.8.2", "0.8.3", "0.8.4",
-    "0.9.0", "0.9.1", "0.9.2", "0.9.3", "0.9.4", "0.9.5", "0.9.6"]) {
+    "0.9.0", "0.9.1", "0.9.2", "0.9.3", "0.9.4", "0.9.5", "0.9.6", "0.9.7"]) {
     assert.ok(versions.includes(expected), `missing ${expected}`);
   }
   assert.ok(versions.every(version => compareVersions(version, "0.8.0") >= 0));

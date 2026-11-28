@@ -5,7 +5,8 @@ const coordinates = point => `${point.x} ${point.y}`;
 /** Experimental thread bounds and the approved configurator presets. */
 export const THREAD_THICKNESS = Object.freeze({ min: 0.8, max: 5, initial: 2.6 });
 export const THREAD_SLACK = Object.freeze({ min: 0, max: 0.25, initial: 0.09 });
-export const THREAD_MAX_SAG = 100;
+/** A thread's sag can never exceed this share of its span, whatever the slack. */
+export const THREAD_MAX_SAG_RATIO = 0.4;
 
 export const THREAD_PRESETS = (() => {
   const presets = {
@@ -104,13 +105,34 @@ function aim(anchor, toward) {
   return { ...anchor, nx: dx / distance, ny: dy / distance };
 }
 
+/**
+ * How far a hanging thread's midpoint sits from the straight line between its ends.
+ *
+ * A rope held at two points hangs in a catenary, which for the sags used here is
+ * indistinguishable from a parabola with a vertical axis. So the midpoint drops straight down
+ * by `span * slack` for a horizontal thread, and the same rule scales smoothly for diagonal
+ * ones (the drop is the horizontal share of the span times the slack). A near-vertical thread
+ * has no horizontal share to hang from, so it bows sideways instead of turning into a ruler;
+ * the side is fixed by geometry (never by which end is the source), so swapping endpoints
+ * cannot flip it.
+ */
+export function hangOffset(start, end, slack = THREAD_SLACK.initial) {
+  const dx = end.x - start.x, dy = end.y - start.y;
+  const span = Math.hypot(dx, dy);
+  if (!span) return { x: 0, y: 0 };
+  const depth = Math.min(span * THREAD_MAX_SAG_RATIO, span * clampThreadSlack(slack));
+  const horizontal = Math.abs(dx) / span;
+  let nx = -dy / span, ny = dx / span;
+  if (ny < -1e-9 || (Math.abs(ny) <= 1e-9 && nx < 0)) { nx = -nx; ny = -ny; }
+  const bow = depth * (1 - horizontal) * 0.5;
+  return { x: nx * bow, y: depth * horizontal + ny * bow };
+}
+
 function restPoint(start, end, slack = THREAD_SLACK.initial) {
-  // Gravity bends an outstretched thread by a fraction of its horizontal span. A vertical
-  // thread has no horizontal span and therefore hangs straight.
-  const sag = Math.min(THREAD_MAX_SAG, Math.abs(end.x - start.x) * clampThreadSlack(slack));
+  const hang = hangOffset(start, end, slack);
   return {
-    x: interpolate(start.x, end.x, 0.5),
-    y: interpolate(start.y, end.y, 0.5) + sag
+    x: interpolate(start.x, end.x, 0.5) + hang.x,
+    y: interpolate(start.y, end.y, 0.5) + hang.y
   };
 }
 
@@ -163,9 +185,13 @@ export class ThreadMotion {
 }
 
 /**
- * Draws the whole thread as a continuous curve. The endpoint tangents still follow the socket
- * normals (so pins meet their sides cleanly), but there is no straight lead-in segment that
- * would make the link visibly snap straight as it approaches a nearby card.
+ * Draws one span as a single quadratic curve, i.e. a parabola, which is what a hanging thread
+ * looks like. The curve passes exactly through `center` (the settled rest point plus any live
+ * spring displacement), so labels, masks and the spring keep their meaning: for a quadratic,
+ * the control point is `2 * center - chordMidpoint`.
+ *
+ * The end normals point along the curve's own end tangents (toward the control point), which is
+ * what pin heads and loose tails need to sit naturally on a hanging thread.
  */
 export function threadPath(start, end, motion, slack) {
   const fallbackSlack = motion?.slack ?? THREAD_SLACK.initial;
@@ -174,23 +200,14 @@ export function threadPath(start, end, motion, slack) {
   const rest = slack === undefined
     ? (motion?.rest ?? restPoint(start, end, fallbackSlack))
     : restPoint(start, end, slack);
-  // A pin is a point, not an edge port. Aim each end toward the other end so a
-  // thread may cross a note to reach a pin on its far side.
-  start = aim(start, end);
-  end = aim(end, start);
+  const center = offset(rest, motion?.x ?? 0, motion?.y ?? 0);
+  const mid = { x: interpolate(start.x, end.x, 0.5), y: interpolate(start.y, end.y, 0.5) };
+  const control = { x: 2 * center.x - mid.x, y: 2 * center.y - mid.y };
   const span = Math.hypot(end.x - start.x, end.y - start.y);
   const lead = Math.min(22, span * 0.24);
-  const reach = Math.min(74, span * 0.22);
-  const a = offset(start, start.nx * lead, start.ny * lead);
-  const b = offset(end, end.nx * lead, end.ny * lead);
-  const center = offset(rest, motion?.x ?? 0, motion?.y ?? 0);
-  const tx = (b.x - a.x) * 0.18, ty = (b.y - a.y) * 0.18;
-  const c1 = offset(start, start.nx * reach, start.ny * reach);
-  const c2 = offset(center, -tx, -ty);
-  const c3 = offset(center, tx, ty);
-  const c4 = offset(end, end.nx * reach, end.ny * reach);
-  const path = `M${coordinates(start)} C${coordinates(c1)} ${coordinates(c2)} ${coordinates(center)}`
-    + ` C${coordinates(c3)} ${coordinates(c4)} ${coordinates(end)}`;
+  start = aim(start, control);
+  end = aim(end, control);
+  const path = `M${coordinates(start)} Q${coordinates(control)} ${coordinates(end)}`;
   return { path, center, lead, start, end };
 }
 

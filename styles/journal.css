@@ -2674,54 +2674,14 @@ input.jn-task-checkbox:disabled { cursor: default; }
 }
 
 .jn-link-preview {
-  fill: none;
-  stroke: var(--jn-acc);
-  stroke-width: 2;
-  stroke-dasharray: 6 5;
   pointer-events: none;
+  opacity: 0.85;
 }
 .jn-links .jn-board-pin[data-pin-index] {
   pointer-events: all;
   cursor: grab;
 }
 .jn-links .jn-board-pin[data-pin-index]:active { cursor: grabbing; }
-
-.jn-link-toolbar {
-  position: absolute;
-  display: none;
-  gap: 5px;
-  align-items: center;
-  padding: 5px;
-  z-index: 11;
-  background: var(--jn-panel);
-  border: 1px solid var(--jn-line);
-  border-radius: 10px;
-  box-shadow: 0 8px 20px color-mix(in srgb, var(--jn-shadow) 44%, transparent);
-  flex-direction: column;
-  max-width: min(340px, calc(100% - 12px));
-  max-height: calc(100% - 12px);
-  overflow: auto;
-}
-.jn-link-toolbar input {
-  width: 100px;
-  background: var(--jn-bg);
-  color: var(--jn-text);
-  border: 1px solid var(--jn-line);
-  border-radius: 6px;
-  padding: 4px 6px;
-}
-.jn-link-toolbar button {
-  background: var(--jn-bg);
-  color: var(--jn-text);
-  border: 1px solid var(--jn-line);
-  border-radius: 6px;
-  padding: 4px 7px;
-  cursor: pointer;
-  min-width: 28px;
-}
-.jn-link-toolbar button:hover {
-  border-color: var(--jn-acc);
-}
 .jn-link-colors {
   display: flex;
   gap: 4px;
@@ -2732,14 +2692,86 @@ input.jn-task-checkbox:disabled { cursor: default; }
   min-width: 18px;
   border-radius: 50%;
 }
-.jn-link-toolbar .jn-link-swatch-default { background: var(--jn-thread); }
-.jn-link-toolbar .jn-link-swatch-link1 { background: var(--jn-link-1); }
-.jn-link-toolbar .jn-link-swatch-link2 { background: var(--jn-link-2); }
-.jn-link-toolbar .jn-link-swatch-link3 { background: var(--jn-link-3); }
 .jn-link-color.on {
   border: 2px solid var(--jn-text);
 }
 
+
+/* --- GM tier (spec §14) ------------------------------------------------------------------- */
+
+.jn-gm-controls {
+  display: flex;
+  gap: 6px;
+  margin-left: 4px;
+  padding-left: 8px;
+  border-left: 1px solid var(--jn-line);
+}
+.jn-gm-controls button {
+  background: var(--jn-bg);
+  color: var(--jn-gm);
+  border: 1px solid color-mix(in srgb, var(--jn-gm) 45%, var(--jn-line));
+  border-radius: 6px;
+  padding: 5px 9px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.jn-gm-controls button:hover {
+  border-color: var(--jn-gm);
+}
+
+/* Secret notes: dashed GM-colored outline and a "GM" ribbon. */
+.jn-card.jn-secret {
+  outline: 2px dashed var(--jn-gm);
+  outline-offset: 3px;
+}
+.jn-card.jn-secret::after {
+  content: "GM";
+  position: absolute;
+  bottom: -9px; left: 10px;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--jn-gm);
+  color: var(--jn-on-accent);
+  font: 700 9px/15px system-ui;
+  letter-spacing: 0.05em;
+}
+.jn-card.jn-secret.selected {
+  outline: 2px solid var(--jn-acc);
+}
+.jn-card-torn.jn-secret::after,
+.jn-gm-view .jn-card-torn.jn-has-hidden:not(.jn-secret)::after {
+  bottom: 8px;
+}
+/* Shared notes that carry hidden blocks: a small marker only the GM view renders. */
+.jn-gm-view .jn-card.jn-has-hidden:not(.jn-secret)::after {
+  content: "+ hidden";
+  position: absolute;
+  bottom: -9px; left: 10px;
+  padding: 0 6px;
+  border-radius: 8px;
+  border: 1px dashed var(--jn-gm);
+  background: var(--jn-panel);
+  color: var(--jn-gm);
+  font: 600 9px/13px system-ui;
+}
+/* Hints are visible to everyone. */
+.jn-card.jn-hint {
+  box-shadow: 0 0 0 1px var(--jn-hint), 0 0 14px color-mix(in srgb, var(--jn-hint) 35%, transparent);
+}
+.jn-card.jn-hint .jn-card-title::before {
+  content: "\2726  ";
+  color: var(--jn-hint);
+}
+
+.jn-label.jn-label-hidden {
+  color: var(--jn-gm) !important;
+  border-bottom: 1px dashed var(--jn-gm);
+}
+.jn-link-gm-tag {
+  font: 700 10px system-ui;
+  color: var(--jn-gm);
+  padding: 0 4px;
+}
 
 /* Editor */
 .jn-gm-banner {
@@ -2821,4 +2853,11 @@ input.jn-task-checkbox:disabled { cursor: default; }
 .jn-image-browse {
   flex: none;
   white-space: nowrap;
+}
+
+/* GM markers shown in the thread actions popover */
+.jn-link-gm-tag {
+  font: 700 10px system-ui;
+  color: var(--jn-gm);
+  padding: 0 4px;
 }

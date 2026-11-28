@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   arrowHead, clampThreadSlack, clampThreadThickness, DEFAULT_THREAD_PRESET, looseTails, pinnedThreadPath,
-  ThreadMotion, threadLayerSpecs, threadPath, THREAD_PRESETS, THREAD_SLACK, THREAD_THICKNESS
+  hangOffset, ThreadMotion, threadLayerSpecs, threadPath, THREAD_PRESETS, THREAD_SLACK, THREAD_THICKNESS
 } from "../scripts/link-thread.mjs";
 
 const start = { x: 150, y: 90, nx: 1, ny: 0 };
@@ -36,16 +36,38 @@ test("thickness clamps to 0.8–5 px and slack to 0–25% of the horizontal span
   assert.equal(clampThreadSlack(0.19), 0.19);
 });
 
-test("default slack produces 9% sag, capped at 100 px, and a vertical thread hangs straight", () => {
+test("default slack hangs 9% of the span, uncapped, and a vertical thread bows sideways", () => {
   const short = threadPath({ ...start, x: 0 }, { ...end, x: 100 });
   close(short.center.y, 90 + 9);
   const long = threadPath({ ...start, x: 0 }, { ...end, x: 2000 });
-  close(long.center.y, 90 + 100);
+  close(long.center.y, 90 + 180, 1e-9);
   const vertical = threadPath(
     { x: 150, y: 90, nx: 0, ny: 1 },
     { x: 150, y: 300, nx: 0, ny: -1 }
   );
-  assert.deepEqual(vertical.center, { x: 150, y: 195 });
+  close(vertical.center.y, 195);
+  assert.ok(vertical.center.x > 150, "no horizontal share to hang from, so it bows to a fixed side");
+});
+
+test("a hanging thread is one parabola that passes through its center and leaves the ends steeply", () => {
+  const { path, center, start: s0, end: e0 } = threadPath(start, end);
+  assert.match(path, /^M150 90 Q\S+ \S+ 490 90$/);
+  // A quadratic's midpoint is (a + 2c + b) / 4; the control point must put it on `center`.
+  const [, cx, cy] = path.match(/Q(\S+) (\S+) /).map(Number);
+  close((150 + 2 * cx + 490) / 4, center.x);
+  close((90 + 2 * cy + 90) / 4, center.y);
+  assert.ok(s0.ny > 0.2 && e0.ny > 0.2, "both ends point down into the hang, not along the chord");
+  close(s0.nx, -e0.nx);
+});
+
+test("hang does not depend on which end is the source", () => {
+  const forward = hangOffset({ x: 0, y: 0 }, { x: 40, y: 300 }, 0.12);
+  const backward = hangOffset({ x: 40, y: 300 }, { x: 0, y: 0 }, 0.12);
+  close(forward.x, backward.x);
+  close(forward.y, backward.y);
+  assert.deepEqual(hangOffset({ x: 5, y: 5 }, { x: 5, y: 5 }, 0.2), { x: 0, y: 0 });
+  const slack = hangOffset({ x: 0, y: 0 }, { x: 400, y: 0 }, 0.25);
+  close(slack.y, 100);
 });
 
 test("a custom slack changes only the rest sag and keeps endpoints fixed", () => {
@@ -53,7 +75,7 @@ test("a custom slack changes only the rest sag and keeps endpoints fixed", () =>
   const loose = threadPath(start, end, undefined, 0.25);
   close(taut.center.y, 90 + 340 * 0.02);
   close(loose.center.y, 90 + 340 * 0.25);
-  assert.match(taut.path, /^M150 90 C/);
+  assert.match(taut.path, /^M150 90 Q/);
   assert.match(taut.path, / 490 90$/);
   assert.match(loose.path, / 490 90$/);
   assert.doesNotMatch(loose.path, /\sL/);
@@ -134,6 +156,6 @@ test("arrowHead stays exported for compatibility even though the canvas never re
 test("short links stay curved instead of turning into a straight lead near the target", () => {
   const near = threadPath(start, { x: 190, y: 90, nx: -1, ny: 0 });
   assert.doesNotMatch(near.path, /\sL/);
-  assert.match(near.path, / C/);
+  assert.match(near.path, / Q/);
   assert.notEqual(near.center.y, 90);
 });
