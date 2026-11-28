@@ -68,17 +68,24 @@ export function historyEntries({ note, snapshots = [], users = globalThis.game?.
   return entries;
 }
 
-function renderVersionBody(entry, note) {
+function renderVersionBody(entry, note, t = defaultT) {
+  const body = typeof entry?.body === "string" ? entry.body : "";
+  // An empty version is meaningful history (a pre-title checkpoint). Render an explicit
+  // empty-state instead of a blank, apparently broken pane. "#" alone renders to empty HTML
+  // through the document renderer, so judge the rendered result too.
+  const empty = () => `<p class="jn-history-empty">${escapeHTML(t("JN.Search.EmptyNote"))}</p>`;
+  if (!body.trim()) return empty();
   const layout = noteSnapshot(note).layout;
   try {
-    const rendered = renderNoteBody(entry.body, {
+    const rendered = renderNoteBody(body, {
       selectedLayout: layout,
       sanitizer: globalThis.foundry?.utils?.cleanHTML
     });
-    return rendered?.html ?? "";
+    const html = rendered?.html ?? "";
+    return html.trim() ? html : empty();
   } catch (error) {
     console.error("Journalinator: history preview render failed", error);
-    return `<pre>${escapeHTML(entry.body)}</pre>`;
+    return `<pre>${escapeHTML(body)}</pre>`;
   }
 }
 
@@ -220,7 +227,7 @@ export function createHistoryDialog({
       ? `<p class="jn-history-empty" style="opacity:0.8">${escapeHTML(t("JN.History.Empty"))}</p>`
       : "";
     previewEl.innerHTML = empty
-      + `<article class="jn-history-rendered">${renderVersionBody(entry, note)}</article>`;
+      + `<article class="jn-history-rendered">${renderVersionBody(entry, note, t)}</article>`;
   }
 
   function renderRestore() {

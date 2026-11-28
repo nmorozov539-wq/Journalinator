@@ -950,6 +950,58 @@ test("socket transport maps editor-session calls to the T4a commands", async () 
   assert.equal(Object.hasOwn(replies.at(-1), "body"), false);
 });
 
+test("Done and Escape send one begin/end even when the ended revocation arrives before the ack", async () => {
+  for (const how of ["done", "escape", "close"]) {
+    const hooks = makeHooks();
+    globalThis.Hooks = hooks;
+    let begins = 0;
+    let ends = 0;
+    let requests = 0;
+    const clock = makeClock();
+    const fake = new FakeTransport(clock);
+    const begin = fake.begin.bind(fake);
+    fake.begin = args => {
+      begins += 1;
+      return begin(args);
+    };
+    fake.endImpl = () => {
+      ends += 1;
+      // The server broadcasts noteEditRevoked(reason: "ended") before it replies.
+      hooks.callAll("journalinatorEditStateChanged", NOTE_ID, { lease: null });
+      return Promise.resolve({
+        type: "noteEditEnded",
+        revision: fake.note.revision,
+        released: true
+      });
+    };
+    const { editor } = await openEditor({
+      transport: fake,
+      editorOptions: { onRequestEdit: () => { requests += 1; } }
+    });
+    editor.activate();
+    try {
+      if (how === "done") {
+        click(editor, '[data-action="done"]');
+        // A second Done while the first close is in flight must not send a second end.
+        click(editor, '[data-action="done"]');
+      } else if (how === "escape") {
+        keydown(editor, "Escape");
+      } else {
+        void editor.close({ reason: "close" });
+      }
+      await settle();
+      assert.equal(begins, 1, `${how}: exactly one lease was acquired`);
+      assert.equal(ends, 1, `${how}: exactly one end was sent`);
+      assert.equal(requests, 0, `${how}: the ended revocation never re-opens the editor`);
+      assert.equal(editor.isEditing(), false);
+      assert.equal(editor.element.querySelector(".jn-source-input"), null);
+    } finally {
+      editor.deactivate();
+      globalThis.Hooks = undefined;
+    }
+  }
+});
+
 test("Done flushes a pending save before releasing the lease", async () => {
   let closed = null;
   const { editor, fake } = await openEditor({

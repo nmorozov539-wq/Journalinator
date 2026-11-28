@@ -228,6 +228,139 @@ test("a remotely locked note shows a badge, cannot be selected and offers GM unl
   } finally { cleanup(canvas); }
 });
 
+test("plain card presses defer pointer capture; editor controls and unlock keep their own events", async () => {
+  const note = await createNote({ body: "# Pointer" });
+  const canvas = mountCanvas([note]);
+  try {
+    const card = canvas.cardEls.get(note._id);
+    let captured = 0;
+    canvas.root.setPointerCapture = () => { captured += 1; };
+    const body = card.querySelector(".jn-note-body");
+
+    body.dispatchEvent(new MouseEvent("pointerdown", {
+      bubbles: true, cancelable: true, clientX: 10, clientY: 10, button: 0
+    }));
+    assert.equal(captured, 0, "a plain card press must not capture the pointer");
+
+    card.dispatchEvent(new MouseEvent("pointermove", {
+      bubbles: true, cancelable: true, clientX: 40, clientY: 40, button: 0
+    }));
+    assert.equal(captured, 1, "a real drag captures once the threshold is crossed");
+    card.dispatchEvent(new MouseEvent("pointerup", {
+      bubbles: true, cancelable: true, clientX: 40, clientY: 40, button: 0
+    }));
+
+    const editor = document.createElement("div");
+    editor.className = "jn-note-editor";
+    const tool = document.createElement("button");
+    tool.className = "jn-editor-tool";
+    let clicks = 0;
+    tool.addEventListener("click", () => { clicks += 1; });
+    editor.appendChild(tool);
+    card.appendChild(editor);
+    const selected = [...canvas.getSelectedNoteIds()];
+    tool.dispatchEvent(new MouseEvent("pointerdown", {
+      bubbles: true, cancelable: true, clientX: 20, clientY: 20, button: 0
+    }));
+    assert.equal(captured, 1, "editor presses are ignored by the canvas gesture path");
+    assert.deepEqual(canvas.getSelectedNoteIds(), selected);
+    tool.click();
+    assert.equal(clicks, 1);
+
+    lockNote(note._id, "Alex");
+    canvas.update([note], notesStore.getLayout());
+    const unlock = card.querySelector(".jn-lock-unlock");
+    unlock.dispatchEvent(new MouseEvent("pointerdown", {
+      bubbles: true, cancelable: true, clientX: 20, clientY: 20, button: 0
+    }));
+    assert.equal(captured, 1, "the GM unlock button keeps its native click");
+  } finally { cleanup(canvas); }
+});
+
+test("a canvas-retargeted double click opens the card under the point", async () => {
+  const note = await createNote({ body: "# Double click" });
+  const edits = [];
+  const canvas = mountCanvas([note], notesStore.getLayout(), {
+    onEditNote: (id, point) => edits.push([id, point])
+  });
+  const originalElementsFromPoint = document.elementsFromPoint;
+  try {
+    const card = canvas.cardEls.get(note._id);
+    document.elementsFromPoint = () => [card.querySelector(".jn-note-body"), card, canvas.root];
+    canvas.root.dispatchEvent(new MouseEvent("dblclick", {
+      bubbles: true, cancelable: true, clientX: 120, clientY: 80, button: 0
+    }));
+    assert.deepEqual(edits, [[note._id, { clientX: 120, clientY: 80 }]]);
+
+    const editor = document.createElement("div");
+    editor.className = "jn-note-editor";
+    card.appendChild(editor);
+    editor.dispatchEvent(new MouseEvent("dblclick", {
+      bubbles: true, cancelable: true, clientX: 120, clientY: 80, button: 0
+    }));
+    assert.equal(edits.length, 1, "editor double clicks never fall through to the board");
+  } finally {
+    if (originalElementsFromPoint === undefined) delete document.elementsFromPoint;
+    else document.elementsFromPoint = originalElementsFromPoint;
+    cleanup(canvas);
+  }
+});
+
+test("GM force-unlock is a single request, names the holder and refreshes the card", async () => {
+  const note = await createNote({ body: "# Force me" });
+  const lease = lockNote(note._id, "Alex");
+  const calls = [];
+  const canvas = mountCanvas([note], notesStore.getLayout(), {
+    requestEditReply: async message => {
+      calls.push(message);
+      if (message.type !== "forceUnlockNote") return { type: "timeout" };
+      editSession.consumeLease(note._id);
+      editSession.applyLeaseChanged({
+        type: "noteEditLeaseChanged",
+        noteId: note._id,
+        lease: null,
+        gmEpoch: editSession.authorityEpoch()
+      });
+      return { type: "noteEditForced", noteId: note._id, revision: 0 };
+    }
+  });
+  try {
+    const card = canvas.cardEls.get(note._id);
+    card.querySelector(".jn-lock-unlock").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(calls.map(call => call.type), ["forceUnlockNote"]);
+    assert.equal(dialogCalls.at(-1).window.title, "End Alex’s editing session?");
+    assert.equal(card.querySelector(".jn-lock-badge").hidden, true,
+      "noteEditForced refreshes the mirrored lock");
+    assert.equal(lease.noteId, note._id);
+  } finally { cleanup(canvas); }
+});
+
+test("force-unlock falls back to the user directory or Someone for a stale mirror", async () => {
+  const note = await createNote({ body: "# Stale mirror" });
+  const grant = editSession.grantLease({
+    noteId: note._id,
+    userId: editorUser.id,
+    userName: "",
+    clientSessionId: "remote-session"
+  });
+  editSession.applyLeaseChanged({
+    type: "noteEditLeaseChanged",
+    noteId: note._id,
+    lease: { ...grant.lease, userName: "" },
+    gmEpoch: editSession.authorityEpoch()
+  });
+  const canvas = mountCanvas([note], notesStore.getLayout(), {
+    requestEditReply: async () => ({ type: "timeout" })
+  });
+  try {
+    canvas.cardEls.get(note._id).querySelector(".jn-lock-unlock").click();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(dialogCalls.at(-1).window.title, "End Alex’s editing session?",
+      "the directory supplies a name when the lease mirror did not");
+  } finally { cleanup(canvas); }
+});
+
 test("free pins and unrelated unlocked notes stay usable beside a locked note", async () => {
   const a = await createNote({ body: "# A", x: 10, y: 20 });
   const b = await createNote({ body: "# B", x: 300, y: 20 });

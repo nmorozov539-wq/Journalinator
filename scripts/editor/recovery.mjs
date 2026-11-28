@@ -136,6 +136,11 @@ export function buildRecoveryDialog({
   element.dataset.kind = state.kind;
   element.tabIndex = -1;
 
+  // Fixed full-screen overlay plus a real panel. Without this the prompt was appended under
+  // the application/canvas and could be covered and pointer-blocked by the board.
+  const panel = document.createElement("div");
+  panel.className = "jn-recovery-panel";
+
   const title = document.createElement("h3");
   title.className = "jn-recovery-title";
   title.textContent = t("JN.Recovery.Title");
@@ -210,7 +215,8 @@ export function buildRecoveryDialog({
     onClick: () => finish("discard")
   }));
 
-  element.append(title, timestamp, body, actions);
+  panel.append(title, timestamp, body, actions);
+  element.append(panel);
 
   element.addEventListener("keydown", event => {
     if (event.key !== "Escape" || event.isComposing) return;

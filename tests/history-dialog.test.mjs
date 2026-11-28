@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { JSDOM } from "jsdom";
 import showdown from "showdown";
 
@@ -30,6 +31,7 @@ const STRINGS = {
   "JN.History.By": "Edited by {name}",
   "JN.History.Version": "Version",
   "JN.History.SelectVersion": "Select a version.",
+  "JN.Search.EmptyNote": "Empty note",
   "JN.Common.Close": "Close",
   "JN.Common.Cancel": "Cancel"
 };
@@ -121,6 +123,46 @@ test("dialog renders the list, current version and sanitized selected preview", 
   } finally {
     cleanup(dialog);
   }
+});
+
+test("an empty or title-only version renders an explicit empty preview, never a blank pane", () => {
+  const note = makeNote();
+  const extra = [
+    { id: "snap-title-only", at: Date.UTC(2026, 10, 26, 10), revision: 2, body: "#" },
+    { id: "snap-empty", at: Date.UTC(2026, 10, 25, 10), revision: 1, body: "" }
+  ];
+  const dialog = createHistoryDialog({
+    noteId: note._id,
+    note,
+    list: () => extra,
+    requestEditReply: async () => ({ type: "timeout" }),
+    recordPreRestore: async () => true,
+    users: userLookup,
+    t
+  });
+  dialog.open();
+  try {
+    assert.match(dialog.dialog.querySelector(".jn-history-preview").textContent, /Current/);
+    dialog.select(1);
+    assert.match(dialog.dialog.querySelector(".jn-history-preview").textContent, /Empty note/);
+    dialog.select(2);
+    assert.match(dialog.dialog.querySelector(".jn-history-preview").textContent, /Empty note/);
+    assert.ok(dialog.dialog.querySelector(".jn-history-rendered"));
+  } finally {
+    cleanup(dialog);
+  }
+});
+
+test("history CSS keeps the list/preview stacked and overflow-safe", () => {
+  const css = readFileSync(new URL("../styles/journal.css", import.meta.url), "utf8");
+  assert.match(css, /\.jn-history-overlay\s*\{[^}]*position:\s*fixed/s);
+  assert.match(css, /\.jn-history-dialog\s*\{[^}]*max-height:\s*calc\(100vh - 32px\)/s);
+  assert.match(css, /\.jn-history-body\s*\{[^}]*min-height:\s*0/s);
+  assert.match(css, /\.jn-history-list\s*\{[^}]*overflow:\s*auto/s);
+  assert.match(css, /\.jn-history-entry\s*\{[^}]*height:\s*auto/s);
+  assert.match(css, /\.jn-history-entry\s*\{[^}]*min-height:\s*44px/s);
+  assert.match(css, /\.jn-history-preview\s*\{[^}]*min-height:\s*180px/s);
+  assert.match(css, /\.jn-history-rendered\s*\{[^}]*min-height:\s*140px/s);
 });
 
 test("restore is disabled on current or a remote lock, with a visible reason", () => {

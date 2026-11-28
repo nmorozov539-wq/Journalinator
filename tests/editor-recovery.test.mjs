@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { JSDOM } from "jsdom";
 
 const dom = new JSDOM("<!doctype html><body></body>", { pretendToBeVisual: true });
@@ -14,7 +15,7 @@ const { default: NoteEditor, getTabSessionId, TAB_SESSION_ID_KEY } =
   await import("../scripts/app/editor.mjs");
 const { DraftStore } = await import("../scripts/editor/drafts.mjs");
 const { noteBodyHash } = await import("../scripts/editor/session.mjs");
-const { classifyDraft } = await import("../scripts/editor/recovery.mjs");
+const { classifyDraft, buildRecoveryDialog } = await import("../scripts/editor/recovery.mjs");
 
 const NOTE_ID = "Note000000000001";
 const SKIN = {
@@ -455,6 +456,53 @@ test("storage failure skips recovery and reports unavailable local copies", asyn
     env.editor.element.querySelector(".jn-editor-status-text").textContent,
     "Recovery copy unavailable in this browser."
   );
+});
+
+test("recovery is a fixed modal overlay with a panel and screen-sized actions", () => {
+  const dialog = buildRecoveryDialog({
+    state: {
+      kind: "different",
+      draft: { body: "draft text", at: Date.now() },
+      note: { body: "saved text", revision: 0 }
+    },
+    t
+  });
+  document.body.appendChild(dialog.element);
+  try {
+    assert.equal(dialog.element.className, "jn-recovery");
+    assert.equal(dialog.element.getAttribute("role"), "dialog");
+    const panel = dialog.element.querySelector(".jn-recovery-panel");
+    assert.ok(panel, "the dialog content lives in a real panel");
+    assert.ok(panel.querySelector(".jn-recovery-title"));
+    assert.deepEqual(
+      [...panel.querySelectorAll(".jn-recovery-action")].map(button => button.dataset.action),
+      ["recover", "copy", "discard"]
+    );
+  } finally {
+    dialog.element.remove();
+  }
+
+  const css = readFileSync(new URL("../styles/journal.css", import.meta.url), "utf8");
+  assert.match(css, /\.jn-recovery[^{]*\{[^}]*position:\s*fixed/s);
+  assert.match(css, /\.jn-recovery[^{]*\{[^}]*z-index:\s*10070/s);
+  assert.match(css, /\.jn-recovery-panel[^{]*\{[^}]*max-height:\s*calc\(100vh - 32px\)/s);
+  assert.match(css, /\.jn-recovery-action[^{]*\{[^}]*min-height:\s*32px/s);
+  assert.match(css, /@media \(pointer: coarse\)[\s\S]*?\.jn-recovery-action/);
+});
+
+test("editor toolbar chrome has complete screen-sized CSS at the real editor root", () => {
+  const css = readFileSync(new URL("../styles/journal.css", import.meta.url), "utf8");
+  assert.match(css, /\.jn-note-editor \.jn-editor-toolbar\s*\{[^}]*display:\s*flex/s);
+  assert.match(css, /\.jn-note-editor \.jn-editor-toolbar\s*\{[^}]*flex-wrap:\s*wrap/s);
+  assert.match(css, /\.jn-note-editor \.jn-editor-tool[^{]*\{[^}]*min-height:\s*var\(--jn-editor-control-height\)/s);
+  assert.match(css, /\.jn-note-editor \.jn-editor-subrow\s*\{[^}]*display:\s*flex/s);
+  assert.match(css, /\.jn-note-editor \.jn-editor-profile-helper[^{]*\{[^}]*max-width:/s);
+  assert.match(css, /\.jn-note-editor \.jn-editor-hint[^{]*\{[^}]*max-width:/s);
+  assert.match(css, /\.jn-note-editor \.jn-editor-add-title[^{]*\{[^}]*min-height:/s);
+  assert.match(css, /\.jn-note-editor \.jn-editor-menu[^{]*\{[^}]*position:\s*absolute/s);
+  assert.match(css, /\.jn-note-editor \.jn-editor-appearance\s*\{[^}]*width:/s);
+  assert.match(css, /@media \(pointer: coarse\)[\s\S]*?--jn-editor-control-height:\s*44px/);
+  assert.match(css, /\.jn-note-editor \.jn-source-title\s*\{/);
 });
 
 test("classifyDraft labels the recovery states deterministically", () => {

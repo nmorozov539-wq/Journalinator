@@ -16,6 +16,17 @@ export const HISTORY_SCHEMA_VERSION = 2;
 export const ACTIVITY_SCHEMA_VERSION = 2;
 
 const isObject = value => !!value && typeof value === "object" && !Array.isArray(value);
+const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+
+/**
+ * Keys that only the removed development formats ever wrote. A current v2 note model prunes
+ * these before the guard sees them, so their presence proves the source is legacy even if the
+ * loaded data model filled `schemaVersion` with its v2 default.
+ */
+export const LEGACY_NOTE_KEYS = Object.freeze([
+  "kind", "style", "label", "presentation", "blocks", "targetHeading", "image",
+  "actorRef", "formerNames", "hint", "contributions", "editCount"
+]);
 
 /**
  * Accept either a Foundry page (`.system`) or a raw system object.
@@ -33,6 +44,40 @@ function systemOf(value) {
   return value;
 }
 
+function isDocumentLike(value) {
+  return isObject(value) && (
+    typeof value.toObject === "function"
+    || isObject(value._source)
+    || typeof value.system?.toObject === "function"
+  );
+}
+
+/**
+ * True when a note source cannot be the current explicit v2 shape.
+ *
+ * `schemaVersion` must be present on the source object itself. Foundry data models apply
+ * `initial: 2` while constructing a Document, so a page stored without the field looks like
+ * v2 by the time the client reads it. The removed legacy keys catch that case when they are
+ * still present; a legacy core page also carries non-empty `text.content`, which current
+ * note creation never writes. None of this writes or repairs anything.
+ */
+function isLegacyNoteSource(note, page = null) {
+  if (!note) return true;
+  if (!hasOwn(note, "schemaVersion")) return true;
+  if (LEGACY_NOTE_KEYS.some(key => hasOwn(note, key))) return true;
+  if (isDocumentLike(page)) {
+    const source = isObject(page._source?.system) ? page._source.system : note;
+    if (!hasOwn(source, "schemaVersion")) return true;
+    // `authorId`/`createdAt` are required v2 fields with no model initial. A loaded legacy page
+    // therefore has `undefined` here even after Foundry fills `schemaVersion` with 2. (The test
+    // page model supplies empty-string/zero defaults, which still satisfy these type checks.)
+    if (typeof note.authorId !== "string" || !Number.isFinite(note.createdAt)) return true;
+    const text = page._source?.text?.content ?? page.text?.content;
+    if (typeof text === "string" && text.trim().length > 0) return true;
+  }
+  return false;
+}
+
 function hasCurrentSkin(skin) {
   return isObject(skin) && isPaper(skin.paper) && isFont(skin.font);
 }
@@ -46,7 +91,8 @@ function hasCurrentSkin(skin) {
 export function isCurrentNoteSystem(system) {
   const note = systemOf(system);
   if (!note) return false;
-  return note.schemaVersion === NOTE_SCHEMA_VERSION
+  return !isLegacyNoteSource(note, system)
+    && note.schemaVersion === NOTE_SCHEMA_VERSION
     && typeof note.body === "string"
     && Number.isInteger(note.revision) && note.revision >= 0
     && isLayout(note.layout)
@@ -65,6 +111,7 @@ export function isCurrentNoteSystem(system) {
 export function noteSchemaProblem(page) {
   const note = systemOf(page);
   if (!note || note.schemaVersion !== NOTE_SCHEMA_VERSION) return "legacy-schema";
+  if (isLegacyNoteSource(note, page)) return "legacy-schema";
   if (!Number.isInteger(note.revision) || note.revision < 0) return "legacy-schema";
   if (typeof note.body !== "string") return "missing-body";
   if (!isLayout(note.layout)) return "invalid-layout";

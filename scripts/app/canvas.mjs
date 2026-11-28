@@ -39,6 +39,25 @@ let threadMaskSequence = 0;
 const LINK_COLOR_OPTIONS = ["", ...LINK_COLOR_SLOTS];
 const CARD_CORNERS = Object.freeze([{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }]);
 const PATCH_NOTES_SELECTOR = ".jn-patch-notes, .jn-patch-notes-button";
+// Screen-level UI that must keep its own pointer/click/keyboard behaviour. `.jn-note-editor`
+// contains the whole in-place editor (toolbar, source, menus, hint), so one ancestor check
+// protects every editor control from card selection, dragging and pointer capture.
+const PROTECTED_UI_SELECTOR = [
+  ".jn-note-editor",
+  ".jn-source",
+  ".jn-recovery",
+  ".jn-history-overlay",
+  ".jn-history-dialog",
+  ".jn-image-dialog",
+  ".jn-floating-toolbar",
+  ".jn-floating-popover",
+  ".jn-selection-bar",
+  ".jn-lock-unlock"
+].join(", ");
+
+function isProtectedUiTarget(target) {
+  return !!target?.closest?.(PROTECTED_UI_SELECTOR);
+}
 // Screen-space radius for "dropped on a thread". Converted through zoom so it feels the same
 // near and far; no snapping happens before the explicit mode chooser is confirmed.
 const ROUTE_DROP_RADIUS = 18;
@@ -114,6 +133,10 @@ const LINK_TOOL_GROUPS = Object.freeze({
 export default class JournalCanvas {
   constructor(callbacks) {
     this.callbacks = callbacks;
+    // Hosts/tests may inject the lease command seam; production keeps the socket adapter.
+    this.requestEditReply = typeof callbacks.requestEditReply === "function"
+      ? callbacks.requestEditReply
+      : requestEditReply;
     this.threadMaskId = "jn-thread-mask-" + ++threadMaskSequence;
     this.view = { x: 0, y: 0, k: 1 };
     this.hasCentered = false;
@@ -1134,10 +1157,13 @@ export default class JournalCanvas {
   async #confirmUnlock(noteId) {
     if (!game.user?.isGM || !noteId) return false;
     const lease = getNoteEditor(noteId);
-    const rawName = String(lease?.userName ?? "").trim();
-    const name = rawName
-      ? (globalThis.foundry?.utils?.escapeHTML?.(rawName) ?? rawName)
-      : t("JN.Lock.Someone");
+    // The mirror carries `userName` from the lease broadcast. Older/stale mirrors may only
+    // have `userId`, so resolve that against the user directory before falling back. The
+    // dialog must name the actual holder; “someone” is only the last resort.
+    const directoryName = lease?.userId ? globalThis.game?.users?.get?.(lease.userId)?.name : "";
+    const rawName = String(lease?.userName || directoryName || "").trim();
+    // Foundry renders the dialog title as text, so keep the real name unescaped.
+    const name = rawName || t("JN.Lock.Someone");
     const DialogV2 = globalThis.foundry?.applications?.api?.DialogV2;
     let choice = null;
     if (DialogV2?.wait) {
@@ -1157,7 +1183,7 @@ export default class JournalCanvas {
       }) ? "unlock" : null;
     }
     if (choice !== "unlock") return false;
-    const reply = await requestEditReply({ type: "forceUnlockNote", noteId });
+    const reply = await this.requestEditReply({ type: "forceUnlockNote", noteId });
     if (reply?.type === "noteEditForced") {
       this.update(this.notes, this.layout);
     }
@@ -3501,6 +3527,9 @@ export default class JournalCanvas {
     let lastLabelClick = null;
     let lastCardClick = null;
     let lastBoardClick = null;
+    const capturePointer = ev => {
+      try { this.root.setPointerCapture(ev.pointerId); } catch { /* synthetic pointer */ }
+    };
 
     // Hover/editing fade is pure class toggling on the existing mask shapes. No path or DOM
     // rebuild happens here, so a busy board stays responsive.
@@ -3537,6 +3566,7 @@ export default class JournalCanvas {
     });
 
     this.root.addEventListener("click", ev => {
+      if (isProtectedUiTarget(ev.target)) return;
       if (ev.button !== 0 || ev.target.closest(`.jn-context-menu, .jn-link-toolbar, .jn-floating-toolbar, .jn-floating-popover, .jn-selection-bar, .jn-route-chooser, ${PATCH_NOTES_SELECTOR}, input, textarea`)) return;
       if (!this.linkPlacement) return;
       ev.preventDefault();
@@ -3545,6 +3575,7 @@ export default class JournalCanvas {
     }, { capture: true });
 
     this.root.addEventListener("click", ev => {
+      if (isProtectedUiTarget(ev.target)) return;
       const box = ev.target.closest(".jn-note-body input.jn-task-checkbox");
       if (!box) return;
       ev.preventDefault();
@@ -3559,6 +3590,7 @@ export default class JournalCanvas {
     });
 
     this.root.addEventListener("keydown", ev => {
+      if (isProtectedUiTarget(ev.target)) return;
       if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
       if ((ev.key === "Delete" || ev.key === "Backspace") && !ev.isComposing && !ev.ctrlKey && !ev.metaKey
           && !ev.altKey && !ev.shiftKey
@@ -3625,6 +3657,7 @@ export default class JournalCanvas {
     });
 
     this.root.addEventListener("wheel", ev => {
+      if (isProtectedUiTarget(ev.target)) return;
       if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
       if (ev.target.closest(".jn-route-chooser")) return;
       if (ev.target.closest(".jn-floating-toolbar, .jn-floating-popover")) return;
@@ -3635,6 +3668,10 @@ export default class JournalCanvas {
     }, { passive: false });
 
     this.root.addEventListener("pointerdown", ev => {
+      // The in-place editor, dialogs and floating toolbars live inside this root. Returning
+      // before any gesture/capture keeps their real clicks, double-clicks, text selection and
+      // caret placement intact instead of retargeting them to `.jn-canvas`.
+      if (isProtectedUiTarget(ev.target)) return;
       // Camera control owns the secondary button before card, pin, text and
       // toolbar hit testing. The browser menu is suppressed on this surface.
       if (ev.button === 2) {
@@ -3664,7 +3701,7 @@ export default class JournalCanvas {
           }
           state.press = { sx: ev.clientX, sy: ev.clientY, moved: 0,
             finish: state.mode === "thread" || state.mode === "move" && !same };
-          try { this.root.setPointerCapture(ev.pointerId); } catch { /* synthetic pointer */ }
+          // Capture is taken on the first real movement, not on a plain press.
           return;
         }
         if (hit.directPin && !this.readOnly) {
@@ -3683,7 +3720,6 @@ export default class JournalCanvas {
             press: { sx: ev.clientX, sy: ev.clientY, moved: 0 } };
           this.#startLinkPreview();
           this.#updatePinInteraction(ev);
-          try { this.root.setPointerCapture(ev.pointerId); } catch { /* synthetic pointer */ }
           return;
         }
         if (this.pinTool && !this.readOnly
@@ -3696,7 +3732,6 @@ export default class JournalCanvas {
           }
           drag = { type: "place-pin", sx: ev.clientX, sy: ev.clientY, moved: 0,
             noteId: hit.noteId };
-          try { this.root.setPointerCapture(ev.pointerId); } catch { /* synthetic pointer */ }
           return;
         }
       }
@@ -3713,11 +3748,12 @@ export default class JournalCanvas {
       if (ev.target.closest(".jn-card input, .jn-card textarea")) return;
       if (ev.target.closest(".jn-link-toolbar")) return;
       if (ev.target.closest(".jn-context-menu")) return;
-      if (ev.button === 0) ev.preventDefault();
+      // A plain press does not become a gesture yet: no pointer capture, no preventDefault,
+      // so the browser still delivers the native click/dblclick to the card text. Capture is
+      // taken once pointermove proves an actual drag (see the pointermove handler).
       this.root.focus({ preventScroll: true });
       this.#closeContextMenu();
       this.#clearRouteDrop();
-      try { this.root.setPointerCapture(ev.pointerId); } catch { /* no active pointer (e.g. synthetic event) */ }
       const cardEl = ev.target.closest(".jn-card");
       const cardLocked = cardEl ? this.#isLocked(cardEl.dataset.id) : false;
       const resizeHandle = this.readOnly || cardLocked ? null : ev.target.closest(".jn-card-resize");
@@ -3843,8 +3879,15 @@ export default class JournalCanvas {
         // follows the pointer and must not keep refreshing the board-menu suppression window.
         if (this.pinInteraction.press) this.#markPinGesture();
         const press = this.pinInteraction.press;
-        if (press) press.moved = Math.max(press.moved,
-          Math.abs(ev.clientX - press.sx) + Math.abs(ev.clientY - press.sy));
+        if (press) {
+          press.moved = Math.max(press.moved,
+            Math.abs(ev.clientX - press.sx) + Math.abs(ev.clientY - press.sy));
+          // A real pin gesture owns the pointer now; a click on the pin did not.
+          if (press.moved > DRAG_THRESHOLD && !press.captured) {
+            capturePointer(ev);
+            press.captured = true;
+          }
+        }
         this.#updatePinInteraction(ev);
         return;
       }
@@ -3873,6 +3916,12 @@ export default class JournalCanvas {
       if (!drag) return;
       const dx = ev.clientX - (drag.sx ?? ev.clientX), dy = ev.clientY - (drag.sy ?? ev.clientY);
       drag.moved = Math.max(drag.moved, Math.abs(dx) + Math.abs(dy));
+      // Only a real drag/resize/pin/pan gesture captures the pointer. Holding capture from
+      // pointerdown retargeted every later click and dblclick to the canvas root.
+      if (drag.moved > DRAG_THRESHOLD && !drag.captured) {
+        capturePointer(ev);
+        drag.captured = true;
+      }
 
       if (drag.type === "resize") {
         const el = this.cardEls.get(drag.id);
@@ -4167,6 +4216,7 @@ export default class JournalCanvas {
     this.root.addEventListener("pointerup", finishDrag);
     this.root.addEventListener("pointercancel", finishDrag);
     this.root.addEventListener("contextmenu", ev => {
+      if (isProtectedUiTarget(ev.target)) return;
       if (ev.target.closest(PATCH_NOTES_SELECTOR)) {
         ev.preventDefault();
         return;
@@ -4183,27 +4233,36 @@ export default class JournalCanvas {
     });
 
     this.root.addEventListener("dblclick", ev => {
+      if (isProtectedUiTarget(ev.target)) return;
       if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
       if (ev.target.closest(".jn-floating-toolbar, .jn-floating-popover")) return;
+      // Pointer capture used to retarget the native double click to `.jn-canvas`. Hit-test the
+      // screen point so the card text under the cursor still opens the editor, while editor,
+      // history, recovery and other modal surfaces never fall through to the board.
       const layers = this.root.ownerDocument.elementsFromPoint?.(ev.clientX, ev.clientY) ?? [ev.target];
+      if (layers.some(element => isProtectedUiTarget(element))) return;
       if (layers.some(element => element.closest?.("[data-pin-ref]"))
           || ev.target.closest("[data-pin-ref]")) return;
-      if (ev.target.closest("[data-stamp-label-id], .jn-label")) return;
-      if (ev.target.closest(".jn-card-resize")) {
+      if (layers.some(element => element.closest?.("[data-stamp-label-id], .jn-label"))
+          || ev.target.closest("[data-stamp-label-id], .jn-label")) return;
+      const layerCard = layers
+        .map(element => element.closest?.(".jn-card"))
+        .find(card => card && !isProtectedUiTarget(card));
+      const targetCard = ev.target.closest(".jn-card") ?? layerCard ?? null;
+      if (ev.target.closest(".jn-card-resize") || layers.some(element => element.closest?.(".jn-card-resize"))) {
         if (this.readOnly) return this.#warnReadOnly();
-        const cardEl = ev.target.closest(".jn-card");
-        const id = cardEl.dataset.id;
+        const id = targetCard?.dataset.id;
+        if (!id) return;
         if (this.#isLocked(id)) return this.#warnLocked();
         this.#previewAutomatic([id]);
         this.callbacks.onAutoSize?.([id]);
         return;
       }
-      const cardEl = ev.target.closest(".jn-card");
-      if (cardEl) {
+      if (targetCard) {
         if (this.readOnly) return this.#warnReadOnly();
-        if (this.#isLocked(cardEl.dataset.id)) return this.#warnLocked();
+        if (this.#isLocked(targetCard.dataset.id)) return this.#warnLocked();
         ev.preventDefault();
-        this.#requestEdit(cardEl.dataset.id, { clientX: ev.clientX, clientY: ev.clientY });
+        this.#requestEdit(targetCard.dataset.id, { clientX: ev.clientX, clientY: ev.clientY });
         return;
       }
       this.#openBoardMenu(ev, layers);

@@ -172,6 +172,10 @@ const STATUS_KEYS = {
 };
 
 const TERMINAL_STATES = new Set(["closed", "disposed"]);
+// States in which an editor must never ask the host to reopen/acquire again. A done/escape
+// close, a GM force-unlock and a lost lease all end the editing session; only a failed close
+// (offline/rejected) may leave it live for a retry.
+const ENDED_EDIT_STATES = new Set(["closed", "disposed", "leaseLost", "forced", "denied"]);
 
 export default class NoteEditor {
   /**
@@ -214,6 +218,8 @@ export default class NoteEditor {
     this._hookStateId = null;
     this._hookForcedId = null;
     this._onPageHide = null;
+    this._closing = false;
+    this._closePromise = null;
   }
 
   get element() {
@@ -386,7 +392,12 @@ export default class NoteEditor {
         if (this._session === session) this._handleSessionState(status);
       },
       onLeaseLost: () => {
-        if (this._session === session) this._onRequestEdit?.(this.noteId);
+        // A close in flight, a force-unlock and a lost lease are all terminal for this
+        // editor. Re-requesting editing here is what turned the server's own `ended`
+        // revocation into a second beginNoteEdit before noteEditEnded.
+        if (this._session !== session || this._closing) return;
+        if (ENDED_EDIT_STATES.has(session.state)) return;
+        this._onRequestEdit?.(this.noteId);
       },
       onSaved: reply => {
         if (this._session === session) this._handleSaved(reply);
@@ -465,20 +476,41 @@ export default class NoteEditor {
    * to have released a lease the editor no longer owns.
    */
   async close({ reason = "done" } = {}) {
+    // Done/Escape and the host's deactivate can overlap. One close owns the session; a
+    // second caller waits for that same end instead of sending another endNoteEdit.
+    if (this._closing) return this._closePromise;
     this._ui?.toolbar.closeTransient({ restoreFocus: false });
     const session = this._session;
     if (!session) {
       return { ok: true, type: "closed", released: false };
     }
 
+    this._closing = true;
+    this._closePromise = this._closeSession(session, reason);
+    try {
+      return await this._closePromise;
+    } finally {
+      this._closePromise = null;
+    }
+  }
+
+  async _closeSession(session, reason) {
     const localOnly = reason === "forced" || reason === "leaseLost";
-    const result = await session.close({ release: !localOnly });
+    let result;
+    try {
+      result = await session.close({ release: !localOnly });
+    } catch (error) {
+      // A failed close is retryable; do not leave the guard stuck on.
+      this._closing = false;
+      throw error;
+    }
     const ended = result?.type === "noteEditEnded"
       || result?.type === "closed"
       || (result?.ok === true && result?.released === false && TERMINAL_STATES.has(session.state));
     if (ended) {
       this._finishClose({ reason, result });
     } else {
+      this._closing = false;
       this._renderStatus(session.status());
     }
     return result;
@@ -1029,7 +1061,9 @@ export default class NoteEditor {
   // --- Lease changes ---------------------------------------------------------------------
 
   _handleEditStateChanged(noteId, state) {
-    if (!this._session || noteId !== (this.noteId ?? this._session.noteId)) return;
+    if (!this._session || this._closing) return;
+    if (ENDED_EDIT_STATES.has(this._session.state)) return;
+    if (noteId !== (this.noteId ?? this._session.noteId)) return;
     const lease = state?.lease ?? null;
     const mine = this._session.lease;
     if (!mine || (lease && lease.leaseToken === mine.leaseToken)) return;
@@ -1047,7 +1081,9 @@ export default class NoteEditor {
   }
 
   _handleForceUnlocked(payload) {
-    if (!this._session || payload?.noteId !== (this.noteId ?? this._session.noteId)) return;
+    if (!this._session || this._closing) return;
+    if (ENDED_EDIT_STATES.has(this._session.state)) return;
+    if (payload?.noteId !== (this.noteId ?? this._session.noteId)) return;
     this._session.applyLeaseLost("forced");
     this._renderStatus(this._session.status());
   }
@@ -1222,6 +1258,7 @@ export default class NoteEditor {
     this._ui = null;
     this._parsed = null;
     this._session = null;
+    this._closing = false;
     this._readOnly = true;
     this.noteId = null;
     this.root.replaceChildren();

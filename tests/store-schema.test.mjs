@@ -150,7 +150,47 @@ test("the schema guard is pure and bounded", () => {
     _source: { system: {} },
     system: valid
   }), "legacy-schema", "the raw stored source wins over model-filled defaults");
-  assert.equal(noteSchemaProblem({ _source: { system: valid }, system: { ...valid, body: 4 } }), null);
+  assert.equal(noteSchemaProblem({
+    _source: { system: { ...valid, authorId: gmUser.id, createdAt: 10, updatedAt: 20 } },
+    system: { ...valid, body: 4 }
+  }), null);
+
+  // A model-filled v2 default must not turn a page that never stored schemaVersion into v2.
+  const { schemaVersion: _omitted, ...withoutVersion } = valid;
+  assert.equal(noteSchemaProblem(page(withoutVersion)), "legacy-schema");
+  assert.equal(noteSchemaProblem({
+    id: "defaulted",
+    name: "jn-note-defaulted",
+    _source: { system: withoutVersion },
+    system: valid
+  }), "legacy-schema", "missing explicit version in the stored source is legacy");
+  assert.equal(noteSchemaProblem(page({ ...valid, schemaVersion: 1 })), "legacy-schema");
+  assert.equal(noteSchemaProblem(page({ ...valid, blocks: [], kind: "note" })), "legacy-schema");
+  assert.equal(noteSchemaProblem(page({ ...valid, style: "sticky" })), "legacy-schema");
+
+  // Foundry also defaulted schemaVersion=2 on the real legacy page in v14. The legacy core
+  // page text is the remaining stored marker; current note creation never writes it.
+  const legacyDocument = {
+    id: "LegacyNote",
+    name: "Legacy Note",
+    _source: { system: valid, text: { content: "# Legacy\n\nOld body" } },
+    system: valid
+  };
+  assert.equal(noteSchemaProblem(legacyDocument), "legacy-schema");
+  const v2Document = { ...valid, authorId: gmUser.id, createdAt: 10, updatedAt: 20 };
+  const currentDocument = {
+    id: "CurrentNote",
+    name: "jn-note-current",
+    _source: { system: v2Document, text: { content: "" } },
+    system: v2Document
+  };
+  assert.equal(noteSchemaProblem(currentDocument), null);
+  assert.equal(noteSchemaProblem({
+    id: "NoIdentity",
+    name: "jn-note-no-identity",
+    _source: { system: valid, text: { content: "" } },
+    system: valid
+  }), "legacy-schema", "defaulted v2 fields without v2 identity are still legacy");
 
   const current = worldSchemaStatus({
     notes: [page(valid)],
