@@ -16,7 +16,9 @@ socket.registerSocket();
 const layoutPage = containers.shared.pages.get(containers.ids.layoutPage);
 
 const skin = () => ({
-  paper: "amber", font: "default", torn: false, backgroundImage: null, tiltSeed: 0
+  // Cream has a zero tint tilt, so this file can assert plain top-center origin math;
+  // rotated-origin behavior is covered by sizing/creation tests.
+  paper: "cream", font: "default", torn: false, backgroundImage: null, tiltSeed: 0
 });
 
 function setUser(user) {
