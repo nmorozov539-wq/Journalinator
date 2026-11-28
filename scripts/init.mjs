@@ -4,6 +4,8 @@ import ActivityModel from "./data/activity-model.mjs";
 import HistoryModel from "./data/history-model.mjs";
 import { registerContainerSettings, ensureContainers, registerSidebarHiding } from "./store/containers.mjs";
 import { registerSocket } from "./socket.mjs";
+import { registerHistoryHooks } from "./history.mjs";
+import { registerActivityHooks } from "./activity.mjs";
 import { startEditExpiry, startEditResync } from "./edit-session.mjs";
 import JournalApp, { isRestoringSceneControl } from "./app/journal-app.mjs";
 import { shouldOpenSceneControl } from "./app/scene-control.mjs";
@@ -110,6 +112,8 @@ Hooks.once("ready", async () => {
     await privateStore.orphanMissingUsers();
   }
   registerSocket();
+  registerHistoryHooks();
+  registerActivityHooks();
   startEditExpiry();
   startEditResync();
   Hooks.callAll("journalinatorRegisterThemes", game.journalinator?.themes);
