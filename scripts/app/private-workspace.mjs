@@ -19,6 +19,7 @@ import { noteCreationPresentation, noteCreationStyle } from "./note-dialog.mjs";
 import { attachedStampIds, DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, stampUrl } from "../stamps.mjs";
 import { toggleTaskListItem } from "../markdown.mjs";
 import { t } from "../i18n.mjs";
+import { getLinkPen, setLinkPen } from "../pen-store.mjs";
 
 const { DialogV2 } = foundry.applications.api;
 const esc = text => foundry.utils.escapeHTML(String(text ?? ""));
@@ -88,6 +89,8 @@ export default class PrivateWorkspace {
       onMoveCardAnchor: (noteId, anchorId, x, y) => this.moveCardAnchor(noteId, anchorId, x, y),
       onRemoveCardAnchor: (noteId, anchorId) => this.removeCardAnchor(noteId, anchorId),
       onBoardPinAction: action => this.boardPinAction(action),
+      getLinkPen: () => getLinkPen(),
+      onLinkPenChange: pen => setLinkPen(pen),
       onSetPresentation: (ids, fields) => this.setNotesPresentation(ids, fields),
       onSetAttachment: (ids, fields) => this.setNotesAttachment(ids, fields)
     });
@@ -593,7 +596,7 @@ export default class PrivateWorkspace {
         if (Object.values(layout.pinLinks).some(link => link.source === action.source
             && link.target === action.target || link.source === action.target
             && link.target === action.source)) return;
-        layout.pinLinks[foundry.utils.randomID()] = normalizePinLink({ source: action.source, target: action.target });
+        layout.pinLinks[foundry.utils.randomID()] = normalizePinLink({ source: action.source, target: action.target }, action.style);
         return;
       }
       if (action.type === "updateLink" || action.type === "deleteLink") {

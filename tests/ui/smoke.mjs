@@ -1503,14 +1503,17 @@ test("link groups carry layered stroke stacks, cosmetics and state classes witho
     hit.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 20, clientY: 20 }));
     canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 20, clientY: 20 }));
     assert.ok(group("legacy").classList.contains("jn-link-selected"), "selection toggles an existing group");
-    const swatch = canvas.linkToolbar.querySelector(".jn-link-swatch-link1");
+    canvas.floatingToolbar.querySelector('.jn-ft-btn[data-group="color"]').click();
+    const swatch = canvas.floatingPopover.querySelector(".jn-ft-swatch-link1");
     assert.ok(swatch?.classList.contains("on"));
     assert.equal(swatch.getAttribute("style"), null, "swatch paint comes from a CSS variable");
     assert.equal(swatch.getAttribute("title"), "Link color 1");
     assert.equal(swatch.getAttribute("aria-label"), "Link color 1");
-    assert.equal(canvas.linkToolbar.querySelectorAll(".jn-link-preset").length, 4);
-    assert.equal(canvas.linkToolbar.querySelector(".jn-link-dir"), null);
-    assert.equal(canvas.linkToolbar.querySelector(".jn-link-dash"), null);
+    canvas.floatingToolbar.querySelector('.jn-ft-btn[data-group="presets"]').click();
+    assert.equal(canvas.floatingPopover.querySelectorAll(".jn-ft-preset-row .jn-ft-preset").length, 4,
+      "the four built-in presets");
+    assert.equal(canvas.floatingToolbar.querySelector(".jn-link-dir"), null);
+    assert.equal(canvas.floatingToolbar.querySelector(".jn-link-label-input"), null, "threads carry no text");
 
     canvas.setDimMatch(() => false);
     const dimmed = group("legacy");
@@ -1532,7 +1535,7 @@ test("link groups carry layered stroke stacks, cosmetics and state classes witho
   }
 });
 
-test("thread toolbar presets and controls commit exact, independent changes", () => {
+test("right-panel thread controls commit exact, independent changes and show live state", () => {
   const calls = [];
   const canvas = new JournalCanvas({
     onSelectNote() {},
@@ -1555,91 +1558,78 @@ test("thread toolbar presets and controls commit exact, independent changes", ()
     const hit = canvas.root.querySelector('.jn-link-hit[data-id="l"]');
     hit.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
     canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
-    const toolbar = canvas.linkToolbar;
-    const field = selector => toolbar.querySelector(selector);
-    assert.equal(toolbar.querySelector(".jn-link-dir"), null, "direction control removed");
-    assert.equal(toolbar.querySelector(".jn-link-dash"), null, "old line-style toggle removed");
+    const toolbar = canvas.floatingToolbar;
+    assert.ok(!toolbar.hidden, "selecting a thread shows the right panel");
+    assert.equal(canvas.root.querySelector(".jn-link-toolbar"), null, "the old floating link menu is gone");
+    assert.deepEqual([...toolbar.querySelectorAll(".jn-ft-btn")].map(button => button.dataset.group),
+      ["presets", "color", "thickness", "slack", "material", "pattern", "ends", "actions"]);
+    const open = group => {
+      toolbar.querySelector(`.jn-ft-btn[data-group="${group}"]`).click();
+      return canvas.floatingPopover;
+    };
+    const change = (el, value) => { el.value = value; el.dispatchEvent(new Event("change", { bubbles: true })); };
 
-    field('[data-preset="heavy"]').click();
+    let pop = open("presets");
+    pop.querySelector('[data-preset="heavy"]').click();
     assert.deepEqual(calls.at(-1), ["a", "l", {
-      material: "double", thickness: 4, slack: 0.19, pattern: "continuous", ends: "standard"
-    }]);
-    assert.equal(field(".jn-link-material").value, "double");
-    assert.equal(field(".jn-link-thickness").value, "4");
-    assert.equal(field(".jn-link-thickness-out").textContent, "4.0 px");
-    assert.equal(field(".jn-link-slack").value, "19");
-    assert.equal(field(".jn-link-slack-out").textContent, "19%");
-    assert.equal(field(".jn-link-pattern").value, "continuous");
-    assert.equal(field(".jn-link-ends").value, "standard");
+      material: "double", thickness: 4, slack: 0.19, pattern: "continuous", ends: "standard",
+      color: "", secondaryColor: "link1"
+    }], "a built-in preset sets the whole structural look and keeps the dyes");
+    assert.ok(canvas.floatingPopover.querySelector('[data-preset="heavy"]').closest(".jn-ft-preset-row").classList.contains("on"),
+      "the applied preset is marked");
+    pop = open("presets");
+    pop.querySelector('[data-preset="fine"]').click();
+    assert.deepEqual(calls.at(-1)[2].thickness, 1.3);
 
-    field('[data-preset="fine"]').click();
-    assert.deepEqual(calls.at(-1), ["a", "l", {
-      material: "linen", thickness: 1.3, slack: 0.02, pattern: "continuous", ends: "standard"
-    }]);
-    assert.equal(field(".jn-link-thickness-out").textContent, "1.3 px");
-    assert.equal(field(".jn-link-slack-out").textContent, "2%");
-
+    pop = open("thickness");
+    const thickness = pop.querySelector(".jn-ft-thickness");
+    assert.equal(thickness.value, "2.6", "the control reads the thread's current value, not the previous one");
     const count = calls.length;
-    const thickness = field(".jn-link-thickness");
     thickness.value = "3.3";
     thickness.dispatchEvent(new Event("input", { bubbles: true }));
     assert.equal(calls.length, count, "range input never writes per pixel/step");
-    assert.equal(field(".jn-link-thickness-out").textContent, "3.3 px");
+    assert.equal(pop.querySelector(".jn-ft-thickness-out").textContent, "3.3 px");
     thickness.dispatchEvent(new Event("change", { bubbles: true }));
     assert.deepEqual(calls.at(-1), ["a", "l", { thickness: 3.3 }]);
 
-    const slack = field(".jn-link-slack");
+    pop = open("slack");
+    const slack = pop.querySelector(".jn-ft-slack");
     slack.value = "25";
+    slack.dispatchEvent(new Event("input", { bubbles: true }));
+    assert.equal(pop.querySelector(".jn-ft-slack-out").textContent, "25%");
     slack.dispatchEvent(new Event("change", { bubbles: true }));
     assert.deepEqual(calls.at(-1), ["a", "l", { slack: 0.25 }], "slack stores a fraction");
-    assert.equal(field(".jn-link-slack-out").textContent, "2%", "readout waits for the next input");
-    slack.dispatchEvent(new Event("input", { bubbles: true }));
-    assert.equal(field(".jn-link-slack-out").textContent, "25%");
 
-    const material = field(".jn-link-material");
-    material.value = "double";
-    material.dispatchEvent(new Event("change", { bubbles: true }));
+    change(open("material").querySelector(".jn-ft-material"), "double");
     assert.deepEqual(calls.at(-1), ["a", "l", { material: "double" }]);
-
-    const pattern = field(".jn-link-pattern");
-    pattern.value = "alternating";
-    pattern.dispatchEvent(new Event("change", { bubbles: true }));
-    assert.deepEqual(calls.at(-1), ["a", "l", { pattern: "alternating" }]);
-
-    const ends = field(".jn-link-ends");
-    ends.value = "loose";
-    ends.dispatchEvent(new Event("change", { bubbles: true }));
+    change(open("ends").querySelector(".jn-ft-ends"), "loose");
     assert.deepEqual(calls.at(-1), ["a", "l", { ends: "loose" }]);
 
-    const label = field(".jn-link-label-input");
-    label.value = "Renamed";
-    label.dispatchEvent(new Event("change", { bubbles: true }));
-    assert.deepEqual(calls.at(-1), ["a", "l", { label: "Renamed" }]);
-
-    // Accent/secondary swatches are their own control group: they show the stored dye and
-    // write only `secondaryColor`, never the primary `color`.
-    const secondaryInitial = field(".jn-link-secondary-link1");
-    assert.ok(secondaryInitial, "accent swatch group exists");
-    assert.equal(toolbar.querySelectorAll(".jn-link-secondary").length, 4,
-      "accent group offers theme default plus link1-3");
-    assert.ok(secondaryInitial.classList.contains("on"), "current accent selection is shown");
-    assert.equal(secondaryInitial.getAttribute("aria-pressed"), "true");
-    assert.equal(secondaryInitial.getAttribute("title"), "Accent color 1");
-    const primaryBefore = field(".jn-link-swatch-link1").classList.contains("on");
-    field(".jn-link-secondary-link3").click();
+    pop = open("pattern");
+    assert.ok(pop.querySelector(".jn-ft-accent").hidden, "accent colors only matter for the alternating pattern");
+    change(pop.querySelector(".jn-ft-pattern"), "alternating");
+    assert.deepEqual(calls.at(-1), ["a", "l", { pattern: "alternating" }]);
+    assert.equal(pop.querySelector(".jn-ft-accent").hidden, false);
+    const accent = pop.querySelector(".jn-ft-accent .jn-ft-swatch-link1");
+    assert.ok(accent.classList.contains("on"), "current accent selection is shown");
+    assert.equal(accent.getAttribute("title"), "Accent color 1");
+    pop.querySelector(".jn-ft-accent .jn-ft-swatch-link3").click();
     assert.deepEqual(calls.at(-1), ["a", "l", { secondaryColor: "link3" }]);
-    field(".jn-link-secondary-default").click();
-    assert.deepEqual(calls.at(-1), ["a", "l", { secondaryColor: "" }],
-      "theme-default accent writes an empty slot");
-    assert.equal(field(".jn-link-swatch-link1").classList.contains("on"), primaryBefore,
-      "secondary click leaves the primary color untouched");
+    assert.ok(pop.querySelector(".jn-ft-accent .jn-ft-swatch-link3").classList.contains("on"),
+      "the open popover reflects the change immediately");
+    pop.querySelector(".jn-ft-accent .jn-ft-swatch-default").click();
+    assert.deepEqual(calls.at(-1), ["a", "l", { secondaryColor: "" }], "theme-default accent writes an empty slot");
+
+    pop = open("color");
+    pop.querySelector(".jn-ft-swatch-link2").click();
+    assert.deepEqual(calls.at(-1), ["a", "l", { color: "link2" }], "primary color writes only color");
   } finally {
     canvas.disconnectGeometry();
     canvas.root.remove();
   }
 });
 
-test("link toolbar focuses on open and closes on Escape or an outside pointerdown", () => {
+test("selected thread opens the right panel; Escape or an empty-board click closes it", () => {
   const canvas = new JournalCanvas({ onSelectNote() {}, onDeleteLink() {} });
   document.body.appendChild(canvas.root);
   const notes = [
@@ -1661,24 +1651,22 @@ test("link toolbar focuses on open and closes on Escape or an outside pointerdow
   try {
     canvas.update(notes, { cards: { a: { x: 0, y: 0 }, b: { x: 400, y: 0 } }, labels: {} });
     selectLink();
-    const toolbar = canvas.linkToolbar;
-    assert.equal(toolbar.style.display, "flex");
-    const first = toolbar.querySelector(".jn-link-preset");
-    assert.ok(first, "toolbar has controls");
-    assert.equal(document.activeElement, first, "opening the toolbar focuses its first control");
+    const toolbar = canvas.floatingToolbar;
+    assert.equal(toolbar.hidden, false, "selecting a thread shows the panel");
+    assert.ok(toolbar.querySelector(".jn-ft-btn"), "the panel has controls");
 
-    first.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
-    assert.equal(toolbar.style.display, "none", "Escape closes the toolbar");
-    assert.equal(canvas.selectedLinkId, null);
+    canvas.root.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    assert.equal(canvas.selectedLinkId, null, "Escape deselects the thread");
+    assert.equal(toolbar.hidden, true, "and hides the panel");
     assert.ok(canvas.root.contains(document.activeElement), "focus returns inside the canvas/card");
-    assert.equal(toolbar.contains(document.activeElement), false);
 
     canvas.lastLinkClick = null;
     selectLink();
-    assert.equal(toolbar.style.display, "flex", "toolbar reopens for the reselected link");
-    document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
-    assert.equal(toolbar.style.display, "none", "outside pointerdown closes the toolbar");
-    assert.equal(canvas.selectedLinkId, null);
+    assert.equal(toolbar.hidden, false, "the panel reopens for the reselected thread");
+    canvas.root.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 300, clientY: 400 }));
+    canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 300, clientY: 400 }));
+    assert.equal(canvas.selectedLinkId, null, "clicking the empty board deselects");
+    assert.equal(toolbar.hidden, true);
   } finally {
     canvas.disconnectGeometry();
     canvas.root.remove();
@@ -1897,7 +1885,7 @@ test("mixed GM-only multi-selection disables bulk cosmetics with an explanation"
   }
 });
 
-test("link selection shows only link controls and commits fields, labels and presets on change", () => {
+test("link selection shows only link controls and commits fields and presets on change", () => {
   const calls = [];
   const canvas = new JournalCanvas({
     onSelectNote() {},
@@ -1921,8 +1909,8 @@ test("link selection shows only link controls and commits fields, labels and pre
     const toolbar = canvas.floatingToolbar;
     const popover = canvas.floatingPopover;
     assert.deepEqual([...toolbar.querySelectorAll(".jn-ft-btn")].map(item => item.dataset.group),
-      ["material", "thickness", "slack", "color", "pattern", "ends", "label", "presets"],
-      "links never show note rendering controls");
+      ["presets", "color", "thickness", "slack", "material", "pattern", "ends", "actions"],
+      "links never show note rendering controls, and threads have no label control");
     const button = group => toolbar.querySelector(`.jn-ft-btn[data-group="${group}"]`);
     const open = group => {
       const trigger = button(group);
@@ -1966,21 +1954,12 @@ test("link selection shows only link controls and commits fields, labels and pre
     choose(".jn-ft-ends", "loose");
     assert.deepEqual(calls.at(-1), ["a", "l", { ends: "loose" }]);
 
-    open("label");
-    const beforeLabel = calls.length;
-    const label = popover.querySelector(".jn-ft-link-label");
-    label.value = "Renamed";
-    label.dispatchEvent(new Event("input", { bubbles: true }));
-    assert.equal(calls.length, beforeLabel, "labels do not write per keystroke");
-    label.dispatchEvent(new Event("change", { bubbles: true }));
-    assert.deepEqual(calls.at(-1), ["a", "l", { label: "Renamed" }]);
-
     open("presets");
     assert.equal(popover.querySelectorAll(".jn-ft-preset").length, 4);
     popover.querySelector('.jn-ft-preset[data-preset="heavy"]').click();
-    assert.deepEqual(calls.at(-1), ["a", "l", {
-      material: "double", thickness: 4, slack: 0.19, pattern: "continuous", ends: "standard"
-    }]);
+    const preset = calls.at(-1)[2];
+    assert.deepEqual([preset.material, preset.thickness, preset.slack, preset.pattern, preset.ends],
+      ["double", 4, 0.19, "continuous", "standard"]);
   } finally {
     canvas.disconnectGeometry();
     canvas.root.remove();
@@ -2249,7 +2228,6 @@ test("read-only link selection is inspect-only; disconnect closes overlays and r
 
     clickCanvasLink(canvas, "l");
     assert.equal(canvas.selectedLinkId, "l", "a read-only link is still inspectable");
-    assert.equal(canvas.linkToolbar.style.display, "none", "read-only link toolbar stays closed");
     assert.ok([...canvas.floatingToolbar.querySelectorAll(".jn-ft-btn")].every(button => button.disabled));
     clickCanvasLink(canvas, "l");
     assert.equal(calls.some(([name]) => name === "onDeleteLink"), false,
@@ -2263,7 +2241,6 @@ test("read-only link selection is inspect-only; disconnect closes overlays and r
     canvas.disconnectGeometry();
     assert.equal(canvas.floatingToolbar.hidden, true, "disconnect hides the floating toolbar");
     assert.equal(canvas.floatingPopover.hidden, true, "disconnect hides the popover");
-    assert.equal(canvas.linkToolbar.style.display, "none", "disconnect hides the link toolbar");
     assert.equal(canvas.windowResize, null, "the window resize listener is removed");
     assert.equal(canvas.rootResizeObserver, null, "the root resize observer is removed");
   } finally {
@@ -2382,10 +2359,10 @@ test("hover and editing fade only matching silhouettes without rebuilding thread
     const strokes = group.querySelector(".jn-link-strokes");
     const hit = canvas.root.querySelector('.jn-link-hit[data-id="ab"]');
     assert.equal(strokes.hasAttribute("mask"), false, "threads may cross notes");
-    assert.equal(group.hasAttribute("mask"), false, "pins and labels sit outside the fade mask");
+    assert.equal(group.hasAttribute("mask"), false, "pins sit outside the fade mask");
     assert.equal(strokes.querySelector(".jn-thread-pin"), null);
     assert.ok(group.querySelector(".jn-thread-pin"), "endpoint pins remain");
-    assert.ok(group.querySelector(".jn-link-label"), "label plaque remains");
+    assert.equal(group.querySelector(".jn-link-label"), null, "threads carry no label text");
     assert.equal(hit.hasAttribute("mask"), false, "hit path stays interactive");
     assert.ok(shape("a") && shape("b") && shape("torn"));
     assert.ok(shape("torn").getAttribute("points").split(" ").length > 4, "torn mask uses its polygon");
@@ -4095,8 +4072,8 @@ test("routed threads pass through main pins, ignore minor targets, and follow tr
     assert.ok(!startsAt(path(), minorPoint), "Route A never targets a minor pin");
     assert.ok(startsAt(path(), { x: 450, y: 210 }), "existing board pins stay in the path before the route");
     assert.equal(hit(), path(), "the hit path follows the routed geometry");
-    assert.equal(canvas.svg.querySelector('g[data-id="routelink"] .jn-link-label').textContent, "Via",
-      "labels remain on routed threads");
+    assert.equal(canvas.svg.querySelector('g[data-id="routelink"] .jn-link-label'), null,
+      "routed threads carry no text either");
     assert.ok(canvas.svg.querySelector('.jn-thread-mask-shape[data-note-id="routecardR000003"]'),
       "the routed note contributes its silhouette to the fade mask");
 
@@ -4125,13 +4102,16 @@ test("routed threads pass through main pins, ignore minor targets, and follow tr
       canvas.root.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 10, clientY: 10 }));
     };
     selectLink();
-    const clearPins = canvas.linkToolbar.querySelector(".jn-link-clear-pins");
+    const openActions = () => {
+      canvas.floatingToolbar.querySelector('.jn-ft-btn[data-group="actions"]').click();
+      return canvas.floatingPopover;
+    };
+    const clearPins = openActions().querySelector(".jn-link-clear-pins");
     assert.ok(clearPins, "a pinned thread offers a clear-pins action");
     clearPins.click();
     assert.deepEqual(cleared, [[aId, "routelink"]], "clear pins names the source and link only");
     canvas.lastLinkClick = null;
-    selectLink();
-    const detach = canvas.linkToolbar.querySelector(".jn-link-detach");
+    const detach = openActions().querySelector(".jn-link-detach");
     assert.ok(detach, "the selected routed thread offers a detach action");
     detach.click();
     assert.deepEqual(detached[0].slice(0, 3), [aId, "routelink", rId],
@@ -4264,7 +4244,7 @@ test("dropping a note near a thread previews a target and opens the chooser only
     pointer(canvas.root, "pointerup", drag.ex, drag.ey);
     assert.ok(canvas.routeChooser, "the chooser opens only after the drop");
     assert.equal(canvas.routeChooser.parentElement, canvas.root, "the chooser is a screen-space child of the canvas");
-    assert.equal(canvas.root.querySelector('g[data-id="droplink"] .jn-link-label').textContent, "Wire");
+    assert.equal(canvas.root.querySelector('g[data-id="droplink"] .jn-link-label'), null);
     assert.equal(canvas.root.querySelectorAll('.jn-link-hit[data-id="droplink"]').length, 1,
       "existing hit geometry remains available");
     assert.ok(calls.some(([name, id]) => name === "move" && id === rId), "the note move is committed first");
@@ -5840,14 +5820,15 @@ test("private canvas saves pin link settings, deletes pins, and creates chosen n
     assert.ok(hit);
     hit.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 400, clientY: 160 }));
     hit.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, button: 0, clientX: 400, clientY: 160 }));
-    assert.equal(canvas.linkToolbar.style.display, "flex");
-    const label = canvas.linkToolbar.querySelector(".jn-link-label-input");
-    label.value = "Private thread";
-    label.dispatchEvent(new Event("change", { bubbles: true }));
+    assert.ok(!canvas.floatingToolbar.hidden, "a private pin link opens the right panel too");
+    canvas.floatingToolbar.querySelector('.jn-ft-btn[data-group="thickness"]').click();
+    const thickness = canvas.floatingPopover.querySelector(".jn-ft-thickness");
+    thickness.value = "3.7";
+    thickness.dispatchEvent(new Event("change", { bubbles: true }));
     await settle();
-    assert.equal(workspace.workspace.layout.pinLinks[linkId].label, "Private thread");
+    assert.equal(workspace.workspace.layout.pinLinks[linkId].thickness, 3.7);
     workspace.setPage(page);
-    assert.equal(workspace.workspace.layout.pinLinks[linkId].label, "Private thread",
+    assert.equal(workspace.workspace.layout.pinLinks[linkId].thickness, 3.7,
       "private link settings survive reload");
     await workspace.boardPinAction({ type: "delete", ref: `p:${ownedId}` });
     workspace.setPage(page);

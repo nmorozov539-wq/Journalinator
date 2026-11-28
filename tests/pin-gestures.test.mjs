@@ -77,11 +77,13 @@ test("pin tool and all four pin gestures use distinct pointer transactions", asy
   assert.ok(canvas.root.querySelector(".jn-link-preview"), "thread appears on first press");
   event(source, "pointerup", 105, 20);
   event(canvas.root, "pointermove", 160, 70);
-  assert.ok(canvas.root.querySelector(".jn-link-preview")?.getAttribute("d")?.includes("160"),
+  assert.ok(canvas.root.querySelector(".jn-link-preview .jn-thread-layer")?.getAttribute("d")?.includes("160"),
     "thread follows the pointer with the button up");
   event(manual, "pointerdown", 67, 48);
   event(manual, "pointerup", 67, 48);
-  assert.deepEqual(actions.at(-1), { type: "connect", source: `n:${a.id}:main`, target: "p:manual1" });
+  const connect = actions.at(-1);
+  assert.deepEqual([connect.type, connect.source, connect.target], ["connect", `n:${a.id}:main`, "p:manual1"]);
+  assert.equal(connect.style.material, "linen", "a new link carries the pen's style");
   assert.equal(canvas.root.querySelector(".jn-link-preview"), null);
 
   const free = canvas.root.querySelector('[data-pin-ref="p:free1"]');
@@ -89,7 +91,8 @@ test("pin tool and all four pin gestures use distinct pointer transactions", asy
   event(manual, "pointerup", 67, 48);
   event(free, "pointerdown", 600, 300);
   event(free, "pointerup", 600, 300);
-  assert.deepEqual(actions.at(-1), { type: "connect", source: "p:manual1", target: "p:free1" },
+  const standalone = actions.at(-1);
+  assert.deepEqual([standalone.type, standalone.source, standalone.target], ["connect", "p:manual1", "p:free1"],
     "standalone pins start and receive connections");
   const countBeforeSelf = actions.length;
   event(source, "pointerdown", 105, 20);
@@ -101,7 +104,8 @@ test("pin tool and all four pin gestures use distinct pointer transactions", asy
   event(source, "pointerdown", 105, 20);
   event(canvas.root, "pointermove", 390, 60);
   event(cardB, "pointerup", 390, 60);
-  assert.deepEqual(actions.at(-1), { type: "connect", source: `n:${a.id}:main`, target: `n:${b.id}:main` },
+  const toBody = actions.at(-1);
+  assert.deepEqual([toBody.type, toBody.source, toBody.target], ["connect", `n:${a.id}:main`, `n:${b.id}:main`],
     "a drag released on note body uses its default pin");
 
   event(manual, "pointerdown", 67, 48);
@@ -410,8 +414,10 @@ test("pin Backspace removes attached connections while preserving text editing a
   assert.ok(hit);
   event(hit, "pointerdown", 500, 300);
   event(hit, "pointerup", 500, 300);
-  assert.equal(canvas.linkToolbar.style.display, "flex");
-  const thickness = canvas.linkToolbar.querySelector(".jn-link-thickness");
+  // The right panel is the only link inspector, and it must edit a link drawn between pins.
+  assert.ok(!canvas.floatingToolbar.hidden, "selecting a pin link opens the right panel");
+  canvas.floatingToolbar.querySelector('.jn-ft-btn[data-group="thickness"]').click();
+  const thickness = canvas.floatingPopover.querySelector(".jn-ft-thickness");
   thickness.value = "4.2";
   thickness.dispatchEvent(new Event("change", { bubbles: true }));
   await tick();
@@ -723,7 +729,7 @@ test("pin drag repaints attached threads and pin links in place before release",
   assert.equal(pinGroup.querySelector(".jn-thread-layer"), pinPath,
     "existing pin-link paths are updated in place");
   assert.ok(pinGroup.classList.contains("jn-link-material-linen"));
-  assert.equal(pinGroup.querySelector(".jn-link-label")?.textContent, "pin link");
+  assert.equal(pinGroup.querySelector(".jn-link-label"), null, "threads carry no text");
 
   event(canvas.root, "pointerup", sx, sy);
   assert.equal(actions.length, 1, "release emits one final move write");

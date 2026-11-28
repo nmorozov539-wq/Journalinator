@@ -5,10 +5,11 @@ import { resolveLinkCosmetics } from "./presentation.mjs";
 export const PIN_WORLD_LIMIT = 1000000;
 export const pinRef = (noteId, anchorId = MAIN_ANCHOR_ID) => `n:${noteId}:${anchorId}`;
 export const boardPinRef = id => `p:${id}`;
-const PIN_LINK_FIELDS = ["label", "color", "secondaryColor", "material", "thickness", "slack", "pattern", "ends"];
+// Threads carry no text any more: `label` is no longer writable. Stored labels are kept as data.
+const PIN_LINK_FIELDS = ["color", "secondaryColor", "material", "thickness", "slack", "pattern", "ends"];
 
 export function normalizePinLink(link, fields = {}) {
-  const changes = Object.fromEntries(PIN_LINK_FIELDS.filter(key => Object.hasOwn(fields, key))
+  const changes = Object.fromEntries(PIN_LINK_FIELDS.filter(key => fields && Object.hasOwn(fields, key))
     .map(key => [key, fields[key]]));
   const next = { ...link, ...changes };
   const cosmetics = resolveLinkCosmetics(next);

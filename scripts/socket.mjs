@@ -1860,7 +1860,10 @@ async function handleMessage(message, senderUserId) {
         if (Object.values(pinLinks).some(link => link.source === action.source
             && link.target === action.target || link.source === action.target
             && link.target === action.source)) return;
-        pinLinks[foundry.utils.randomID()] = normalizePinLink({ source: action.source, target: action.target });
+        // The sender's pen style is untrusted input like everything else: normalizePinLink keeps
+        // only the whitelisted cosmetic fields and re-validates every value.
+        pinLinks[foundry.utils.randomID()] = normalizePinLink(
+          { source: action.source, target: action.target }, action.style);
         await layout.update({ "system.pinLinks": pinLinks });
         return;
       }

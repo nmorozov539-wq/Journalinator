@@ -2124,54 +2124,14 @@ input.jn-task-checkbox:disabled { cursor: default; }
 }
 
 .jn-link-preview {
-  fill: none;
-  stroke: var(--jn-acc);
-  stroke-width: 2;
-  stroke-dasharray: 6 5;
   pointer-events: none;
+  opacity: 0.85;
 }
 .jn-links .jn-board-pin[data-pin-index] {
   pointer-events: all;
   cursor: grab;
 }
 .jn-links .jn-board-pin[data-pin-index]:active { cursor: grabbing; }
-
-.jn-link-toolbar {
-  position: absolute;
-  display: none;
-  gap: 5px;
-  align-items: center;
-  padding: 5px;
-  z-index: 11;
-  background: var(--jn-panel);
-  border: 1px solid var(--jn-line);
-  border-radius: 10px;
-  box-shadow: 0 8px 20px color-mix(in srgb, var(--jn-shadow) 44%, transparent);
-  flex-direction: column;
-  max-width: min(340px, calc(100% - 12px));
-  max-height: calc(100% - 12px);
-  overflow: auto;
-}
-.jn-link-toolbar input {
-  width: 100px;
-  background: var(--jn-bg);
-  color: var(--jn-text);
-  border: 1px solid var(--jn-line);
-  border-radius: 6px;
-  padding: 4px 6px;
-}
-.jn-link-toolbar button {
-  background: var(--jn-bg);
-  color: var(--jn-text);
-  border: 1px solid var(--jn-line);
-  border-radius: 6px;
-  padding: 4px 7px;
-  cursor: pointer;
-  min-width: 28px;
-}
-.jn-link-toolbar button:hover {
-  border-color: var(--jn-acc);
-}
 .jn-link-colors {
   display: flex;
   gap: 4px;
@@ -2182,10 +2142,6 @@ input.jn-task-checkbox:disabled { cursor: default; }
   min-width: 18px;
   border-radius: 50%;
 }
-.jn-link-toolbar .jn-link-swatch-default { background: var(--jn-thread); }
-.jn-link-toolbar .jn-link-swatch-link1 { background: var(--jn-link-1); }
-.jn-link-toolbar .jn-link-swatch-link2 { background: var(--jn-link-2); }
-.jn-link-toolbar .jn-link-swatch-link3 { background: var(--jn-link-3); }
 .jn-link-color.on {
   border: 2px solid var(--jn-text);
 }
@@ -2260,16 +2216,6 @@ input.jn-task-checkbox:disabled { cursor: default; }
 .jn-label.jn-label-hidden {
   color: var(--jn-gm) !important;
   border-bottom: 1px dashed var(--jn-gm);
-}
-
-.jn-link-toolbar .jn-link-reveal,
-.jn-link-toolbar .jn-link-hide {
-  color: var(--jn-gm);
-}
-.jn-link-toolbar .jn-link-hint-toggle.on {
-  color: var(--jn-on-accent);
-  background: var(--jn-hint);
-  border-color: var(--jn-hint);
 }
 .jn-link-gm-tag {
   font: 700 10px system-ui;
@@ -2362,4 +2308,11 @@ input.jn-task-checkbox:disabled { cursor: default; }
 .jn-image-browse {
   flex: none;
   white-space: nowrap;
+}
+
+/* GM markers shown in the thread actions popover */
+.jn-link-gm-tag {
+  font: 700 10px system-ui;
+  color: var(--jn-gm);
+  padding: 0 4px;
 }
