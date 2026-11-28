@@ -31,9 +31,11 @@ Owner approval: 2026-11-28, Phase 0 gate approved as designed.
 | T4b | Lock enforcement + geometry/sizing | general | `task/t4b-locks` | complete | approved after 2 review rounds; 50 scoped tests; all structural/pin/route/link/trash writes gated, group move/delete atomic validation, v2 sizing commands, thread/permanent-delete hooks, prune skips locked notes | `dde7062` |
 | T5 | History + activity + diff | general | `task/t5-history` | complete | approved; 96 scoped tests; 20 distinct snapshots, cooldown/checkpoints/restore capture, deduped counters, bounded Myers diff, no text stored | `7343c52` |
 | T6 | Shared in-place editor + recovery | general | `task/t6-editor` | complete | approved after 3 review rounds; 93 scoped tests; source surface, toolbar/hints, image dialog, recovery, autosave/conflict/event-id fixes | `f1c86fd` |
-| T7a | Private store v2 + history + local sessions | pending | `task/t7a-private` | in progress | — | — |
-| T7b | Private editor/workspace UI | — | — | queued | — | — |
-| T8 | Canvas rendering + creation/selection UI | pending | `task/t8-canvas` | in progress | — | — |
+| T7a | Private store v2 + history + local sessions | general | `task/t7a-private` | complete | approved; 79 scoped tests; v3 workspace, non-destructive guard, workspace-local history, local coordinator/transport, no shared preview/activity | `bad08b1` |
+| T8 | Canvas rendering + creation/selection UI | general | `task/t8-canvas` | complete | approved; 58 scoped tests; body-only cards, Plain/Profile/skins, creation menu, selection bar, lock badges/gating, editor mount | `c0493a9` |
+| T9 | App surfaces (search/trash/history/transfers UI) | pending | `task/t9-app` | in progress | — | — |
+| T10 | Sizing + geometry + pin compensation | pending | `task/t10-sizing` | in progress | — | — |
+| T11 | Transfers + routes + clipboard | pending | `task/t11-transfers` | in progress | — | — |
 | T7 | Private canvas | — | — | queued | — | — |
 | T8 | Canvas rendering + creation/selection UI | — | — | queued | — | — |
 | T9 | App surfaces (search/trash/history UI) | — | — | queued | — | — |
