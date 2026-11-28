@@ -77,6 +77,12 @@ const EDIT_COMMAND_TYPES = new Set([
   "saveNoteAppearance", "endNoteEdit", "forceUnlockNote", "requestNoteEditState"
 ]);
 
+/**
+ * Legacy switch commands that belong to a private workspace, not the shared journal. They stay
+ * available while incompatible shared data makes the shared board read-only.
+ */
+const PRIVATE_WORKSPACE_TYPES = new Set(["privateCreate", "privateAccept", "privateDecline"]);
+
 /** Targeted reply types resolved by `requestEditReply` before the GM-only gate. */
 const EDIT_REPLY_TYPES = new Set([
   "noteCreated", "noteCreateRejected", "noteEditGranted", "noteEditDenied",
@@ -114,6 +120,10 @@ function deepClone(value) {
   return typeof foundry.utils.deepClone === "function"
     ? foundry.utils.deepClone(value)
     : structuredClone(value);
+}
+
+function isObject(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 function senderIsGM(senderUserId) {
@@ -724,9 +734,19 @@ function clearMissingEndpointAnchor(link, prefix, card) {
 }
 
 /**
+ * T4b cleanup deferral. A whole-note lease must block every write that touches the note, including
+ * incidental anchor cleanup triggered by an unrelated edit. Cleanup is idempotent and safe to
+ * defer, so a locked note is skipped here and a later normalize/cleanup pass picks it up once the
+ * lease ends.
+ */
+function cleanupUnlocked(noteId) {
+  return assertUnlocked([noteId]).ok;
+}
+
+/**
  * Removes unreferenced minor anchors from every live shared card in one layout write. Reference
  * collection uses *all* shared notes (including trashed ones) because restoring a note brings its
- * links back; only the layout is updated.
+ * links back; only the layout is updated. Notes with a live lease are left untouched.
  */
 async function pruneSharedAnchors(shared, layout = layoutPage(shared), linkOverride = null) {
   if (!layout) return;
@@ -750,7 +770,9 @@ async function pruneSharedAnchors(shared, layout = layoutPage(shared), linkOverr
     : notes;
   for (const { noteId, links } of promoted.links) {
     const page = shared.pages.get(noteId);
-    if (page?.type === `${MODULE_ID}.note`) await page.update({ "system.links": links });
+    if (page?.type === `${MODULE_ID}.note` && cleanupUnlocked(noteId)) {
+      await page.update({ "system.links": links });
+    }
   }
   // Fold duplicate minors left by an older link-creation bug before any pruning. The rewritten
   // links are written first; canonicalizing mains below then works from the merged arrays so it
@@ -768,7 +790,9 @@ async function pruneSharedAnchors(shared, layout = layoutPage(shared), linkOverr
     : promotedNotes;
   for (const { noteId, links } of merged.links) {
     const page = shared.pages.get(noteId);
-    if (page?.type === `${MODULE_ID}.note`) await page.update({ "system.links": links });
+    if (page?.type === `${MODULE_ID}.note` && cleanupUnlocked(noteId)) {
+      await page.update({ "system.links": links });
+    }
   }
   // Fold any legacy non-canonical main next and move its links to the canonical id. Otherwise
   // pruning would remove the referenced main and leave the link dangling on an unknown anchor.
@@ -783,11 +807,14 @@ async function pruneSharedAnchors(shared, layout = layoutPage(shared), linkOverr
     : mergedNotes;
   for (const { noteId, links } of canonical.links) {
     const page = shared.pages.get(noteId);
-    if (page?.type === `${MODULE_ID}.note`) await page.update({ "system.links": links });
+    if (page?.type === `${MODULE_ID}.note` && cleanupUnlocked(noteId)) {
+      await page.update({ "system.links": links });
+    }
   }
   const changed = pruneAnchorRegistry(canonical.cards, finalNotes);
   const updates = {};
   const setRegistry = (noteId, anchors) => {
+    if (!cleanupUnlocked(noteId)) return;
     updates[`system.cards.${noteId}.anchors`] = anchors;
     // Foundry merges object fields on update. A replacement registry alone leaves removed
     // anchor keys behind; explicit deletion markers make the last-link cleanup persistent.
@@ -938,6 +965,57 @@ function sharedWorldWritable(shared) {
   }).current;
 }
 
+/** Rejects a shared structural mutation with the localized lock message. */
+function rejectLocked(senderUserId) {
+  notifyUser(senderUserId, t("JN.Socket.LockedByOther"));
+}
+
+/**
+ * T4b whole-note lock gate. Every affected note must be unleased before any write; group
+ * operations reject as a whole. The requester's own lease blocks structural mutations too.
+ */
+function unlockedOrReject(noteIds, senderUserId) {
+  const result = assertUnlocked(noteIds);
+  if (result.ok) return true;
+  rejectLocked(senderUserId);
+  return false;
+}
+
+/** Note ids named by a board pin reference (`p:<pinId>` or `n:<noteId>:<anchorId>`). */
+function pinRefNoteIds(ref, pins) {
+  if (typeof ref !== "string") return [];
+  if (ref.startsWith("p:")) {
+    const pin = pins?.[ref.slice(2)];
+    return pin?.noteId ? [pin.noteId] : [];
+  }
+  if (ref.startsWith("n:")) {
+    const split = ref.indexOf(":", 2);
+    return split > 0 ? [ref.slice(2, split)] : [];
+  }
+  return [];
+}
+
+/** Translates a card's stored auto-size origin by the same delta as a drag. */
+function movedAutoSizeOrigin(card, nextX, nextY) {
+  const origin = card?.autoSizeOrigin;
+  if (!origin || !Number.isFinite(origin.x) || !Number.isFinite(origin.y)) return null;
+  const currentX = Number.isFinite(card?.x) ? card.x : 0;
+  const currentY = Number.isFinite(card?.y) ? card.y : 0;
+  return { x: origin.x + (nextX - currentX), y: origin.y + (nextY - currentY) };
+}
+
+/** Card size for free-spot placement, reading v2 sizing before legacy width/height. */
+function placementSize(card) {
+  const manualWidth = card?.sizing?.mode === "manual" ? card.sizing.width : null;
+  const manualHeight = card?.sizing?.mode === "manual" ? card.sizing.minHeight : null;
+  return {
+    w: Number.isFinite(manualWidth) && manualWidth > 0 ? manualWidth
+      : Number.isFinite(card?.width) && card.width > 0 ? card.width : 220,
+    h: Number.isFinite(manualHeight) && manualHeight > 0 ? manualHeight
+      : Number.isFinite(card?.height) && card.height > 0 ? card.height : 120
+  };
+}
+
 /** Spiral search for a free spot near `(x,y)` that doesn't overlap any existing card (prototype's `free()`). */
 function findFreeSpot(cards, w, h, nearX, nearY) {
   for (let r = 0; r < 40; r++) {
@@ -945,13 +1023,29 @@ function findFreeSpot(cards, w, h, nearX, nearY) {
       const x = nearX + Math.cos(k * 0.785) * r * 45;
       const y = nearY + Math.sin(k * 0.785) * r * 45;
       const overlaps = Object.values(cards).some(c => {
-        const cw = c.width ?? 200, ch = c.height ?? 90;
+        const { w: cw, h: ch } = placementSize(c);
         return !(x + w + 16 < c.x || x > c.x + cw + 16 || y + h + 16 < c.y || y > c.y + ch + 16);
       });
       if (!overlaps) return { x, y };
     }
   }
   return { x: nearX, y: nearY };
+}
+
+/**
+ * Freezes the activity/thread hook payload. Fired only after the relationship is durably
+ * committed, exactly once per new link (route splits fire one per replacement link).
+ */
+function fireThreadCreated({ noteId, linkId, targetId, authorId, kind, board, replacesLinkId }) {
+  Hooks.callAll("journalinatorThreadCreated", {
+    noteId: typeof noteId === "string" ? noteId : "",
+    linkId,
+    targetId: typeof targetId === "string" ? targetId : "",
+    authorId,
+    kind,
+    board,
+    ...(replacesLinkId ? { replacesLinkId } : {})
+  });
 }
 
 function requestIdOf(value) {
@@ -1252,6 +1346,12 @@ async function handleSharedTransferMessage(message, senderUserId) {
   if (!ids) return;
   const shared = game.journal.get(ids.shared);
   if (!shared) return;
+  // Copying legacy/incompatible shared data into a private workspace would smuggle it past the
+  // read-only shared-world gate. Private workspace transfer commands are handled elsewhere.
+  if (!sharedWorldWritable(shared)) {
+    notifyUser(senderUserId, "Incompatible note data.");
+    return;
+  }
 
   const toUserId = message.toUserId;
   if (typeof toUserId !== "string" || !toUserId) {
@@ -1271,6 +1371,8 @@ async function handleSharedTransferMessage(message, senderUserId) {
     notifyUser(senderUserId, t("JN.Transfer.TooMany", { max: MAX_TRANSFER_NOTES }));
     return;
   }
+  // A note being edited has uncommitted text; never copy a half-state to a private workspace.
+  if (!unlockedOrReject(message.noteIds, senderUserId)) return;
 
   const layout = layoutPage(shared)?.system ?? {};
   let transfer;
@@ -1350,6 +1452,14 @@ async function handleMessage(message, senderUserId) {
     return handleEditCommand(shared, message, senderUserId);
   }
 
+  // A single incompatible note/layout page makes the whole shared journal read-only. Private
+  // workspace commands remain available; lease lifecycle edits are handled above and may still
+  // close an existing session.
+  if (!PRIVATE_WORKSPACE_TYPES.has(message.type) && !sharedWorldWritable(shared)) {
+    notifyUser(senderUserId, "Incompatible note data.");
+    return;
+  }
+
   switch (message.type) {
     case "privateCreate": {
       const user = game.users.get(senderUserId);
@@ -1410,6 +1520,7 @@ async function handleMessage(message, senderUserId) {
       const pages = liveSharedNotePages(shared, message.noteIds);
       const fields = sanitizeAttachmentFields(message.fields);
       if (!pages || !fields) return;
+      if (!unlockedOrReject(pages.map(page => page.id), senderUserId)) return;
       for (const page of pages) {
         const existing = page.system.attachment && typeof page.system.attachment === "object"
           ? page.system.attachment : {};
@@ -1427,10 +1538,43 @@ async function handleMessage(message, senderUserId) {
       if (!Number.isFinite(message.x) || !Number.isFinite(message.y)) return;
       const layout = layoutPage(shared);
       if (!layout) return;
-      await layout.update({
+      if (!unlockedOrReject(message.noteId, senderUserId)) return;
+      const card = layout.system.cards?.[message.noteId] ?? {};
+      const changes = {
         [`system.cards.${message.noteId}.x`]: message.x,
         [`system.cards.${message.noteId}.y`]: message.y
-      });
+      };
+      const origin = movedAutoSizeOrigin(card, message.x, message.y);
+      if (origin) changes[`system.cards.${message.noteId}.autoSizeOrigin`] = origin;
+      await layout.update(changes);
+      return;
+    }
+
+    case "moveCards": {
+      if (!Array.isArray(message.moves) || !message.moves.length
+          || message.moves.length > MAX_NOTE_BATCH) return;
+      const layout = layoutPage(shared);
+      if (!layout) return;
+      const seen = new Set();
+      for (const move of message.moves) {
+        if (!move || typeof move !== "object" || Array.isArray(move)) return;
+        if (typeof move.noteId !== "string" || seen.has(move.noteId)) return;
+        const note = shared.pages.get(move.noteId);
+        if (!note || note.type !== `${MODULE_ID}.note` || note.system.deleted) return;
+        if (!Number.isFinite(move.x) || !Number.isFinite(move.y)) return;
+        seen.add(move.noteId);
+      }
+      if (!unlockedOrReject([...seen], senderUserId)) return;
+      const changes = {};
+      for (const move of message.moves) {
+        const card = layout.system.cards?.[move.noteId] ?? {};
+        changes[`system.cards.${move.noteId}.x`] = move.x;
+        changes[`system.cards.${move.noteId}.y`] = move.y;
+        const origin = movedAutoSizeOrigin(card, move.x, move.y);
+        if (origin) changes[`system.cards.${move.noteId}.autoSizeOrigin`] = origin;
+      }
+      // One layout write for the whole group; no partial move is possible.
+      await layout.update(changes);
       return;
     }
 
@@ -1439,21 +1583,33 @@ async function handleMessage(message, senderUserId) {
       const note = shared.pages.get(message.noteId);
       if (!note || note.type !== `${MODULE_ID}.note` || note.system.deleted
           || !layout?.system.cards?.[message.noteId] || !validCardPorts(message.ports)) return;
+      if (!unlockedOrReject(message.noteId, senderUserId)) return;
       await layout.update({ [`system.cards.${message.noteId}.ports`]: message.ports });
       return;
     }
 
-    case "resizeCard": {
+    case "setCardSizing": {
+      const allowed = new Set(["type", "noteId", "sizing", "autoSizeOrigin", "x", "y"]);
+      if (Object.keys(message).some(key => !allowed.has(key))) return;
       const note = shared.pages.get(message.noteId);
       if (!note || note.type !== `${MODULE_ID}.note` || note.system.deleted) return;
-      const validSize = value => value === null || (Number.isFinite(value) && value > 0);
-      if (!validSize(message.width) || !validSize(message.height)) return;
       const layout = layoutPage(shared);
-      if (!layout) return;
-      await layout.update({
-        [`system.cards.${message.noteId}.width`]: message.width,
-        [`system.cards.${message.noteId}.height`]: message.height
+      if (!layout?.system.cards?.[message.noteId]) return;
+      const geometry = cleanGeometry({
+        sizing: message.sizing,
+        ...(message.autoSizeOrigin !== undefined
+          ? { autoSizeOrigin: message.autoSizeOrigin } : {}),
+        ...(message.x !== undefined ? { x: message.x } : {}),
+        ...(message.y !== undefined ? { y: message.y } : {})
       });
+      if (!geometry || !geometry.sizing) return;
+      if (!unlockedOrReject(message.noteId, senderUserId)) return;
+      await applyGeometryPatch(layout, message.noteId, geometry);
+      return;
+    }
+
+    case "resizeCard": {
+      // Replaced by setCardSizing. The legacy width/height fields are never written again.
       return;
     }
 
@@ -1470,6 +1626,7 @@ async function handleMessage(message, senderUserId) {
         if (!stamp || typeof noteId !== "string" || !DOCUMENT_ID_RE.test(noteId)) return;
         const note = shared.pages.get(noteId);
         if (!note || note.type !== `${MODULE_ID}.note` || note.system.deleted) return;
+        if (!unlockedOrReject(noteId, senderUserId)) return;
       }
       if (message.text !== undefined && typeof message.text !== "string") return;
       const text = stamp ? "" : (message.text ?? t("JN.Label.Default")).slice(0, MAX_LABEL_TEXT_LENGTH);
@@ -1509,6 +1666,8 @@ async function handleMessage(message, senderUserId) {
       const layout = layoutPage(shared);
       if (!layout) return;
       if (typeof message.labelId !== "string" || !layout.system.labels?.[message.labelId]) return;
+      const label = layout.system.labels[message.labelId];
+      if (label.noteId && !unlockedOrReject(label.noteId, senderUserId)) return;
       const updates = {};
       let changed = false;
 
@@ -1550,6 +1709,7 @@ async function handleMessage(message, senderUserId) {
       if (!layout) return;
       if (typeof message.labelId !== "string" || !layout.system.labels?.[message.labelId]) return;
       const label = layout.system.labels[message.labelId];
+      if (label.noteId && !unlockedOrReject(label.noteId, senderUserId)) return;
       const ids = label.noteId && stampUrl(label.stamp)
         ? attachedStampIds(layout.system.labels, label.noteId) : [message.labelId];
       await layout.update(Object.fromEntries(ids.map(id => [`system.labels.-=${id}`, null])));
@@ -1574,6 +1734,7 @@ async function handleMessage(message, senderUserId) {
         if (noteId && !live.has(noteId)) return;
         if (!validPinPosition(noteId, action.x, action.y)
             || Object.keys(pins).length >= 2000) return;
+        if (noteId && !unlockedOrReject(noteId, senderUserId)) return;
         pins[foundry.utils.randomID()] = { noteId, x: action.x, y: action.y,
           isDefault: false };
         await layout.update({ "system.pins": pins });
@@ -1587,13 +1748,29 @@ async function handleMessage(message, senderUserId) {
         if (Object.values(pinLinks).some(link => link.source === action.source
             && link.target === action.target || link.source === action.target
             && link.target === action.source)) return;
-        pinLinks[foundry.utils.randomID()] = normalizePinLink({ source: action.source, target: action.target });
+        const sourceNotes = pinRefNoteIds(action.source, pins);
+        const targetNotes = pinRefNoteIds(action.target, pins);
+        if (!unlockedOrReject([...sourceNotes, ...targetNotes], senderUserId)) return;
+        const linkId = foundry.utils.randomID();
+        pinLinks[linkId] = normalizePinLink({ source: action.source, target: action.target });
         await layout.update({ "system.pinLinks": pinLinks });
+        fireThreadCreated({
+          noteId: sourceNotes[0] ?? "",
+          linkId,
+          targetId: targetNotes[0] ?? "",
+          authorId: senderUserId,
+          kind: "pin-link",
+          board: true
+        });
         return;
       }
       if (action.type === "updateLink" || action.type === "deleteLink") {
         if (typeof action.linkId !== "string" || !validAnchorId(action.linkId)
             || !pinLinks[action.linkId]) return;
+        const pinLink = pinLinks[action.linkId];
+        if (!unlockedOrReject([
+          ...pinRefNoteIds(pinLink.source, pins), ...pinRefNoteIds(pinLink.target, pins)
+        ], senderUserId)) return;
         if (action.type === "deleteLink") {
           // Foundry merges object updates; leaving the key out of a new pinLinks object would
           // keep the old entry. Delete it explicitly, with the id validated for a dotted path.
@@ -1607,6 +1784,7 @@ async function handleMessage(message, senderUserId) {
       if (action.type === "delete") {
         const ref = action.ref;
         if (typeof ref !== "string" || ref.length > 200) return;
+        const refNotes = pinRefNoteIds(ref, pins);
         let cardUpdate = null;
         let deletedPinId = "";
         if (ref.startsWith("p:")) {
@@ -1642,6 +1820,10 @@ async function handleMessage(message, senderUserId) {
           });
           if (links.length !== (owner.system.links ?? []).length) pageUpdates.push([owner, links]);
         }
+        const affected = [...new Set([
+          ...refNotes, ...pageUpdates.map(([owner]) => owner.id)
+        ])];
+        if (!unlockedOrReject(affected, senderUserId)) return;
         const updates = {};
         if (deletedPinId) updates[`system.pins.-=${deletedPinId}`] = null;
         for (const id of removedLinkIds) updates[`system.pinLinks.-=${id}`] = null;
@@ -1658,6 +1840,7 @@ async function handleMessage(message, senderUserId) {
       if (!validPinPosition(noteId, action.x, action.y)) return;
       const ref = action.ref;
       if (typeof ref !== "string" || ref.length > 200) return;
+      const refNotes = pinRefNoteIds(ref, pins);
       let id = ref.startsWith("p:") ? ref.slice(2) : "";
       const pageUpdates = new Map();
       if (!id && ref.startsWith("n:")) {
@@ -1687,6 +1870,9 @@ async function handleMessage(message, senderUserId) {
           });
           if (touched) pageUpdates.set(owner.id, links);
         }
+        if (!unlockedOrReject([
+          ...new Set([...refNotes, noteId, ...pageUpdates.keys()])
+        ].filter(Boolean), senderUserId)) return;
         for (const link of Object.values(pinLinks)) {
           if (link.source === ref) link.source = newRef;
           if (link.target === ref) link.target = newRef;
@@ -1704,6 +1890,7 @@ async function handleMessage(message, senderUserId) {
         return;
       }
       if (!validAnchorId(id) || !pins[id] || pins[id].isDefault) return;
+      if (!unlockedOrReject([...new Set([...refNotes, noteId])].filter(Boolean), senderUserId)) return;
       pins[id] = { noteId, x: action.x, y: action.y, isDefault: false };
       await layout.update({ "system.pins": pins });
       return;
@@ -1715,7 +1902,10 @@ async function handleMessage(message, senderUserId) {
       // no-op when the board is already clean.
       if (!pinsEnabled()) return;
       const layout = layoutPage(shared);
-      if (layout) await pruneSharedAnchors(shared, layout);
+      if (!layout) return;
+      const noteIds = liveSharedNoteList(shared).map(page => page.id);
+      if (!unlockedOrReject(noteIds, senderUserId)) return;
+      await pruneSharedAnchors(shared, layout);
       return;
     }
 
@@ -1727,6 +1917,7 @@ async function handleMessage(message, senderUserId) {
       const layout = layoutPage(shared);
       const card = layout?.system.cards?.[page.id];
       if (!card) return;
+      if (!unlockedOrReject(page.id, senderUserId)) return;
       const anchors = { ...(card.anchors ?? {}) };
       if (Object.keys(anchors).length >= MAX_CARD_ANCHORS) return;
       const anchorId = freshAnchorId(anchors);
@@ -1746,6 +1937,7 @@ async function handleMessage(message, senderUserId) {
       const card = layout?.system.cards?.[page.id];
       const anchor = cardAnchor(card, message.anchorId);
       if (!anchor || anchor.kind !== "minor") return; // main pins move the note, not an anchor
+      if (!unlockedOrReject(page.id, senderUserId)) return;
       // Clone the registry and rewrite it whole. A client id never becomes a dotted update path
       // (which could otherwise reach `__proto__`/`constructor` or unrelated keys).
       const moved = minorOnEdge({ ...anchor, x: message.x, y: message.y }, cardBox(page, card));
@@ -1788,6 +1980,7 @@ async function handleMessage(message, senderUserId) {
       const card = layout?.system.cards?.[page.id];
       const anchor = cardAnchor(card, message.anchorId);
       if (!anchor || anchor.kind !== "minor") return;
+      if (!unlockedOrReject(page.id, senderUserId)) return;
       // Shared pruning cannot see vault links; hidden links are therefore forced to drop anchor
       // references when stored. Count every shared reference (trashed notes included, since a
       // restore brings their links back) before deleting a shared pin.
@@ -1815,6 +2008,7 @@ async function handleMessage(message, senderUserId) {
       if (message.enabled) {
         const hasMain = originalCard.anchors?.main?.kind === "main";
         if (currentlyEnabled && hasMain) return; // already in the requested state
+        if (!unlockedOrReject(page.id, senderUserId)) return;
         const anchors = ensureCanonicalMainAnchor(originalCard.anchors, page.system.authorId ?? senderUserId);
         const nextAttachment = { ...storedAttachment, mainPinEnabled: true };
         try {
@@ -1849,6 +2043,15 @@ async function handleMessage(message, senderUserId) {
           if (!isLiveSharedNotePage(targetPage) || !originalCards[targetPage.id]) return;
         }
       }
+      const affectedIds = new Set([page.id]);
+      for (const item of affected) {
+        affectedIds.add(item.sourcePage.id);
+        if (item.sourceOnThis) affectedIds.add(item.link.targetId);
+        for (const entry of item.link.routeAnchors ?? []) {
+          if (typeof entry?.noteId === "string" && entry.noteId) affectedIds.add(entry.noteId);
+        }
+      }
+      if (!unlockedOrReject([...affectedIds], senderUserId)) return;
 
       const workingCards = deepClone(originalCards);
       const hubCard = workingCards[page.id];
@@ -1901,6 +2104,10 @@ async function handleMessage(message, senderUserId) {
       const anchorsChanged =
         JSON.stringify(hubCard.anchors ?? {}) !== JSON.stringify(originalCard.anchors ?? {});
       const stateNoteIds = new Set([page.id, ...pageUpdates.keys()]);
+      // Re-check every note this transaction will rewrite. The earlier probe covers known link
+      // endpoints; this closes the loop on the exact set of link/attachment documents written
+      // below, so a lease on any affected source rejects the whole disable before any write.
+      if (!unlockedOrReject([...stateNoteIds], senderUserId)) return;
       // Capture the raw stored attachment, not resolved defaults: a partial/legacy attachment
       // block must round-trip exactly on undo, including fields this phase does not understand.
       const beforeNotes = [...stateNoteIds].map(noteId => {
@@ -1979,6 +2186,7 @@ async function handleMessage(message, senderUserId) {
       if (!entry) return;
       const layout = layoutPage(shared);
       if (!layout) return;
+      if (!unlockedOrReject(entry.notes.map(state => state.noteId), senderUserId)) return;
       for (const state of entry.notes) {
         const notePage = shared.pages.get(state.noteId);
         // A trashed owner is still restorable state; its links were part of the transaction.
@@ -2060,6 +2268,14 @@ async function handleMessage(message, senderUserId) {
         notifyUser(senderUserId, t("JN.Route.Failed"));
         return;
       }
+      const waypointIds = (Array.isArray(link.routeAnchors) ? link.routeAnchors : [])
+        .map(entry => entry?.noteId)
+        .filter(noteId => typeof noteId === "string" && noteId);
+      // A route touches the source, the target, the inserted note and every existing waypoint.
+      // Reject the whole operation before any write if any of them is being edited.
+      if (!unlockedOrReject([
+        sourcePage.id, targetPage.id, notePage.id, ...waypointIds
+      ], senderUserId)) return;
 
       if (message.mode === "route") {
         // Route A is a visual waypoint through the note's MAIN pin. It requires the experiment to
@@ -2202,6 +2418,24 @@ async function handleMessage(message, senderUserId) {
         noteLinks: beforeNote,
         after: { sourceLinks: afterSource, noteLinks: afterNote }
       });
+      fireThreadCreated({
+        noteId: sourcePage.id,
+        linkId: first.id,
+        targetId: notePage.id,
+        authorId: senderUserId,
+        kind: "note-link",
+        board: false,
+        replacesLinkId: link.id
+      });
+      fireThreadCreated({
+        noteId: notePage.id,
+        linkId: second.id,
+        targetId: targetPage.id,
+        authorId: senderUserId,
+        kind: "note-link",
+        board: false,
+        replacesLinkId: link.id
+      });
       acknowledgeWriteApplied(senderUserId, { kind: "route", action: "split", undoId });
       return;
     }
@@ -2226,6 +2460,7 @@ async function handleMessage(message, senderUserId) {
           return;
         }
       }
+      if (!unlockedOrReject(states.map(state => state.noteId), senderUserId)) return;
       try {
         for (const state of states) {
           await shared.pages.get(state.noteId).update({ "system.links": deepClone(state.before) });
@@ -2265,6 +2500,7 @@ async function handleMessage(message, senderUserId) {
         notifyUser(senderUserId, t("JN.Route.NotRouted"));
         return;
       }
+      if (!unlockedOrReject(page.id, senderUserId)) return;
       // Only the waypoint goes away. Link id, endpoints, label, cosmetics and direction stay.
       const beforeLinks = deepClone(links);
       const next = links.map(item => item.id === link.id
@@ -2315,6 +2551,7 @@ async function handleMessage(message, senderUserId) {
         notifyUser(senderUserId, t("JN.Route.NoPins"));
         return;
       }
+      if (!unlockedOrReject(page.id, senderUserId)) return;
       const next = links.map(item => item.id === link.id ? { ...item, pins: [] } : item);
       await page.update({ "system.links": next });
       return;
@@ -2341,6 +2578,7 @@ async function handleMessage(message, senderUserId) {
       // leave a newly generated anchor or a half-written link behind.
       if (sourcePlan === null || targetPlan === null) return;
       if ((sourcePlan?.created || targetPlan?.created) && (!layout || !sourceCard || !targetCard)) return;
+      if (!unlockedOrReject([page.id, target.id], senderUserId)) return;
 
       const fields = { ...linkAnchors(message) };
       applyAnchorEndpoint(fields, "source", sourcePlan, cardBox(page, sourceCard));
@@ -2350,12 +2588,14 @@ async function handleMessage(message, senderUserId) {
       const existing = links.findIndex(link => link.targetId === message.targetId);
       const sourceHasEndpoint = !!fields.sourcePoint || !!sourcePlan?.anchor;
       const targetHasEndpoint = !!fields.targetPoint || !!targetPlan?.anchor;
+      let createdLinkId = null;
       if (existing !== -1) {
         if (!sourceHasEndpoint || !targetHasEndpoint) return;
         links[existing] = { ...links[existing], ...fields, origin: "drawn", edited: true };
       } else {
+        createdLinkId = foundry.utils.randomID();
         links.push({
-          id: foundry.utils.randomID(),
+          id: createdLinkId,
           targetId: message.targetId,
           ...fields,
           // Always store explicit endpoint references. Empty means "use point/side fallback".
@@ -2401,6 +2641,16 @@ async function handleMessage(message, senderUserId) {
         return;
       }
       if (existing !== -1) await pruneSharedAnchors(shared, layout, { noteId: page.id, links });
+      else if (createdLinkId) {
+        fireThreadCreated({
+          noteId: page.id,
+          linkId: createdLinkId,
+          targetId: target.id,
+          authorId: senderUserId,
+          kind: "note-link",
+          board: false
+        });
+      }
       return;
     }
 
@@ -2412,6 +2662,11 @@ async function handleMessage(message, senderUserId) {
       if (!existing) return;
       const layout = layoutPage(shared);
       const targetPage = shared.pages.get(existing.targetId);
+      const waypointIds = [
+        ...(Array.isArray(existing.routeAnchors) ? existing.routeAnchors : []),
+        ...(Array.isArray(message.fields?.routeAnchors) ? message.fields.routeAnchors : [])
+      ].map(entry => entry?.noteId).filter(noteId => typeof noteId === "string" && noteId);
+      if (!unlockedOrReject([page.id, existing.targetId, ...waypointIds], senderUserId)) return;
       const anchorContext = {
         source: layout?.system.cards?.[page.id]?.anchors ?? {},
         target: isLiveSharedNotePage(targetPage)
@@ -2451,6 +2706,9 @@ async function handleMessage(message, senderUserId) {
     case "deleteLink": {
       const page = shared.pages.get(message.noteId);
       if (!isLiveSharedNotePage(page)) return;
+      const existing = (page.system.links ?? []).find(link => link.id === message.linkId);
+      if (!existing) return;
+      if (!unlockedOrReject([page.id, existing.targetId], senderUserId)) return;
       const links = (page.system.links ?? []).filter(link => link.id !== message.linkId);
       await page.update({ "system.links": links });
       await pruneSharedAnchors(shared, layoutPage(shared), { noteId: page.id, links });
@@ -2468,6 +2726,7 @@ async function handleMessage(message, senderUserId) {
       // Route A deletion policy: remove only this note's waypoints from every shared link (trashed
       // owners included, so a later restore cannot reattach them). Links and their ids survive.
       const cleanup = routeWaypointCleanup(shared, page.id);
+      if (!unlockedOrReject([page.id, ...cleanup.before.map(state => state.noteId)], senderUserId)) return;
       try {
         for (const update of cleanup.updates) {
           await shared.pages.get(update.noteId)?.update({ "system.links": update.links });
@@ -2490,12 +2749,83 @@ async function handleMessage(message, senderUserId) {
       return;
     }
 
+    case "deleteNotes": {
+      if (!Array.isArray(message.noteIds) || !message.noteIds.length
+          || message.noteIds.length > MAX_NOTE_BATCH) return;
+      if (new Set(message.noteIds).size !== message.noteIds.length) return;
+      const pages = liveSharedNotePages(shared, message.noteIds);
+      if (!pages) return;
+      const layout = layoutPage(shared);
+      const undoId = typeof message.undoId === "string" && DOCUMENT_ID_RE.test(message.undoId)
+        ? message.undoId : null;
+      const deletedIds = new Set(message.noteIds);
+      // Remove every deleted note's route waypoints in one pass. Links and their ids survive.
+      const cleanupBefore = [];
+      const cleanupUpdates = [];
+      for (const owner of allSharedNoteList(shared)) {
+        const links = owner.system.links ?? [];
+        let touched = false;
+        const next = links.map(link => {
+          const routes = Array.isArray(link.routeAnchors) ? link.routeAnchors : [];
+          if (!routes.some(entry => deletedIds.has(entry?.noteId))) return link;
+          touched = true;
+          let remaining = routes;
+          for (const noteId of deletedIds) remaining = removeRouteWaypointsFor(remaining, noteId);
+          return { ...link, routeAnchors: remaining };
+        });
+        if (!touched) continue;
+        cleanupBefore.push({ noteId: owner.id, links: deepClone(links) });
+        cleanupUpdates.push({ noteId: owner.id, links: next });
+      }
+      // The whole selection plus every route owner it touches must be unlocked before any write.
+      if (!unlockedOrReject([
+        ...message.noteIds, ...cleanupBefore.map(state => state.noteId)
+      ], senderUserId)) return;
+
+      const lastCards = new Map(pages.map(page => [page.id, layout?.system.cards?.[page.id] ?? null]));
+      const beforeDeleted = pages.map(page => ({
+        page, deleted: deepClone(page.system.deleted)
+      }));
+      const deletedAt = Date.now();
+      try {
+        for (const update of cleanupUpdates) {
+          await shared.pages.get(update.noteId)?.update({ "system.links": update.links });
+        }
+        for (const page of pages) {
+          await page.update({
+            "system.deleted": {
+              at: deletedAt, by: senderUserId, lastCard: lastCards.get(page.id), undoId
+            }
+          });
+        }
+      } catch (err) {
+        for (const state of beforeDeleted) {
+          await state.page.update({ "system.deleted": deepClone(state.deleted) }).catch(() => {});
+        }
+        for (const state of cleanupBefore) {
+          await shared.pages.get(state.noteId)?.update({
+            "system.links": deepClone(state.links)
+          }).catch(() => {});
+        }
+        console.error("Journalinator: note group deletion failed", err);
+        return;
+      }
+      if (layout) {
+        const changes = Object.fromEntries(message.noteIds.map(noteId =>
+          [`system.cards.-=${noteId}`, null]));
+        await layout.update(changes);
+      }
+      acknowledgeWriteApplied(senderUserId, { kind: "delete", undoId, noteIds: [...message.noteIds] });
+      return;
+    }
+
     case "restoreNote": {
       const page = shared.pages.get(message.noteId);
       if (!page || page.type !== `${MODULE_ID}.note` || !page.system.deleted) return;
       if (message.undoId !== undefined
           && (typeof message.undoId !== "string" || !DOCUMENT_ID_RE.test(message.undoId)
             || page.system.deleted.undoId !== message.undoId || page.system.deleted.by !== senderUserId)) return;
+      if (!unlockedOrReject(message.noteId, senderUserId)) return;
       const layout = layoutPage(shared);
       const lastCard = page.system.deleted.lastCard;
       const cardSize = card => {
@@ -2549,6 +2879,9 @@ async function handleMessage(message, senderUserId) {
       if (!game.users.get(senderUserId)?.isGM) return; // only the GM may permanently empty the trash (spec §10/§11)
       const trashed = shared.pages.filter(p => p.type === `${MODULE_ID}.note` && p.system.deleted);
       const trashedIds = new Set(trashed.map(p => p.id));
+      if (!trashedIds.size) return;
+      // A single locked trashed note rejects the whole permanent deletion.
+      if (!unlockedOrReject([...trashedIds], senderUserId)) return;
       await JournalEntryPage.deleteDocuments([...trashedIds], { parent: shared });
       const layout = layoutPage(shared);
       const labelUpdates = Object.fromEntries(Object.entries(layout?.system.labels ?? {})
@@ -2558,13 +2891,11 @@ async function handleMessage(message, senderUserId) {
       // Permanent deletion can leave a live shared link pointing at a card that no longer exists;
       // prune any minor anchors that lost their last reference. Soft delete keeps its stored card.
       if (layout) await pruneSharedAnchors(shared, layout);
-      const ids2 = getContainerIds();
-      const historyPage = ids2?.historyPage ? game.journal.get(ids2.history)?.pages.get(ids2.historyPage) : null;
-      if (historyPage) {
-        const updates = {};
-        for (const p of trashed) updates[`system.snapshots.-=${p.id}`] = null;
-        if (Object.keys(updates).length) await historyPage.update(updates);
-      }
+      // T5 owns history deletion. Fire the activity hook once after pages/cards/anchors are gone.
+      Hooks.callAll("journalinatorNotesPermanentlyDeleted", {
+        noteIds: [...trashedIds],
+        byUserId: senderUserId
+      });
       return;
     }
 
@@ -3215,8 +3546,8 @@ export function requestWrite(message) {
 }
 
 /**
- * T4b guard helpers. Not applied to pin/link/route/transfer/delete/geometry handlers yet;
- * those get the guard in the lock-enforcement task.
+ * Whole-note lock helpers re-exported for callers/tests. Shared structural handlers use the
+ * same `assertUnlocked` check internally, so these never bypass the active-GM enforcement.
  */
 export function assertNoteUnlocked(noteId) {
   return assertUnlocked([noteId]);
