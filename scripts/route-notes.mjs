@@ -6,7 +6,7 @@
  *   identity, endpoints, label and cosmetics are untouched.
  * - Route B replaces one link with two drawn links through an inserted note. The caller supplies
  *   the geometric C-side endpoints (main anchor or facing edge); this module owns the copy policy
- *   for style, label, hint and direction.
+ *   for style, label and direction.
  *
  * No Foundry document access here, so the rules are directly testable.
  */
@@ -81,7 +81,7 @@ export function endpointFields(link, prefix) {
  *   (`noteFirstEndpoint` = A→C target, `noteSecondEndpoint` = C→B source).
  * - Material/thickness/slack/pattern/ends/colors/legacy lineStyle are copied to both.
  * - The label is kept on the first (A→C) link only; the second is blank.
- * - `hint` is copied to both; direction is "none" because thread styles carry no semantics.
+ * - Direction is "none" because thread styles carry no semantics.
  * - Both are marked drawn/edited by the sender; route waypoints and board pins start empty.
  */
 export function splitLinkPair({
@@ -97,7 +97,6 @@ export function splitLinkPair({
     edited: true,
     createdBy: senderUserId,
     direction: "none",
-    hint: link?.hint === true,
     routeAnchors: []
   };
   return {

@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Hooks, JournalEntryPage, installFoundry, makeContainers, makeUser } from "./fake-foundry.mjs";
+import { getLayout } from "../scripts/layouts/registry.mjs";
+import { originFromBox } from "../scripts/sizing/geometry.mjs";
 import { tiltForSkin } from "../scripts/skins/registry.mjs";
 
 const MODULE_ID = "fvtt-journalinator";
@@ -21,6 +23,13 @@ const layoutPage = containers.shared.pages.get(containers.ids.layoutPage);
 const skin = () => ({
   paper: "amber", font: "default", torn: false, backgroundImage: null, tiltSeed: 0
 });
+
+function initialOrigin(x, y, layout, rotation) {
+  const definition = getLayout(layout);
+  return originFromBox({
+    x, y, w: definition.widths[0], h: definition.minHeight ?? 120
+  }, rotation);
+}
 
 function setUser(user) {
   game.user = user;
@@ -126,7 +135,7 @@ test("createNote writes a v2 page, stable name, duplicate bodies and a sized car
 
   const card = layoutPage.system.cards[first.noteId];
   assert.deepEqual(card.sizing, { mode: "auto", width: null, minHeight: null });
-  assert.deepEqual(card.autoSizeOrigin, { x: 40 + 110, y: 50 });
+  assert.deepEqual(card.autoSizeOrigin, initialOrigin(40, 50, page.system.layout, card.rotation));
   assert.equal(card.rotation, tiltForSkin(page.system.skin));
   assert.deepEqual(card.ports, ["right"]);
   assert.deepEqual(card.anchors.main, { kind: "main", x: 0.5, y: 0, createdBy: gm.id });
@@ -147,7 +156,7 @@ test("createNote writes a v2 page, stable name, duplicate bodies and a sized car
 
   const profile = await createNote({ layout: "profile", x: 100, y: 10 });
   const profileCard = layoutPage.system.cards[profile.noteId];
-  assert.deepEqual(profileCard.autoSizeOrigin, { x: 100 + 150, y: 10 });
+  assert.deepEqual(profileCard.autoSizeOrigin, initialOrigin(100, 10, "profile", profileCard.rotation));
 });
 
 test("a failed card write deletes the just-created page", async () => {

@@ -12,6 +12,7 @@ import { isLinkColor, normalizeLinkColor } from "./link-colors.mjs";
 import { boardPinRef, normalizePinLink, resolvePin, validPinPosition } from "./board-pins.mjs";
 import { noteImagePath } from "./image-url.mjs";
 import { getLayout, isLayout } from "./layouts/registry.mjs";
+import { originFromBox } from "./sizing/geometry.mjs";
 import { isFont, isPaper, seededSkin, tiltForSkin } from "./skins/registry.mjs";
 import { noteSchemaProblem, worldSchemaStatus } from "./store/schema-guard.mjs";
 import {
@@ -1182,17 +1183,20 @@ async function createV2NotePage(shared, fields, senderUserId, { noteId, source =
   }
   if (!page) return { error: "invalid" };
 
-  const initialWidth = getLayout(fields.layout).widths[0];
+  const definition = getLayout(fields.layout);
+  const initialWidth = definition.widths[0];
+  const initialHeight = definition.minHeight ?? 120;
   const x = clampCoordinate(fields.x);
   const y = clampCoordinate(fields.y);
+  const rotation = tiltForSkin(seeded);
   const card = {
     x,
     y,
     sizing: { mode: "auto", width: null, minHeight: null },
-    // Initial top-center world point. T10 may recompute this on first measurement for
-    // rotated cards; until then the main pin stays stable at this origin.
-    autoSizeOrigin: { x: x + initialWidth / 2, y },
-    rotation: tiltForSkin(seeded),
+    // Initial main-pin (rotated top-center) world point. Seeded from the same center-rotation
+    // geometry T10 uses, so the first automatic render cannot shift a tilted card.
+    autoSizeOrigin: originFromBox({ x, y, w: initialWidth, h: initialHeight }, rotation),
+    rotation,
     ports: ["right"],
     anchors: {
       main: { kind: "main", x: MAIN_PIN.x, y: MAIN_PIN.y, createdBy: senderUserId }
@@ -1234,8 +1238,8 @@ function freshTransferId() {
 
 /**
  * Private-to-private copies are GM-mediated like every other write, but never touch the shared
- * journal or the secrets vault. The active GM's write queue serializes send/accept/decline; the
- * sender/recipient below come from the verified socket relay, never from the message.
+ * journal. The active GM's write queue serializes send/accept/decline; the sender/recipient below
+ * come from the verified socket relay, never from the message.
  */
 async function handlePrivateTransferMessage(message, senderUserId) {
   if (!getContainerIds()) return;
@@ -1336,10 +1340,10 @@ async function handlePrivateTransferMessage(message, senderUserId) {
 }
 
 /**
- * Copies visible shared notes into a private workspace. The active GM reads only the shared
- * journal (never the vault or notesStore's merged view), so hidden blocks/links cannot leak even
- * when the sender is a GM with secrets unlocked. Another user's copy goes through the existing
- * pending-offer inbox; a self-copy imports directly into the sender's active private page.
+ * Copies shared v2 notes into a private workspace. The active GM reads only the shared journal,
+ * so the transfer carries the current body/layout/skin/attachment/links payload and nothing from
+ * the private side. Another user's copy goes through the pending-offer inbox; a self-copy imports
+ * directly into the sender's active private page.
  */
 async function handleSharedTransferMessage(message, senderUserId) {
   const ids = getContainerIds();
@@ -1431,6 +1435,198 @@ async function handleSharedTransferMessage(message, senderUserId) {
   acknowledgeWriteApplied(senderUserId, { ...payload, action: "sent", transferId });
 }
 
+/**
+ * Publishing a private v2 selection to the shared canvas.
+ *
+ * The private source is never touched. The same pure importer used by inbox acceptance allocates
+ * fresh note/link/label/pin/pinLink ids and remaps internal relationships; the active GM then
+ * writes one new shared page per note. Existing shared notes are seeded into the placement
+ * workspace only so fresh ids cannot collide and cards avoid the real board footprint.
+ *
+ * Only shared activity is recorded: one `journalinatorNoteCreated` per new page (with imported
+ * body insertion counters, source `paste`) and one `journalinatorThreadCreated` per committed new
+ * note link/pin link. Private transfers and private history never reach these hooks.
+ */
+async function handlePublishPrivateMessage(message, senderUserId) {
+  const ids = getContainerIds();
+  if (!ids) return;
+  const shared = game.journal.get(ids.shared);
+  if (!shared) return;
+  if (!sharedWorldWritable(shared)) {
+    notifyUser(senderUserId, "Incompatible note data.");
+    return;
+  }
+  if (!game.users.get(senderUserId)) return;
+
+  const noteIds = Array.isArray(message.noteIds)
+    ? message.noteIds
+    : (typeof message.noteId === "string" ? [message.noteId] : []);
+  if (!noteIds.length) {
+    notifyUser(senderUserId, t("JN.Transfer.None"));
+    return;
+  }
+  if (noteIds.length > MAX_TRANSFER_NOTES) {
+    notifyUser(senderUserId, t("JN.Transfer.TooMany", { max: MAX_TRANSFER_NOTES }));
+    return;
+  }
+  const page = privateStore.findActive(senderUserId);
+  if (!page) {
+    notifyUser(senderUserId, t("JN.Transfer.NoPrivateSpace"));
+    return;
+  }
+
+  let transfer;
+  try {
+    transfer = buildPrivateTransfer(privateStore.read(page), noteIds, {
+      fromUserId: senderUserId,
+      toUserId: senderUserId,
+      allowSelf: true
+    });
+  } catch (err) {
+    notifyUser(senderUserId, err.message);
+    return;
+  }
+  let serialized;
+  try {
+    serialized = JSON.stringify(transfer);
+  } catch {
+    notifyUser(senderUserId, t("JN.Transfer.TooLarge", { max: MAX_TRANSFER_TEXT }));
+    return;
+  }
+  if (serialized.length > MAX_TRANSFER_STORAGE) {
+    notifyUser(senderUserId, t("JN.Transfer.TooLarge", { max: MAX_TRANSFER_TEXT }));
+    return;
+  }
+
+  const layout = layoutPage(shared);
+  if (!layout) {
+    notifyUser(senderUserId, "Invalid note payload.");
+    return;
+  }
+  const layoutSystem = layout.system ?? {};
+  const baseCards = isObject(layoutSystem.cards) ? layoutSystem.cards : {};
+  const baseLabels = isObject(layoutSystem.labels) ? layoutSystem.labels : {};
+  const basePins = isObject(layoutSystem.pins) ? layoutSystem.pins : {};
+  const basePinLinks = isObject(layoutSystem.pinLinks) ? layoutSystem.pinLinks : {};
+  const sharedNotes = {};
+  for (const sharedPage of liveSharedNoteList(shared)) {
+    sharedNotes[sharedPage.id] = sharedPage.system;
+  }
+
+  let imported;
+  try {
+    imported = importPrivateTransfer({
+      notes: sharedNotes,
+      layout: {
+        cards: deepClone(baseCards),
+        labels: deepClone(baseLabels),
+        pins: deepClone(basePins),
+        pinLinks: deepClone(basePinLinks),
+        viewport: null
+      },
+      trash: [],
+      history: {}
+    }, transfer, senderUserId);
+  } catch (err) {
+    notifyUser(senderUserId, err.message);
+    return;
+  }
+
+  const now = Date.now();
+  const createdPages = [];
+  const layoutChanges = {};
+  try {
+    for (const noteId of imported.imported) {
+      const note = imported.workspace.notes[noteId];
+      const created = await JournalEntryPage.create({
+        _id: noteId,
+        name: notePageName(noteId),
+        type: `${MODULE_ID}.note`,
+        system: {
+          schemaVersion: 2,
+          body: note.body,
+          revision: 0,
+          layout: note.layout,
+          skin: note.skin,
+          attachment: note.attachment,
+          links: note.links,
+          authorId: senderUserId,
+          createdAt: now,
+          updatedAt: now,
+          deleted: null,
+          lastSave: null
+        }
+      }, { parent: shared, keepId: true });
+      createdPages.push(created);
+      layoutChanges[`system.cards.${noteId}`] = imported.workspace.layout.cards[noteId];
+    }
+    for (const [labelId, label] of Object.entries(imported.workspace.layout.labels)) {
+      if (!Object.hasOwn(baseLabels, labelId)) layoutChanges[`system.labels.${labelId}`] = label;
+    }
+    for (const [pinId, pin] of Object.entries(imported.workspace.layout.pins)) {
+      if (!Object.hasOwn(basePins, pinId)) layoutChanges[`system.pins.${pinId}`] = pin;
+    }
+    for (const [linkId, link] of Object.entries(imported.workspace.layout.pinLinks)) {
+      if (!Object.hasOwn(basePinLinks, linkId)) {
+        layoutChanges[`system.pinLinks.${linkId}`] = link;
+      }
+    }
+    // One layout write keeps cards and their attached labels/pins visible in the same pass.
+    if (Object.keys(layoutChanges).length) await layout.update(layoutChanges);
+  } catch (err) {
+    console.error("Journalinator: private publish failed", err);
+    for (const created of createdPages) await created.delete().catch(() => {});
+    notifyUser(senderUserId, "Invalid note payload.");
+    return;
+  }
+
+  const newPins = imported.workspace.layout.pins;
+  for (const created of createdPages) {
+    const note = imported.workspace.notes[created.id];
+    Hooks.callAll("journalinatorNoteCreated", {
+      noteId: created.id,
+      authorId: senderUserId,
+      body: note.body,
+      previousBody: "",
+      layout: note.layout,
+      skin: note.skin,
+      revision: 0,
+      source: "paste",
+      createdAt: now
+    });
+    for (const link of note.links ?? []) {
+      fireThreadCreated({
+        noteId: created.id,
+        linkId: link.id,
+        targetId: link.targetId,
+        authorId: senderUserId,
+        kind: "note-link",
+        board: false
+      });
+    }
+  }
+  for (const [linkId, link] of Object.entries(imported.workspace.layout.pinLinks)) {
+    if (Object.hasOwn(basePinLinks, linkId)) continue;
+    const sourceNotes = pinRefNoteIds(link.source, newPins);
+    const targetNotes = pinRefNoteIds(link.target, newPins);
+    fireThreadCreated({
+      noteId: sourceNotes[0] ?? "",
+      linkId,
+      targetId: targetNotes[0] ?? "",
+      authorId: senderUserId,
+      kind: "pin-link",
+      board: true
+    });
+  }
+
+  acknowledgeWriteApplied(senderUserId, {
+    kind: "publish",
+    action: "published",
+    count: createdPages.length,
+    noteIds: createdPages.map(created => created.id)
+  });
+}
+
 async function handleMessage(message, senderUserId) {
   if (message.type === "sendPrivateTransfer"
       || message.type === "acceptPrivateTransfer"
@@ -1447,6 +1643,11 @@ async function handleMessage(message, senderUserId) {
   if (!ids) return;
   const shared = game.journal.get(ids.shared);
   if (!shared) return;
+
+  if (message.type === "publishPrivateNote" || message.type === "publishPrivateNotes") {
+    await handlePublishPrivateMessage(message, senderUserId);
+    return;
+  }
 
   if (EDIT_COMMAND_TYPES.has(message.type)) {
     return handleEditCommand(shared, message, senderUserId);
