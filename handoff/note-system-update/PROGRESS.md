@@ -1,10 +1,10 @@
 # Note-system rewrite — progress ledger
 
-Coordinator: OpenCode. Implementation branch: `note-system-update-impl` (child of `note-system-update`). Current implementation head: `283fbd1` (T15 `52acca1` plus final verification ledger).
+Coordinator: OpenCode. Implementation branch: `note-system-update-impl` (child of `note-system-update`). Current implementation head: the tip of `note-system-update-impl` (T17 `423bcd4` plus this final documentation/ledger commit).
 
-Owner approval: 2026-11-28, Phase 0 gate approved as designed.
+Owner approval: 2026-11-28, Phase 0 gate approved as designed. Owner requested preservation of the `main` 0.9.7 link/visual patches and a `main` merge.
 
-**Final status:** implemented and integrated on `note-system-update-impl`. Unit suite 593/593 pass, `npm run check` passes. Real Foundry v14 verification with GM + two players passed the tested scope after T14/T15 fixes; remaining unverified cases are listed in the T15 section. `note-system-update` itself has not been advanced, pushed, merged to main, released or deployed.
+**Final status:** implemented, integrated and verified on `note-system-update-impl`. Unit suite 610/610 pass, `npm run check` passes. Real Foundry v14 GM + two players verification passed the tested scope after T14/T15/T17, including the owner's 0.9.7 link overhaul and visual polish merged from `main`. Local `main` is fast-forwarded to the verified implementation tip; nothing is pushed, released or deployed, and the canonical working checkout/live symlink remains on the older `note-system-update` branch.
 
 **Task rows T1-T12 were committed on their task branches and integrated in dependency order; T13a/T14/T15 are the independent verification/convergence/fix chain.**
 
@@ -16,19 +16,19 @@ The work is complete on `note-system-update-impl`. The canonical `note-system-up
 git -C /home/Riv/Projects/fvtt-journalinator merge --ff-only note-system-update-impl
 ```
 
-No push, main merge, release, packaging or live-world change was performed. Remaining unverified cases are listed at the end of the T15 section; the most important are private transfers/inbox, IME/undo/copy-paste, background tabs, GM failover, locked restyle/copy/transfer/checkbox, and RU UI (the verification Foundry install ships only core English).
+Local `main` has been fast-forwarded to the verified implementation tip at the owner's request. Nothing is pushed, released, packaged for distribution or deployed, and the canonical working checkout/live symlink was not changed. Remaining unverified cases are listed at the end of the T15 section; the most important are private transfers/inbox, IME/undo/copy-paste, background tabs, GM failover, locked restyle/copy/transfer/checkbox, and RU UI (the verification Foundry install ships only core English).
 
 ## Isolation
 
 | Purpose | Path |
 | --- | --- |
 | Canonical checkout (untouched) | `/home/Riv/Projects/fvtt-journalinator` @ `note-system-update` (`c778b35`) |
-| Implementation worktree/branch | `/home/Riv/Projects/fvtt-journalinator-impl` @ `note-system-update-impl` (`3d4ccc2`) |
-| T12 worktree/branch | `/tmp/opencode/wt-t12` @ `task/t12-docs` (base `3d4ccc2`) |
+| Implementation worktree/branch | `/home/Riv/Projects/fvtt-journalinator-impl` @ `note-system-update-impl` (tip) |
+| Local `main` | fast-forwarded to the verified implementation tip; not pushed |
 | Disposable Foundry data root | `/tmp/opencode/foundry-note-system-test` (exists; not live data) |
 | Live Foundry data (prohibited) | `/home/Riv/foundry-v14-data` |
 
-The canonical branch remains untouched until the coordinator approves final integration. Nothing has been pushed, merged, released, packaged for distribution or deployed from the implementation branch.
+The canonical working checkout remains on `note-system-update`; local `main` now points at the verified implementation. Nothing has been pushed, released, packaged for distribution or deployed from the implementation branch.
 
 ## Baseline evidence (actual run)
 
@@ -39,10 +39,10 @@ The canonical branch remains untouched until the coordinator approves final inte
 
 ## Current integrated test evidence
 
-- Final `npm test`: **593 tests, 593 pass, 0 fail, 0 skipped**.
+- Final `npm test`: **610 tests, 610 pass, 0 fail, 0 skipped** (0.9.7 link/visual patches merged).
 - Final `npm run check`: **passes**.
-- Real Foundry v14 verification: T15 section below (GM + two players, disposable roots/ports, real screenshots).
-- The T13/T14 FAIL sections below are retained as chronological history and are superseded by the T15 pass table.
+- Real Foundry v14 verification: T15/T16/T17 sections below (GM + two players, disposable roots/ports, real screenshots).
+- The T13/T14 FAIL sections below are retained as chronological history and are superseded by the final passes.
 
 ## Task ledger
 
@@ -66,6 +66,8 @@ The canonical branch remains untouched until the coordinator approves final inte
 | T13b | Independent real Foundry verification | verification | `task/t13b-foundry` | complete in tested scope | GM + two players on disposable Foundry 14.367; screenshots/logs in `/tmp/opencode/note-system-evidence/`; T14/T15 blockers fixed and re-verified; unverified list recorded | ledger commit |
 | T14 | Real-Foundry UI fixes | verification/fixes | `task/t14-foundry-fixes` | complete | editor chrome CSS, canvas pointer/dblclick routing, close/re-acquire guard, recovery/history visibility, unlock reachability/name, legacy guard; 581/581 | `7afbc57` |
 | T15 | Cross-session/status fixes | verification/fixes | `task/t15-session-fixes` | complete | sequence seeded from grant receipt, forced reason propagated, selection-bar/unlock stacking, rejected-save copy; 593/593 | `52acca1` |
+| T16 | Integrate `main` 0.9.7 link/visual patches | integration | `task/integrate-097` | complete | merge commit preserving link overhaul/polish and v2 rewrite; 607/607; real Foundry 0.9.7 + v2 pass | `a7831dd` |
+| T17 | Link inspector/route label UX | verification/fixes | `task/t17-link-ux` | complete | pin-link inspector survives style writes; route detach uses derived title; 610/610; focused real Foundry pass | `423bcd4` |
 
 ## Decisions of record
 
