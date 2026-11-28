@@ -7,8 +7,17 @@ import { openPrivateAdmin } from "./private-admin.mjs";
 import { privateStore } from "../store/private-store.mjs";
 import { countSharedTransferDrops, countTransferDrops } from "../private-transfer.mjs";
 import { createNoteFromMenu, openCreationMenu } from "./note-dialog.mjs";
-import { noteFilterKey, noteMatchesQuery, notePresentationLabelKey, noteSearchLabel } from "./note-search.mjs";
-import { computeJournalStats, deriveSessions, selectLiveSharedNotes } from "../stats.mjs";
+import {
+  noteMatchesFilters, noteMatchesQuery, noteSearchLabel, noteSecondaryExcerpt
+} from "./note-search.mjs";
+import { createNoteFromQuery } from "../templates.mjs";
+import { openHistoryDialog } from "./history-dialog.mjs";
+import {
+  incompatibleNoticeHTML,
+  isIncompatibleStatus,
+  noGmBannerHTML,
+  privateIncompatibleNoticeHTML
+} from "./notices.mjs";
 import { defaultControlTarget } from "./scene-control.mjs";
 import { BOARD_BACKGROUND_IDS, applyTheme, getTheme, listThemes } from "../styles/themes.mjs";
 import { SCENE_THEME_ID, clearSceneThemeCache, sceneTheme } from "../scene-palette.mjs";
@@ -53,6 +62,126 @@ function toolbarButton(className, icon, label, disabled = false, badge = null, p
     <i class="fa-solid ${icon}" aria-hidden="true"></i>${count}</button>`;
 }
 
+/** Stored-layout filters only: All is represented by `null`. */
+const NOTE_LAYOUT_FILTERS = Object.freeze([
+  ["plain", "JN.Layout.Plain"],
+  ["profile", "JN.Layout.Profile"]
+]);
+
+/**
+ * Quick-switcher creation model. Empty text starts as Blank; anything else becomes a first-line
+ * `# <query>` on Plain/Cream. Duplicate titles are intentionally allowed.
+ */
+export function quickCreateModel(query, { x = 0, y = 0, clientSessionId: session = "" } = {}) {
+  const created = createNoteFromQuery(query);
+  const message = {
+    type: "createNote",
+    body: created.body,
+    layout: created.layout,
+    skin: created.skin,
+    x: Number.isFinite(x) ? x : 0,
+    y: Number.isFinite(y) ? y : 0,
+    requestEdit: true,
+    ...(typeof session === "string" && session ? { clientSessionId: session } : {})
+  };
+  return { message, focus: created.focus, note: created };
+}
+
+/** Sends one quick-switcher creation and calls `onCreated` only for a real `noteCreated` reply. */
+export async function createSharedNoteFromQuery({
+  query,
+  x,
+  y,
+  clientSessionId,
+  requestEditReply,
+  onCreated
+} = {}) {
+  const model = quickCreateModel(query, { x, y, clientSessionId });
+  if (typeof requestEditReply !== "function") return { ok: false, reason: "transport" };
+  let reply;
+  try {
+    reply = await requestEditReply(model.message);
+  } catch (error) {
+    return { ok: false, reason: "transport", error };
+  }
+  if (!reply || reply.type !== "noteCreated" || typeof reply.noteId !== "string") {
+    return { ok: false, reason: reply?.reason ?? reply?.type ?? "rejected", reply };
+  }
+  const result = {
+    ok: true,
+    reply,
+    focus: model.focus,
+    note: {
+      noteId: reply.noteId,
+      revision: Number.isInteger(reply.revision) ? reply.revision : 0,
+      body: typeof reply.body === "string" ? reply.body : model.note.body,
+      layout: reply.layout === "profile" ? "profile" : "plain",
+      skin: reply.skin ?? model.note.skin
+    }
+  };
+  await onCreated?.(result);
+  return result;
+}
+
+/** Internal clipboard entry: current v2 content only, never title/blocks/identity. */
+export function clipboardEntryForNote(note) {
+  const system = note?.system ?? {};
+  return {
+    body: typeof system.body === "string" ? system.body : "",
+    layout: system.layout === "profile" ? "profile" : "plain",
+    skin: resolveSkin(note)
+  };
+}
+
+/** `pasteNote` protocol message; the active GM allocates fresh ids. */
+export function clipboardPasteMessage(entry, { x = 0, y = 0 } = {}) {
+  return {
+    type: "pasteNote",
+    body: typeof entry?.body === "string" ? entry.body : "",
+    layout: entry?.layout === "profile" ? "profile" : "plain",
+    skin: entry?.skin ?? resolveSkin({}),
+    x: Number.isFinite(x) ? x : 0,
+    y: Number.isFinite(y) ? y : 0
+  };
+}
+
+/** Derived trash row model: label/excerpt plus deletion author and date, never the page name. */
+export function trashRowModel(note, { t = (key, data) => (data ? key : key), users = game.users } = {}) {
+  const deleted = note?.system?.deleted;
+  const by = deleted?.by ? users?.get?.(deleted.by)?.name ?? t("JN.Common.Unknown") : "";
+  const date = Number.isFinite(deleted?.at)
+    ? new Date(deleted.at).toLocaleString(game.i18n?.lang || undefined)
+    : "";
+  let text = t("JN.Trash.MetadataUnknown");
+  if (by && date) {
+    text = deleted.by === game.user?.id
+      ? t("JN.Trash.DeletedByYouAt", { date })
+      : t("JN.Trash.DeletedMeta", { name: by, date });
+  } else if (by) {
+    text = t("JN.Trash.DeletedBy", { name: by });
+  } else if (date) {
+    text = t("JN.Trash.DeletedDate", { date });
+  }
+  return {
+    label: noteSearchLabel(note),
+    excerpt: noteSecondaryExcerpt(note),
+    deletedBy: by,
+    deletedAt: Number.isFinite(deleted?.at) ? deleted.at : 0,
+    metadata: text
+  };
+}
+
+/** Resolves a copy selection, refusing the whole action when any note is remote-locked. */
+export function collectCopyableNotes(notes, ids, isLocked = () => false) {
+  const requested = [...new Set((Array.isArray(ids) ? ids : []).filter(id => typeof id === "string" && id))];
+  if (requested.some(id => isLocked(id))) return { blocked: true, notes: [] };
+  const byId = new Map((Array.isArray(notes) ? notes : []).map(note => [note?._id ?? note?.id, note]));
+  return {
+    blocked: false,
+    notes: requested.map(id => byId.get(id)).filter(note => note && !note.system?.deleted)
+  };
+}
+
 const { ApplicationV2 } = foundry.applications.api;
 
 /**
@@ -88,17 +217,9 @@ function restoreControlMode() {
     .finally(() => { sceneControlRestoreDepth = Math.max(0, sceneControlRestoreDepth - 1); });
 }
 
-/** Filter keys are presentation semantics, not legacy style storage keys. */
-const NOTE_FILTERS = Object.freeze([
-  ["memo", "JN.Style.Memo"],
-  ["document", "JN.Style.Document"],
-  ["target", "JN.Style.Target"],
-  ["location", "JN.Kind.Location"]
-]);
-
 /**
- * Fullscreen app: a top bar (title, quick switcher, + New Note, + Label, Trash, Stats, preview
- * toggle and filters), the note canvas taking the center, and an editor panel on the
+ * Fullscreen app: a top bar (title, quick switcher, + New Note, + Label, Trash and filters),
+ * the note canvas taking the center, and an editor panel on the
  * right. Raw DOM render — no Handlebars — since ApplicationV2 supports that directly by
  * implementing _renderHTML/_replaceHTML ourselves.
  *
@@ -122,7 +243,7 @@ export default class JournalApp extends ApplicationV2 {
   #selectedNoteId = null;
   #query = "";
   #filterAuthors = new Set();
-  #filterStyles = new Set();
+  #layoutFilter = null;
   #switcherOpen = false;
   #switcherHighlight = 0;
   #hookIds = [];
@@ -142,6 +263,7 @@ export default class JournalApp extends ApplicationV2 {
   // later fails. The success notice, however, is delayed until every note in the batch is
   // acknowledged; a rejected/rolled-back write sends no ack, so no false "Deleted N" appears.
   #pendingDeleteAcks = new Map();
+  #historyDialog = null;
   #deleteConfirmPending = false;
   #replacingHTML = false;
   #editor = new NoteEditor({
@@ -243,6 +365,16 @@ export default class JournalApp extends ApplicationV2 {
     return this.#canvas.isNoteLocked?.(noteId) === true;
   }
 
+  /** Shared writes require both an active GM and a current stored schema. */
+  #sharedWritable() {
+    if (!game.users?.activeGM) return false;
+    return notesStore.getSchemaStatus().current === true;
+  }
+
+  #warnIncompatible() {
+    ui.notifications?.warn(t("JN.Notices.Incompatible"));
+  }
+
   #warnLocked() {
     ui.notifications?.warn(t("JN.Lock.LockedAction"));
   }
@@ -252,6 +384,10 @@ export default class JournalApp extends ApplicationV2 {
    * always released in `finally`, even when the save is rejected or the transport disappears.
    */
   async #withShortLease(noteId, action) {
+    if (!notesStore.getSchemaStatus().current) {
+      this.#warnIncompatible();
+      return null;
+    }
     if (this.#noteLocked(noteId)) {
       this.#warnLocked();
       return null;
@@ -283,8 +419,9 @@ export default class JournalApp extends ApplicationV2 {
 
   /** Opens the shared Blank/Document/Profile menu, anchored to a toolbar button or board point. */
   #openCreationMenuAt(x, y, { clientX, clientY } = {}) {
-    if (!game.users?.activeGM) {
-      ui.notifications?.warn(t("JN.TopBar.Offline"));
+    if (!this.#sharedWritable()) {
+      if (!game.users?.activeGM) ui.notifications?.warn(t("JN.Notices.NoGM"));
+      else this.#warnIncompatible();
       return null;
     }
     const root = this.#canvas.root;
@@ -304,8 +441,9 @@ export default class JournalApp extends ApplicationV2 {
   }
 
   async #createFromTemplate(templateId, { x, y }) {
-    if (!game.users?.activeGM) {
-      ui.notifications?.warn(t("JN.TopBar.Offline"));
+    if (!this.#sharedWritable()) {
+      if (!game.users?.activeGM) ui.notifications?.warn(t("JN.Notices.NoGM"));
+      else this.#warnIncompatible();
       return null;
     }
     const result = await createNoteFromMenu({
@@ -338,8 +476,9 @@ export default class JournalApp extends ApplicationV2 {
   async #beginEditing(noteId, point = null, noteOverride = null, focus = null) {
     if (!noteId) return { ok: false };
     if (this.#view !== "shared") return { ok: false };
-    if (!game.users?.activeGM) {
-      ui.notifications?.warn(t("JN.TopBar.Offline"));
+    if (!this.#sharedWritable()) {
+      if (!game.users?.activeGM) ui.notifications?.warn(t("JN.Notices.NoGM"));
+      else this.#warnIncompatible();
       return { ok: false };
     }
     if (this.#noteLocked(noteId)) {
@@ -415,6 +554,7 @@ export default class JournalApp extends ApplicationV2 {
 
   /** One revisioned task-toggle write outside the editor, under a short whole-note lease. */
   async #toggleTask(noteId, index) {
+    if (!notesStore.getSchemaStatus().current) return this.#warnIncompatible();
     if (this.#noteLocked(noteId)) return this.#warnLocked();
     const note = this.#noteFor(noteId);
     if (!note) return;
@@ -444,6 +584,7 @@ export default class JournalApp extends ApplicationV2 {
   }
 
   #resizeCard(noteId, width, height) {
+    if (!notesStore.getSchemaStatus().current) return this.#warnIncompatible();
     if (this.#noteLocked(noteId)) return this.#warnLocked();
     const card = notesStore.getLayout()?.cards?.[noteId];
     if (!card) return;
@@ -458,6 +599,10 @@ export default class JournalApp extends ApplicationV2 {
   }
 
   #autoSizeNotes(ids) {
+    if (!notesStore.getSchemaStatus().current) {
+      this.#warnIncompatible();
+      return Promise.resolve(false);
+    }
     const requested = Array.isArray(ids) ? ids : [];
     if (requested.some(noteId => this.#noteLocked(noteId))) {
       this.#warnLocked();
@@ -492,6 +637,10 @@ export default class JournalApp extends ApplicationV2 {
   /** Short-lease appearance/layout write; body text and revision are untouched. */
   async #applyAppearance(ids, patch = {}) {
     if (!Array.isArray(ids) || !ids.length) return false;
+    if (!notesStore.getSchemaStatus().current) {
+      this.#warnIncompatible();
+      return false;
+    }
     if (this.#canvas.readOnly) return false;
     if (ids.some(id => this.#noteLocked(id))) {
       this.#warnLocked();
@@ -540,26 +689,37 @@ export default class JournalApp extends ApplicationV2 {
 
   #openHistory(noteId) {
     if (this.#historyHandler) return this.#historyHandler(noteId);
-    return null;
+    const note = this.#noteFor(noteId);
+    if (!note) return null;
+    const dialog = openHistoryDialog({
+      noteId,
+      note,
+      requestEditReply,
+      clientSessionId,
+      isLocked: () => this.#noteLocked(noteId),
+      notify: (level, message) => ui.notifications?.[level]?.(message),
+      onRestored: () => {
+        if (this.#view === "shared" && this.#canvas.root.isConnected) this.render();
+      },
+      t
+    });
+    this.#historyDialog = dialog;
+    return dialog;
   }
 
   /** Clipboard payload is the current v2 content only. */
   #copyNotes(ids) {
-    const requested = Array.isArray(ids) ? ids : [];
-    if (requested.some(id => this.#canvas.isNoteLocked?.(id))) {
+    const { blocked, notes } = collectCopyableNotes(
+      notesStore.getAllNotes(),
+      ids,
+      id => this.#canvas.isNoteLocked?.(id) === true
+    );
+    if (blocked) {
       this.#warnLocked();
       return false;
     }
-    const notes = requested
-      .map(id => this.#noteFor(id))
-      .filter(note => note && !note.system.deleted);
     if (!notes.length) return false;
-    this.#clipboard = notes.map(note => ({
-      body: typeof note.system.body === "string" ? note.system.body : "",
-      layout: note.system.layout === "profile" ? "profile" : "plain",
-      skin: resolveSkin(note),
-      schemaVersion: 2
-    }));
+    this.#clipboard = notes.map(clipboardEntryForNote);
     ui.notifications?.info(t("JN.Clipboard.Copied", { count: this.#clipboard.length }));
     return true;
   }
@@ -580,26 +740,24 @@ export default class JournalApp extends ApplicationV2 {
       ui.notifications?.warn(t("JN.Clipboard.PrivateUnsupported"));
       return true;
     }
-    if (!game.users.activeGM) {
-      ui.notifications?.warn(t("JN.TopBar.Offline"));
+    if (!this.#sharedWritable()) {
+      if (!game.users?.activeGM) ui.notifications?.warn(t("JN.Notices.NoGM"));
+      else this.#warnIncompatible();
       return true;
     }
     const position = this.#canvas.newCardPosition();
     for (const entry of this.#clipboard) {
-      await requestWrite({
-        type: "pasteNote",
-        body: entry.body,
-        layout: entry.layout,
-        skin: entry.skin,
-        x: position.x,
-        y: position.y
-      });
+      await requestWrite(clipboardPasteMessage(entry, position));
     }
     ui.notifications?.info(t("JN.Clipboard.Pasted", { count: this.#clipboard.length }));
     return true;
   }
 
   #deleteNotes(ids) {
+    if (!notesStore.getSchemaStatus().current) {
+      this.#warnIncompatible();
+      return false;
+    }
     const unique = [...new Set(Array.isArray(ids) ? ids : [])].filter(id => {
       const page = notesStore.getSharedPage(id);
       return page && !page.system.deleted;
@@ -797,6 +955,8 @@ export default class JournalApp extends ApplicationV2 {
   }
 
   _onClose() {
+    this.#historyDialog?.close?.();
+    this.#historyDialog = null;
     this.#canvas.finishInlineText();
     this.#editor.deactivate();
     this.#canvas.cancelLinkTool();
@@ -870,6 +1030,7 @@ export default class JournalApp extends ApplicationV2 {
   /** One idempotent pin cleanup per app session, once an active GM can service the write. */
   #normalizePinsOnce() {
     if (this.#pinsNormalized || !game.users?.activeGM) return;
+    if (!notesStore.getSchemaStatus().current) return;
     this.#pinsNormalized = true;
     requestWrite({ type: "normalizePins" });
   }
@@ -911,24 +1072,29 @@ export default class JournalApp extends ApplicationV2 {
     const sharedSend = root.querySelector(".journalinator-shared-send");
     if (sharedSend) {
       const selection = this.#canvas?.getSelectedNoteIds?.() ?? [];
-      const sendable = this.#sharedSendableIds(selection);
+      const locked = selection.some(id => this.#noteLocked(id));
+      const sendable = locked ? [] : this.#sharedSendableIds(selection);
       const hasOtherUser = [...(game.users ?? [])].some(user => user && user.id !== game.user.id);
       const hasDestination = hasOtherUser || !!privateStore.findActive(game.user.id);
-      const canSend = !offline && sendable.length > 0 && hasDestination;
+      const writeBlocked = !offline && !notesStore.getSchemaStatus().current;
+      const canSend = !offline && !writeBlocked && sendable.length > 0 && hasDestination;
       sharedSend.disabled = !canSend;
       sharedSend.classList.toggle("disabled", !canSend);
       this.#setIconLabel(sharedSend, offline
         ? t("JN.Private.NeedGM")
-        : (!sendable.length
-          ? t(selection.length ? "JN.Transfer.VisibleOnly" : "JN.Transfer.SelectNotes")
-          : (!hasDestination ? t("JN.Transfer.NoRecipients") : t("JN.Transfer.SendTo"))));
+        : (writeBlocked
+          ? t("JN.Notices.Incompatible")
+          : (locked
+            ? t("JN.Transfer.Locked")
+            : (!sendable.length
+              ? t("JN.Transfer.SelectNotes")
+              : (!hasDestination ? t("JN.Transfer.NoRecipients") : t("JN.Transfer.SendTo"))))));
     }
   }
 
-  /** Live shared note ids from a selection. */
+  /** Live shared note ids from a selection. Locked notes are rejected by the caller. */
   #sharedSendableIds(ids) {
     const requested = (Array.isArray(ids) ? ids : []).filter(id => typeof id === "string" && id);
-    if (requested.some(id => this.#canvas?.isNoteLocked?.(id))) return [];
     return requested.filter(id => {
       const page = notesStore.getSharedPage(id);
       return !!page && !page.system.deleted;
@@ -1056,13 +1222,19 @@ export default class JournalApp extends ApplicationV2 {
     let options;
 
     if (sharedSource) {
+      if (!notesStore.getSchemaStatus().current) {
+        return ui.notifications?.warn(t("JN.Notices.Incompatible"));
+      }
+      if (requested.some(id => this.#canvas?.isNoteLocked?.(id))) {
+        return ui.notifications?.warn(t("JN.Lock.LockedAction"));
+      }
       selected = this.#sharedSendableIds(requested);
       if (!selected.length) {
         return ui.notifications?.warn(requested.length
-          ? t("JN.Transfer.VisibleOnly") : t("JN.Transfer.None"));
+          ? t("JN.Transfer.Unavailable") : t("JN.Transfer.None"));
       }
       if (selected.length < requested.length) {
-        ui.notifications?.warn(t("JN.Transfer.HiddenExcluded"));
+        ui.notifications?.warn(t("JN.Transfer.Unavailable"));
       }
       const ownPage = privateStore.findActive(game.user.id);
       const recipients = [...(game.users ?? [])]
@@ -1080,7 +1252,10 @@ export default class JournalApp extends ApplicationV2 {
         details(user) ? ` (${foundry.utils.escapeHTML(details(user))})` : ""}</option>`).join("");
       if (!options) return ui.notifications?.warn(t("JN.Transfer.NoRecipients"));
       titles = selected
-        .map(id => notesStore.getSharedPage(id)?.name ?? "")
+        .map(id => {
+          const page = notesStore.getSharedPage(id);
+          return page ? noteSearchLabel(page) : "";
+        })
         .filter(Boolean);
       drops = countSharedTransferDrops(notesStore.getSharedNotes(), selected);
     } else {
@@ -1099,7 +1274,15 @@ export default class JournalApp extends ApplicationV2 {
           foundry.utils.escapeHTML(user.name ?? user.id)
         }${details(user) ? ` (${foundry.utils.escapeHTML(details(user))})` : ""}</option>`).join("");
       titles = selected
-        .map(id => this.#private.workspace?.notes?.[id]?.title ?? "")
+        .map(id => {
+          const note = this.#private.workspace?.notes?.[id];
+          if (!note) return "";
+          try {
+            return noteSearchLabel(privateStore.noteView(this.#private.page, note));
+          } catch {
+            return "";
+          }
+        })
         .filter(Boolean);
       drops = countTransferDrops(this.#private.workspace, selected);
     }
@@ -1151,7 +1334,14 @@ export default class JournalApp extends ApplicationV2 {
         return;
       }
       if (toUserId === "__main__") {
-        for (const id of selected) this.#publishPrivateNote(id);
+        if (!this.#sharedWritable()) {
+          if (!game.users?.activeGM) ui.notifications?.warn(t("JN.Notices.NoGM"));
+          else this.#warnIncompatible();
+          return;
+        }
+        // One batch import so links between the selected notes are remapped together and
+        // threads/activity are counted once.
+        requestWrite({ type: "publishPrivateNotes", noteIds: selected });
         this.#closeTransferPanels(root);
         return;
       }
@@ -1163,13 +1353,6 @@ export default class JournalApp extends ApplicationV2 {
       ? (root.querySelector(".jn-shared-send") ?? root.querySelector(".journalinator-shared-send"))
       : root.querySelector(".jn-private-send");
     this.#showTransferPanel(panel, trigger ?? fallbackTrigger);
-  }
-
-  async #publishPrivateNote(_id) {
-    // TODO(T11): publish private notes with the current v2 body/layout/skin payload. The old
-    // block/style payload referenced the removed schema, so T8 deliberately leaves this panel
-    // inert instead of sending invalid data. The private T7 model lands with the transfer task.
-    return false;
   }
 
   /** Recipient inbox: every pending copy addressed to this user, with Accept/Decline. */
@@ -1231,20 +1414,26 @@ export default class JournalApp extends ApplicationV2 {
   }
 
   #matchesFilters(note) {
-    if (this.#view === "private") {
-      return !this.#filterStyles.size || this.#filterStyles.has(noteFilterKey(note));
-    }
-    if (this.#filterAuthors.size && !this.#filterAuthors.has(note.system.authorId)) return false;
-    if (this.#filterStyles.size && !this.#filterStyles.has(noteFilterKey(note))) return false;
-    return true;
+    return noteMatchesFilters(note, {
+      layout: this.#layoutFilter,
+      authorIds: this.#view === "private" ? null : this.#filterAuthors
+    });
   }
 
   #activeNotes() {
     if (this.#view === "private") {
       const page = privateStore.findActive(game.user.id);
-      return page ? privateStore.noteViews(page) : [];
+      if (!page) return [];
+      try {
+        return privateStore.noteViews(page);
+      } catch (error) {
+        if (error?.name !== "JN.Private.IncompatibleFormat") {
+          console.error("Journalinator: private note read failed", error);
+        }
+        return [];
+      }
     }
-    return notesStore.getAllNotes();
+    return notesStore.getSchemaStatus().current ? notesStore.getAllNotes() : [];
   }
 
   async _prepareContext() {
@@ -1252,26 +1441,55 @@ export default class JournalApp extends ApplicationV2 {
     const isPrivate = view === "private";
     const privatePage = privateStore.findActive(game.user.id);
     const pendingPage = privateStore.findPending(game.user.id);
-    const privateData = isPrivate && privatePage ? privateStore.read(privatePage) : null;
-    const notes = isPrivate && privateData
-      ? privateStore.noteViews(privatePage, privateData)
-      : notesStore.getAllNotes();
+    let privateData = null;
+    let privateIncompatible = false;
+    if (isPrivate && privatePage) {
+      try {
+        privateData = privateStore.read(privatePage);
+      } catch (error) {
+        if (error?.name !== "JN.Private.IncompatibleFormat") {
+          console.error("Journalinator: private workspace read failed", error);
+        }
+        privateIncompatible = true;
+      }
+    }
+    const schemaStatus = isPrivate ? null : notesStore.getSchemaStatus();
+    const incompatible = !isPrivate && isIncompatibleStatus(schemaStatus);
+    let notes = [];
+    if (isPrivate && privateData) {
+      try {
+        notes = privateStore.noteViews(privatePage, privateData);
+      } catch (error) {
+        if (error?.name !== "JN.Private.IncompatibleFormat") {
+          console.error("Journalinator: private note read failed", error);
+        }
+        privateIncompatible = true;
+      }
+    } else if (!isPrivate && !incompatible) {
+      notes = notesStore.getAllNotes();
+    }
     const q = this.#query.trim().toLowerCase();
-    const authors = isPrivate ? [] : [...new Map(notes.map(n => [n.system.authorId, game.users.get(n.system.authorId)])).entries()]
-      .filter(([, u]) => u);
+    const authors = isPrivate
+      ? []
+      : [...new Map(notes.map(n => [n.system.authorId, game.users.get(n.system.authorId)])).entries()]
+        .filter(([, u]) => u);
     const themeChoice = game.settings.get("fvtt-journalinator", "boardTheme") ?? "stylized";
     const theme = await resolveThemeChoice(themeChoice);
+    const gmOnline = !!game.users.activeGM;
     return {
       view,
       allNotes: notes,
-      layout: isPrivate && privateData ? privateData.layout : notesStore.getLayout(),
+      layout: isPrivate ? privateData?.layout ?? null : (incompatible ? null : notesStore.getLayout()),
       privatePage,
       pendingPage,
+      privateData,
+      privateIncompatible,
       privateName: privatePage?.name ?? pendingPage?.name ?? "",
       canManagePrivate: game.user.isGM,
-      gmOnline: !!game.users.activeGM,
-      gmTier: false,
-      merged: false,
+      gmOnline,
+      sharedWritable: !isPrivate && gmOnline && !incompatible,
+      schemaStatus,
+      incompatible,
       theme: theme.id,
       themeObj: theme,
       themeChoice,
@@ -1297,7 +1515,7 @@ export default class JournalApp extends ApplicationV2 {
   async _renderHTML(context) {
     const root = document.createElement("div");
     const privateView = context.view === "private";
-    root.className = `journalinator-root${context.merged ? " jn-gm-view" : ""}${privateView ? " jn-private-view" : ""}`;
+    root.className = `journalinator-root${privateView ? " jn-private-view" : ""}`;
     applyTheme(root, context.themeObj);
     // Announce only real changes: a re-render of the same theme (including the cached scene
     // theme) must not spam the hook, but a scene palette regeneration must.
@@ -1314,6 +1532,12 @@ export default class JournalApp extends ApplicationV2 {
       `<label class="jn-menu-option"><input type="checkbox" data-kind="${kind}" value="${escape(id)}"
         ${selected.has(id) ? "checked" : ""}>${color ? `<span class="jn-dot" style="background:${escape(String(color))}"></span>` : ""}
         <span>${escape(label)}</span></label>`).join("");
+    const layoutFilters = () => [
+      ["", "JN.Filter.All"],
+      ...NOTE_LAYOUT_FILTERS
+    ].map(([id, labelKey]) => `<label class="jn-menu-option"><input type="radio"
+      name="jn-layout-filter" data-kind="layout" value="${escape(id)}"
+      ${(this.#layoutFilter ?? "") === id ? "checked" : ""}><span>${escape(t(labelKey))}</span></label>`).join("");
     // Board background picker. A saved choice that is not offered (an old theme id) is shown as
     // the original cork, because that is what it renders with.
     const backgroundLabel = t("JN.Theme.Picker");
@@ -1333,20 +1557,19 @@ export default class JournalApp extends ApplicationV2 {
         ${toolbarButton("journalinator-add-pin", "fa-thumbtack", t("JN.Pin.Tool"), offline, null, this.#canvas.pinTool)}
       </div>
       <div class="jn-toolbar-group">
-        <details class="jn-toolbar-dropdown journalinator-filters${this.#filterAuthors.size || this.#filterStyles.size ? " on" : ""}">
+        <details class="jn-toolbar-dropdown journalinator-filters${this.#filterAuthors.size || this.#layoutFilter ? " on" : ""}">
           <summary class="jn-toolbar-icon" ${tooltipAttrs(t("JN.Filter.Title"))}><i class="fa-solid fa-filter" aria-hidden="true"></i></summary>
           <div class="jn-toolbar-panel">
             ${context.authors.length ? `<div class="jn-menu-heading">${t("JN.Filter.Authors")}</div>
               ${filters(context.authors.map(([id, u]) => [id, u.name, u.color]), this.#filterAuthors, "author")}` : ""}
-            <div class="jn-menu-heading">${t("JN.Filter.Styles")}</div>
-            ${filters(NOTE_FILTERS.map(([id, labelKey]) => [id, t(labelKey)]), this.#filterStyles, "style")}
+            <div class="jn-menu-heading">${t("JN.Filter.Layouts")}</div>
+            ${layoutFilters()}
           </div>
         </details>
         ${themePicker}
       </div>
       <div class="jn-toolbar-group">
         ${toolbarButton("journalinator-trash", "fa-trash", trashLabel)}
-        ${toolbarButton("journalinator-stats", "fa-chart-column", t("JN.TopBar.Stats"))}
         ${toolbarButton("journalinator-shared-send", "fa-paper-plane", t("JN.Transfer.SelectNotes"), true)}
         ${toolbarButton("journalinator-fit", "fa-expand", t("JN.TopBar.FitAll"))}
       </div>`;
@@ -1364,17 +1587,16 @@ export default class JournalApp extends ApplicationV2 {
         ${privatePage ? toolbarButton("journalinator-private-add-pin", "fa-thumbtack", t("JN.Pin.Tool"), false, null, this.#private.canvas.pinTool) : ""}
       </div>
       <div class="jn-toolbar-group">
-        <details class="jn-toolbar-dropdown journalinator-filters${this.#filterStyles.size ? " on" : ""}">
+        <details class="jn-toolbar-dropdown journalinator-filters${this.#layoutFilter ? " on" : ""}">
           <summary class="jn-toolbar-icon" ${tooltipAttrs(t("JN.Filter.Title"))}><i class="fa-solid fa-filter" aria-hidden="true"></i></summary>
           <div class="jn-toolbar-panel">
-            <div class="jn-menu-heading">${t("JN.Filter.Styles")}</div>
-            ${filters(NOTE_FILTERS.map(([id, labelKey]) => [id, t(labelKey)]), this.#filterStyles, "style")}
+            <div class="jn-menu-heading">${t("JN.Filter.Layouts")}</div>
+            ${layoutFilters()}
           </div>
         </details>
         ${themePicker}
       </div>
       <div class="jn-toolbar-group">
-        ${privatePage ? toolbarButton("journalinator-private-stats", "fa-chart-column", t("JN.TopBar.Stats")) : ""}
         ${privatePage ? toolbarButton("journalinator-trash", "fa-trash", trashLabel) : ""}
         ${privatePage ? toolbarButton("journalinator-private-send", "fa-paper-plane", t("JN.Transfer.SelectNotes"), true) : ""}
         ${privatePage ? toolbarButton("journalinator-private-fit", "fa-expand", t("JN.TopBar.FitAll")) : ""}
@@ -1383,10 +1605,7 @@ export default class JournalApp extends ApplicationV2 {
           ${tooltipAttrs(t("JN.Private.AdminTitle"))}><i class="fa-solid fa-user-shield" aria-hidden="true"></i></button>` : ""}
       </div>`;
     const viewLabel = privateView ? t("JN.Private.PrivateCanvas") : t("JN.Private.MainCanvas");
-    root.innerHTML = `
-      <header class="journalinator-topbar">
-        <b class="jn-current-user"><span class="jn-dot" style="background:${escape(String(game.user.color ?? "#8d8d97"))}"></span>${escape(game.user.name)}</b>
-        <details class="jn-view-menu jn-toolbar-dropdown" aria-label="${t("JN.Private.ViewSwitch")}">
+    const viewSwitch = `<details class="jn-view-menu jn-toolbar-dropdown" aria-label="${t("JN.Private.ViewSwitch")}">
           <summary class="jn-view-switch" ${tooltipAttrs(t("JN.Private.ViewSwitch"))}>${viewLabel}<i class="fa-solid fa-chevron-down" aria-hidden="true"></i></summary>
           <div class="jn-view-panel">
             <button type="button" class="jn-view-option${privateView ? "" : " on"}" data-view="shared">${t("JN.Private.MainCanvas")}</button>
@@ -1396,7 +1615,32 @@ export default class JournalApp extends ApplicationV2 {
                 aria-label="${t("JN.Private.RenameWorkspace")}"><i class="fa-solid fa-pen" aria-hidden="true"></i></button>` : ""}
             </div>
           </div>
-        </details>
+        </details>`;
+    const userBadge = `<b class="jn-current-user"><span class="jn-dot" style="background:${escape(String(game.user.color ?? "#8d8d97"))}"></span>${escape(game.user.name)}</b>`;
+
+    if (!privateView && context.incompatible) {
+      root.innerHTML = `
+        <header class="journalinator-topbar">
+          ${userBadge}
+          ${viewSwitch}
+        </header>
+        <div class="journalinator-body jn-format-notice-body">${incompatibleNoticeHTML(t)}</div>`;
+      return root;
+    }
+    if (privateView && context.privatePage && context.privateIncompatible) {
+      root.innerHTML = `
+        <header class="journalinator-topbar">
+          ${userBadge}
+          ${viewSwitch}
+        </header>
+        <div class="journalinator-body jn-format-notice-body">${privateIncompatibleNoticeHTML(t)}</div>`;
+      return root;
+    }
+
+    root.innerHTML = `
+      <header class="journalinator-topbar">
+        ${userBadge}
+        ${viewSwitch}
         <div class="journalinator-search-wrap">
           <input type="text" inputmode="search" autocomplete="off" class="journalinator-search"
             aria-label="${t(privateView ? "JN.Private.Search" : "JN.TopBar.Search")}"
@@ -1407,9 +1651,8 @@ export default class JournalApp extends ApplicationV2 {
         <div class="jn-toolbar-tools">
           ${privateView ? privateToolbar : sharedToolbar}
         </div>
-        ${!privateView && context.gmTier ? this.#gmControlsHTML(context) : ""}
       </header>
-      ${!privateView && !context.gmOnline ? `<div class="journalinator-offline-banner">${t("JN.TopBar.Offline")}</div>` : ""}
+      ${!privateView && !context.gmOnline ? noGmBannerHTML(t) : ""}
       ${privateView && incomingCount ? `<button type="button" class="jn-transfer-banner journalinator-transfer-banner${offline ? " disabled" : ""}"
         ${offline ? "disabled" : ""}>
         <i class="fa-solid fa-inbox" aria-hidden="true"></i>
@@ -1428,13 +1671,22 @@ export default class JournalApp extends ApplicationV2 {
     this.#updateFilterIndicator(root);
 
     if (privateView) {
-      this.#private.setPage(privatePage);
-      if (privatePage) {
-        this.#private.canvas.setTheme(context.themeObj);
-        this.#private.canvas.pinsEnabled = this.#pinsEnabled();
-        this.#private.renderInto(root.querySelector(".journalinator-canvas-slot"), root.querySelector(".journalinator-editor"));
-        this.#private.setDimMatch(note => this.#matchesQuery(note, context.query) && this.#matchesFilters(note));
-        if (document.activeElement === this.#private.canvas.root) this.#focusedCanvasRenders.add(root);
+      if (privatePage && context.privateData && !context.privateIncompatible) {
+        try {
+          this.#private.setPage(privatePage);
+          this.#private.canvas.setTheme(context.themeObj);
+          this.#private.canvas.pinsEnabled = this.#pinsEnabled();
+          this.#private.renderInto(
+            root.querySelector(".journalinator-canvas-slot"),
+            root.querySelector(".journalinator-editor")
+          );
+          this.#private.setDimMatch(note => this.#matchesQuery(note, context.query) && this.#matchesFilters(note));
+          if (document.activeElement === this.#private.canvas.root) this.#focusedCanvasRenders.add(root);
+        } catch (error) {
+          if (error?.name !== "JN.Private.IncompatibleFormat") {
+            console.error("Journalinator: private workspace render failed", error);
+          }
+        }
       }
       if (this.#switcherOpen) this.#renderSwitcher(root, context.allNotes);
       return root;
@@ -1459,6 +1711,11 @@ export default class JournalApp extends ApplicationV2 {
   }
 
   #privateBodyHTML(context) {
+    if (context.privateIncompatible) {
+      return `<div class="journalinator-body jn-format-notice-body">${
+        privateIncompatibleNoticeHTML(t)
+      }</div>`;
+    }
     if (context.privatePage) {
       return `<div class="journalinator-body jn-private-body">
         <div class="journalinator-canvas-slot"></div>
@@ -1602,7 +1859,7 @@ export default class JournalApp extends ApplicationV2 {
         this.#switcherOpen = false;
         this.#switcherHighlight = 0;
         this.#filterAuthors.clear();
-        this.#filterStyles.clear();
+        this.#layoutFilter = null;
         this.#canvas.cancelLinkTool();
         this.#private.canvas.cancelLinkTool();
         this.#canvas.deactivatePinTool();
@@ -1673,9 +1930,6 @@ export default class JournalApp extends ApplicationV2 {
       requestWrite({ type: "privateDecline" });
     });
 
-    root.querySelector(".journalinator-private-stats")?.addEventListener("click", () => {
-      this.#private.openStats();
-    });
     root.querySelector(".journalinator-private-fit")?.addEventListener("click", () => {
       const ids = this.#private.getSelectedNoteIds();
       this.#private.canvas.fitNotes(ids.length ? ids : null);
@@ -1696,19 +1950,26 @@ export default class JournalApp extends ApplicationV2 {
       this.#openInboxPanel(root, event.currentTarget);
     });
 
-    root.querySelector(".journalinator-stats")?.addEventListener("click", () => this.#openStats());
     root.querySelector(".journalinator-fit")?.addEventListener("click", () => {
       const ids = this.#canvas.getSelectedNoteIds();
       this.#canvas.fitNotes(ids.length ? ids : null);
       this.#syncSelectionControls();
     });
 
+    root.querySelectorAll("[data-notice-close]").forEach(button => {
+      button.addEventListener("click", () => this.close?.());
+    });
+
     root.querySelectorAll(".journalinator-filters input").forEach(input => {
       input.addEventListener("change", () => {
-        const set = input.dataset.kind === "author" ? this.#filterAuthors : this.#filterStyles;
-        if (input.checked) set.add(input.value);
-        else set.delete(input.value);
-        input.closest("details").classList.toggle("on", !!(this.#filterAuthors.size || this.#filterStyles.size));
+        if (input.dataset.kind === "layout") {
+          this.#layoutFilter = input.value || null;
+        } else {
+          if (input.checked) this.#filterAuthors.add(input.value);
+          else this.#filterAuthors.delete(input.value);
+        }
+        input.closest("details").classList.toggle("on",
+          !!(this.#filterAuthors.size || this.#layoutFilter));
         this.#filterCanvasForSearch();
         if (this.#switcherOpen) this.#renderSwitcher(root, this.#activeNotes());
       });
@@ -1739,7 +2000,7 @@ export default class JournalApp extends ApplicationV2 {
   #updateFilterIndicator(root = this.element) {
     const indicator = root?.querySelector?.(".jn-filter-indicator");
     if (!indicator) return;
-    const active = !!this.#query.trim() || this.#filterStyles.size > 0 || this.#filterAuthors.size > 0;
+    const active = !!this.#query.trim() || this.#layoutFilter !== null || this.#filterAuthors.size > 0;
     if (!active) {
       indicator.hidden = true;
       indicator.textContent = "";
@@ -1759,24 +2020,43 @@ export default class JournalApp extends ApplicationV2 {
     indicator.title = t("JN.Filter.IndicatorHint");
   }
 
+  #canQuickCreate() {
+    return this.#view === "private"
+      ? !!privateStore.findActive(game.user.id)
+      : this.#sharedWritable();
+  }
+
   #renderSwitcher(root, allNotes) {
     const q = this.#query.trim();
     const list = this.#switcherList(allNotes);
-    const canCreate = this.#view === "private"
-      ? !!privateStore.findActive(game.user.id)
-      : !!game.users.activeGM;
-    const offerCreate = canCreate && q && !allNotes.some(n => n.name.toLowerCase() === q.toLowerCase());
-    this.#switcherHighlight = Math.max(0, Math.min(this.#switcherHighlight, list.length - (offerCreate ? 0 : 1)));
+    const offerCreate = this.#canQuickCreate();
+    const count = list.length + (offerCreate ? 1 : 0);
+    this.#switcherHighlight = Math.max(0, Math.min(this.#switcherHighlight, Math.max(0, count - 1)));
+    const escape = foundry.utils.escapeHTML;
+    const dateText = value => Number.isFinite(value) && value > 0
+      ? new Date(value).toLocaleDateString(game.i18n?.lang || undefined)
+      : "";
 
     const el = root.querySelector(".jn-switcher");
     el.innerHTML = (q ? "" : `<div class="jn-switcher-heading">${t("JN.Switcher.Recent")}</div>`) +
-      list.map((n, i) => `
-        <div class="jn-switcher-item${i === this.#switcherHighlight ? " hi" : ""}" data-id="${n._id}">
-          <span class="jn-dot" style="background:${game.users.get(n.system.authorId)?.color ?? "#8d8d97"}"></span>
-          <b>${foundry.utils.escapeHTML(noteSearchLabel(n))}</b>
-          <small>${n.secret ? t("JN.Switcher.GMOnly") : ""}${t(notePresentationLabelKey(n))}</small>
-        </div>`).join("") +
-      (offerCreate ? `<div class="jn-switcher-item jn-switcher-create${list.length === this.#switcherHighlight ? " hi" : ""}" data-create="1">${t("JN.Switcher.Create", { title: foundry.utils.escapeHTML(q) })}</div>` : "");
+      list.map((n, i) => {
+        const label = noteSearchLabel(n);
+        const excerpt = noteSecondaryExcerpt(n);
+        const author = game.users.get(n.system.authorId)?.name ?? "";
+        const date = dateText(n.system.updatedAt || n.system.createdAt);
+        const meta = [excerpt, author, date].filter(Boolean).join(" · ");
+        return `
+        <div class="jn-switcher-item${i === this.#switcherHighlight ? " hi" : ""}" data-id="${escape(n._id)}">
+          <span class="jn-dot" style="background:${escape(game.users.get(n.system.authorId)?.color ?? "#8d8d97")}"></span>
+          <b>${escape(label)}</b>
+          ${meta ? `<small>${escape(meta)}</small>` : ""}
+        </div>`;
+      }).join("") +
+      (offerCreate ? `<div class="jn-switcher-item jn-switcher-create${list.length === this.#switcherHighlight ? " hi" : ""}" data-create="1">${
+        q
+          ? t("JN.Switcher.Create", { title: escape(q) })
+          : t("JN.Switcher.CreateBlank")
+      }</div>` : "");
     el.style.display = "block";
 
     el.querySelectorAll(".jn-switcher-item").forEach(item => {
@@ -1794,20 +2074,29 @@ export default class JournalApp extends ApplicationV2 {
     else this.#canvas.focusNote(noteId);
   }
 
-  #createFromSwitcher(title) {
-    this.#clearSearch();
+  async #createFromSwitcher(title) {
+    const query = String(title ?? "").trim();
     if (this.#view === "private") {
-      this.#private.createNoteAt({ ...this.#private.canvas.newCardPosition(), title });
+      this.#clearSearch();
+      this.#private.createNoteAt({ ...this.#private.canvas.newCardPosition(), title: query });
       return;
     }
-    // TODO(T9): quick-switcher creation uses typed text as `# <query>` in Plain/Cream. The
-    // anchored Blank/Document/Profile menu is the supported shared creation path in T8.
-    this.#createNoteAt({ ...this.#canvas.newCardPosition(), initialTitle: title });
-  }
-
-  /** TODO(T9): quick-switcher create. T8 deliberately leaves this surface to the app task. */
-  #createNoteAt() {
-    return null;
+    if (!this.#sharedWritable()) {
+      if (!game.users?.activeGM) ui.notifications?.warn(t("JN.Notices.NoGM"));
+      else this.#warnIncompatible();
+      return;
+    }
+    const position = this.#canvas.newCardPosition();
+    this.#clearSearch();
+    const result = await createSharedNoteFromQuery({
+      query,
+      x: position.x,
+      y: position.y,
+      clientSessionId,
+      requestEditReply,
+      onCreated: created => this.#onNoteCreated(created)
+    });
+    if (!result.ok) ui.notifications?.warn(t("JN.Creation.Failed"));
   }
 
   #clearSearch() {
@@ -1825,10 +2114,7 @@ export default class JournalApp extends ApplicationV2 {
     const allNotes = this.#activeNotes();
     const list = this.#switcherList(allNotes);
     const q = this.#query.trim();
-    const canCreate = this.#view === "private"
-      ? !!privateStore.findActive(game.user.id)
-      : !!game.users.activeGM;
-    const offerCreate = canCreate && q && !allNotes.some(n => n.name.toLowerCase() === q.toLowerCase());
+    const offerCreate = this.#canQuickCreate();
     const count = list.length + (offerCreate ? 1 : 0);
 
     if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
@@ -1849,106 +2135,27 @@ export default class JournalApp extends ApplicationV2 {
     }
   }
 
-  #bar(label, value, max) {
-    const pct = max > 0 ? Math.round((value / max) * 100) : 0;
-    return `
-      <div class="jn-stat-bar">
-        <span>${foundry.utils.escapeHTML(label)}</span>
-        <div><i style="width:${pct}%"></i></div>
-        <em>${value}</em>
-      </div>`;
-  }
-
-  async #openStats() {
-    // Main-canvas statistics are shared-canvas work only: live shared pages, never trash, never
-    // a user's private workspace, and never vault/secret notes even while the GM vault is
-    // unlocked and merged into the canvas. The trash line keeps the live count from looking wrong.
-    const notes = selectLiveSharedNotes(notesStore.getSharedNotes());
-    const trashCount = notesStore.getTrashedNotes().length;
-    const stats = computeJournalStats(notes);
-    const rawStats = notesStore.getStats();
-    const sessions = deriveSessions(rawStats?.activity ?? {}, rawStats?.sessions ?? []);
-    const name = id => game.users.get(id)?.name ?? t("JN.Common.Someone");
-
-    const mvpEntries = Object.entries(stats.chars).sort((a, b) => b[1] - a[1]);
-    const maxChars = Math.max(1, ...mvpEntries.map(([, v]) => v));
-    const mvpHtml = mvpEntries.length
-      ? mvpEntries.map(([id, v], i) => this.#bar(`${i === 0 ? "★ " : ""}${name(id)}`, v, maxChars)).join("")
-      : `<p class="journalinator-empty">${t("JN.Stats.EmptyMVP")}</p>`;
-
-    const maxNotes = Math.max(1, ...Object.values(stats.notesCreated));
-    const notesHtml = Object.entries(stats.notesCreated).map(([id, v]) => this.#bar(name(id), v, maxNotes)).join("");
-
-    const maxLinks = Math.max(1, ...Object.values(stats.linksDrawn), 1);
-    const linksHtml = Object.entries(stats.linksDrawn).map(([id, v]) => this.#bar(name(id), v, maxLinks)).join("")
-      || `<p class="journalinator-empty">${t("JN.Stats.EmptyLinks")}</p>`;
-
-    const maxSession = Math.max(1, ...sessions.flatMap(s => Object.values(s.totals)));
-    const sessionsHtml = sessions.length
-      ? sessions.map(s => `<div class="jn-session-group"><div class="journalinator-meta">${foundry.utils.escapeHTML(s.label)}</div>${
-          Object.entries(s.totals).map(([id, v]) => this.#bar(name(id), v, maxSession)).join("")
-        }</div>`).join("")
-      : `<p class="journalinator-empty">${t("JN.Stats.EmptyActivity")}</p>`;
-
-    await foundry.applications.api.DialogV2.wait({
-      window: { title: t("JN.Stats.Title") },
-      position: { width: 420 },
-      content: `
-        <p class="jn-stats-live">${t("JN.Stats.LiveNotes", { count: notes.length })}</p>
-        ${trashCount ? `<p class="jn-stats-trash">${t("JN.Stats.TrashNotCounted", { count: trashCount })}</p>` : ""}
-        <div class="journalinator-meta">${t("JN.Stats.MVP")}</div>
-        ${mvpHtml}
-        <div class="journalinator-meta">${t("JN.Stats.NotesCreated")}</div>
-        ${notesHtml}
-        <div class="journalinator-meta">${t("JN.Stats.LinksDrawn")}</div>
-        ${linksHtml}
-        <div class="journalinator-meta">${t("JN.Stats.MostLinked")}</div>
-        <p>${stats.mostLinked ? `${foundry.utils.escapeHTML(stats.mostLinked.name)} (${stats.mostLinked.count})` : "—"}</p>
-        <div class="journalinator-meta">${t("JN.Stats.MostEdited")}</div>
-        <p>${stats.mostEdited ? `${foundry.utils.escapeHTML(stats.mostEdited.name)} (${t("JN.Stats.Edits", { count: stats.mostEdited.count })})` : "—"}</p>
-        <div class="journalinator-meta">${t("JN.Stats.Activity")}</div>
-        ${sessionsHtml}
-        ${game.user.isGM ? `<button type="button" class="jn-add-session">${t("JN.Stats.AddSession")}</button>` : ""}
-      `,
-      buttons: [{ action: "close", label: t("JN.Stats.Close"), default: true }],
-      rejectClose: false,
-      render: (event, dialog) => {
-        dialog.element.querySelector(".jn-add-session")?.addEventListener("click", async () => {
-          const label = await this.#promptText(t("JN.Prompt.SessionMarker"), "");
-          if (!label) return;
-          requestWrite({ type: "addSessionMarker", label });
-          dialog.close();
-        });
-      }
-    });
-  }
-
   async #openTrash() {
-    const offline = !game.users.activeGM;
+    const offline = !game.users.activeGM || !notesStore.getSchemaStatus().current;
     const trashed = notesStore.getTrashedNotes();
-    const dateText = at => Number.isFinite(at)
-      ? new Date(at).toLocaleString(game.i18n?.lang || undefined) : "";
-    const metadata = note => {
-      const deleted = note.system?.deleted;
-      const by = deleted?.by ? game.users.get(deleted.by)?.name ?? t("JN.Common.Unknown") : "";
-      const date = dateText(deleted?.at);
-      if (!by && !date) return `<span class="jn-trash-meta">${t("JN.Trash.MetadataUnknown")}</span>`;
-      const text = by && date
-        ? t("JN.Trash.DeletedMeta", { name: foundry.utils.escapeHTML(by), date: foundry.utils.escapeHTML(date) })
-        : (by
-          ? t("JN.Trash.DeletedBy", { name: foundry.utils.escapeHTML(by) })
-          : t("JN.Trash.DeletedDate", { date: foundry.utils.escapeHTML(date) }));
-      return `<span class="jn-trash-meta">${text}</span>`;
-    };
+    const esc = foundry.utils.escapeHTML;
     const rows = trashed
-      .map(n => `<div class="jn-trash-row"><span class="jn-trash-title">${foundry.utils.escapeHTML(n.name)}</span>${metadata(n)}<button type="button" class="jn-trash-restore" data-id="${n._id}"${offline ? " disabled" : ""}>${t("JN.Common.Restore")}</button></div>`)
+      .map(n => {
+        const row = trashRowModel(n, { t, users: game.users });
+        return `<div class="jn-trash-row">
+          <span class="jn-trash-title">${esc(row.label)}</span>
+          ${row.excerpt ? `<span class="jn-trash-excerpt">${esc(row.excerpt)}</span>` : ""}
+          <span class="jn-trash-meta">${esc(row.metadata)}</span>
+          <button type="button" class="jn-trash-restore" data-id="${esc(n._id)}"${offline ? " disabled" : ""}>${t("JN.Common.Restore")}</button>
+        </div>`;
+      })
       .join("") || `<p class="journalinator-empty">${t("JN.Trash.Empty")}</p>`;
 
     await foundry.applications.api.DialogV2.wait({
       window: { title: t("JN.Trash.Title") },
       content: (trashed.length ? `<p class="jn-trash-hint">${t("JN.Trash.RecoverableHint")}</p>` : "")
         + `<div class="jn-trash-list">${rows}</div>` +
-        (game.user.isGM && trashed.length ? `<button type="button" class="jn-trash-empty">${t("JN.Trash.EmptyButton")}</button>` : ""),
+        (game.user.isGM && trashed.length ? `<button type="button" class="jn-trash-empty"${offline ? " disabled" : ""}>${t("JN.Trash.EmptyButton")}</button>` : ""),
       buttons: [{ action: "close", label: t("JN.Common.Close"), default: true }],
       rejectClose: false,
       render: (event, dialog) => {
@@ -1968,10 +2175,6 @@ export default class JournalApp extends ApplicationV2 {
         });
       }
     });
-  }
-
-  #gmControlsHTML() {
-    return "";
   }
 
   async #promptText(title, initial) {

@@ -1,41 +1,108 @@
 /**
- * Safe note search/result helpers shared by the quick switcher and canvas dimming.
+ * Derived search, quick-switcher and trash labels.
  *
- * Search never reads the internal Foundry name, hidden blocks or vault metadata: players and GMs
- * may see different merged notes, but only the optional label, viewer-visible Markdown text and
- * the public author name participate. Result labels use the deterministic excerpt fallback so an
- * unlabelled note never masquerades as a generated internal title.
+ * Everything here reads only the v2 note body plus its public author. The Foundry page name,
+ * legacy label/blocks/kind/style/location and any hidden/secret metadata never participate:
+ * labels are derived with the same T1 parser the canvas renders, so a note without a title is
+ * labelled by its visible text (`Image note` / `Empty note` when there is none).
  */
-import { noteExcerpt, resolvePresentation, stripSearchNoise, visibleBlocks } from "../presentation.mjs";
+import {
+  deriveExcerpt,
+  deriveTitle,
+  parseDocument,
+  plainVisibleText
+} from "../document/index.mjs";
 import { t } from "../i18n.mjs";
 
-/** True when `note` has a visible label/heading/text or author name containing the query. */
+function noteBody(note) {
+  if (typeof note?.system?.body === "string") return note.system.body;
+  return typeof note?.body === "string" ? note.body : "";
+}
+
+function noteLayout(note) {
+  const layout = note?.system?.layout ?? note?.layout;
+  return layout === "profile" ? "profile" : "plain";
+}
+
+/** Parsed v2 document for a page or note-view object. Never throws on odd body values. */
+export function parseNoteDocument(note) {
+  try {
+    return parseDocument(noteBody(note), { selectedLayout: noteLayout(note) });
+  } catch {
+    return null;
+  }
+}
+
+/** Localized fallback labels for notes without a derived title. */
+export function noteFallbackLabels() {
+  return {
+    emptyLabel: t("JN.Search.EmptyNote"),
+    imageLabel: t("JN.Search.ImageNote")
+  };
+}
+
+/** Primary human label: derived title, visible text excerpt, then Image/Empty note. */
+export function noteSearchLabel(note) {
+  return deriveTitle(parseNoteDocument(note), noteFallbackLabels());
+}
+
+/** Visible body excerpt (title line excluded). */
+export function noteSearchExcerpt(note, maxLength = 70) {
+  return deriveExcerpt(parseNoteDocument(note), maxLength);
+}
+
+/** Secondary line only when it adds information beyond the primary label. */
+export function noteSecondaryExcerpt(note, maxLength = 70) {
+  const excerpt = noteSearchExcerpt(note, maxLength);
+  if (!excerpt) return "";
+  return excerpt === noteSearchLabel(note) ? "" : excerpt;
+}
+
+/** Search matches the derived title, visible body text and the public author name. */
 export function noteMatchesQuery(note, query, authorName = "") {
   const q = String(query ?? "").trim().toLowerCase();
   if (!q) return true;
-  const presentation = resolvePresentation(note);
-  const text = stripSearchNoise(visibleBlocks(note).map(block => block.text).join("\n"));
-  return `${presentation.label} ${presentation.heading} ${text} ${authorName}`.toLowerCase().includes(q);
+  const parsed = parseNoteDocument(note);
+  const text = [
+    deriveTitle(parsed, noteFallbackLabels()),
+    plainVisibleText(parsed),
+    String(authorName ?? "")
+  ].join("\n").toLowerCase();
+  return text.includes(q);
 }
 
-/** Human result label: optional label, then a plain visible excerpt, then a neutral fallback. */
-export function noteSearchLabel(note) {
-  const label = resolvePresentation(note).label.trim();
-  if (label) return label;
-  return noteExcerpt(note) || t("JN.Search.Untitled");
-}
-
-/** Localization key for the presentation style shown as secondary switcher metadata. */
-export function notePresentationLabelKey(note) {
-  if (note?.system?.kind === "location") return "JN.Kind.Location";
-  const style = resolvePresentation(note).extendedStyle;
-  if (style === "document") return "JN.Style.Document";
-  if (style === "target") return "JN.Style.Target";
-  return "JN.Style.Memo";
-}
-
-/** Filter key: the semantic kind for locations, otherwise the resolved extended presentation. */
+/** Stored layout filter key (never the effective Profile fallback). */
 export function noteFilterKey(note) {
-  if (note?.system?.kind === "location") return "location";
-  return resolvePresentation(note).extendedStyle;
+  return noteLayout(note);
+}
+
+/** Localization key for a note's stored layout. */
+export function noteLayoutLabelKey(note) {
+  return noteFilterKey(note) === "profile" ? "JN.Layout.Profile" : "JN.Layout.Plain";
+}
+
+/**
+ * Layout (All = `null`) plus optional author allow-list filter. Uses the stored layout, never
+ * the effective Profile fallback.
+ */
+export function noteMatchesFilters(note, { layout = null, authorIds = null } = {}) {
+  if (layout && noteFilterKey(note) !== layout) return false;
+  if (authorIds && authorIds.size > 0 && !authorIds.has(note?.system?.authorId)) return false;
+  return true;
+}
+
+/** Public author display name; never an internal user id. */
+export function noteAuthorName(note, users = globalThis.game?.users) {
+  const authorId = note?.system?.authorId ?? note?.authorId;
+  return users?.get?.(authorId)?.name ?? "";
+}
+
+/** Public note date used in duplicate/trash metadata. */
+export function noteDateText(note, dateStyle = "created") {
+  const value = dateStyle === "updated"
+    ? note?.system?.updatedAt ?? note?.updatedAt
+    : note?.system?.createdAt ?? note?.createdAt;
+  return Number.isFinite(value) && value > 0
+    ? new Date(value).toLocaleString(globalThis.game?.i18n?.lang || undefined)
+    : "";
 }
