@@ -29,6 +29,7 @@ import {
 } from "../sizing/measure.mjs";
 import { originFromBox, translateForAutoOrigin, validAutoOrigin } from "../sizing/geometry.mjs";
 import { createCardView } from "./card-view.mjs";
+import { noteSearchLabel } from "./note-search.mjs";
 import { createSelectionBar } from "./selection-bar.mjs";
 
 const DRAG_THRESHOLD = 5;
@@ -1357,7 +1358,14 @@ export default class JournalCanvas {
         links.push({ note, link, sourceSide, targetSide });
       }
     }
-    if (this.selectedLinkId && !links.some(({ link }) => link.id === this.selectedLinkId)) this.selectedLinkId = null;
+    // Pin links are stored in `layout.pinLinks`, not in a note's `system.links`, so they are not
+    // part of `links`. Keep a selected one while it still exists: a style write re-renders the
+    // board and must not close the inspector between two edits. Only a removed link deselects.
+    const pinLinks = this.layout.pinLinks ?? {};
+    const selectedPinLinkExists = !!this.selectedLinkId
+      && Object.hasOwn(pinLinks, this.selectedLinkId) && !!pinLinks[this.selectedLinkId];
+    if (this.selectedLinkId && !selectedPinLinkExists
+        && !links.some(({ link }) => link.id === this.selectedLinkId)) this.selectedLinkId = null;
 
     const animate = this.root.isConnected && !this.root.ownerDocument.defaultView.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
     const dimmedIds = new Set(this.notes.filter(n => !this.dimMatch(n)).map(n => n._id));
@@ -2608,7 +2616,10 @@ export default class JournalCanvas {
     const routed = Array.isArray(link.routeAnchors) ? link.routeAnchors : [];
     return routed.map(entry => {
       const note = this.notes.find(item => item._id === entry?.noteId);
-      const name = note?.system?.label?.trim?.() || note?.name || "";
+      // The page name is an internal storage id in schema v2. Label the action with the same
+      // derived title/excerpt every other surface uses, never `note.name` or the removed
+      // `system.label`.
+      const name = note ? noteSearchLabel(note) : "";
       const suffix = name ? ` · ${foundry.utils.escapeHTML(name)}` : "";
       return `<button type="button" class="jn-ft-action jn-link-detach" data-route-note-id="${foundry.utils.escapeHTML(String(entry?.noteId ?? ""))}"
         title="${t("JN.Route.Detach")}">${t("JN.Route.Detach")}${suffix}</button>`;
