@@ -1387,3 +1387,49 @@
     transition: none;
   }
 }
+
+/* --- Stamps: rubber-stamp ink ----------------------------------------------------------------
+ * Stamps are big, flat ink impressions rather than wax discs. The bundled glyph supplies only
+ * the shape (its alpha); colour comes from the stamp's stored colour, deepened toward a dark ink,
+ * and multiplied into the paper so the note's text and grain show through. A second, noisy mask
+ * leaves the uneven coverage of a real pad. Stored colour values are unchanged. */
+.jn-canvas .jn-stamp {
+  --jn-ink: color-mix(in srgb, var(--jn-seal-color, #b85347) 62%, #1b0f08);
+  --jn-ink-noise: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n' x='0' y='0' width='100%25' height='100%25'><feTurbulence type='fractalNoise' baseFrequency='.07 .09' numOctaves='3' seed='5' stitchTiles='stitch'/><feColorMatrix type='matrix' values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 -9 7.4'/></filter><rect width='160' height='160' filter='url(%23n)'/></svg>");
+  box-sizing: border-box;
+  display: block;
+  width: 108px;
+  height: 108px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  /* The <img> art is pushed out of its own box (clipped) so only the masked colour shows. */
+  object-fit: none;
+  object-position: 300% 300%;
+  background: var(--jn-ink);
+  box-shadow: none;
+  mask-image: var(--jn-stamp-url), var(--jn-ink-noise);
+  mask-size: contain, 160px 160px;
+  mask-repeat: no-repeat, repeat;
+  mask-position: center, 0 0;
+  mask-composite: intersect;
+  -webkit-mask-composite: source-in;
+  mix-blend-mode: multiply;
+  opacity: .96;
+  transform: rotate(var(--jn-stamp-tilt, -6deg));
+  cursor: pointer;
+}
+.jn-canvas .jn-stamp.jn-stamp-private { border: 0; opacity: .6; }
+
+/* Attached stamps hang off the corner and land on the paper like a real impression. */
+.jn-canvas .jn-card-stamps { bottom: -16px; right: -10px; z-index: 4; }
+.jn-canvas .jn-card[data-seal-corner^="top-"] .jn-card-stamps { top: -16px; bottom: auto; }
+.jn-canvas .jn-card[data-seal-corner$="-left"] .jn-card-stamps { left: -10px; right: auto; }
+/* Ink sits over the text instead of pushing it aside. */
+.jn-canvas .jn-card[data-seal-corner] .jn-card-title,
+.jn-canvas .jn-card.jn-being-edited[data-seal-corner] .jn-card-title { padding-left: 0; padding-right: 0; }
+.jn-canvas .jn-card-stamps .jn-stamp.jn-label-selected,
+.jn-canvas .jn-label .jn-stamp.jn-label-selected {
+  outline: 2px dashed var(--jn-acc);
+  outline-offset: 2px;
+}

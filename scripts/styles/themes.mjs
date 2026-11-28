@@ -299,7 +299,7 @@ const BASE_LINKS = Object.freeze({
  */
 export const STYLIZED_MATERIALS = Object.freeze({
   board: {
-    cork: "#7b5233",
+    cork: "#5f4230",
     // Module-prefixed so `foundry.utils.getRoute` produces a working module URL. Custom themes
     // still pass through `imagePath` and remain safe relative data paths (no module rewrite).
     corkTile: "modules/fvtt-journalinator/assets/stylized/cork.svg",
@@ -307,7 +307,7 @@ export const STYLIZED_MATERIALS = Object.freeze({
     // never shares the board's texture.
     grainTile: STYLIZED_GRAIN_TILE,
     size: 320,
-    border: "#5a402d",
+    border: "#3f2c20",
     radius: 8,
     lightOpacity: 0.12,
     vignetteColor: "rgba(8, 4, 0, 0.55)",
@@ -456,7 +456,14 @@ export const PARCHMENT_THEME = Object.freeze({
 export const STYLIZED_THEME = Object.freeze({
   id: "stylized",
   nameKey: "JN.Theme.Stylized",
-  colors: { ...CLASSIC_THEME.colors },
+  // Interface chrome is drawn from the board's own warm cork/walnut range instead of the
+  // neutral-purple Classic palette, so panels read as part of the same material world.
+  colors: {
+    bg: "#241a13", panel: "#2f241a", text: "#ece0c8", muted: "#a99882",
+    line: "#4b3a2b", acc: "#dba95a", gm: "#82b3a8", hint: "#d6a45c",
+    thread: "#9b8b73", danger: "#b45b4b", dangerBg: "#4a2b23",
+    dangerText: "#efc4b8", onAccent: "#20160d", shadow: "#000000", stamp: "#e8d9b9"
+  },
   board: { ...CLASSIC_THEME.board, pattern: "none" },
   // Dye-based link defaults replace the old toolbar palette; the reference endpoint pin is 4px.
   links: {

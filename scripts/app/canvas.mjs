@@ -994,6 +994,12 @@ export default class JournalCanvas {
     image.src = url;
     image.alt = t(`JN.Stamp.${data.stamp}`);
     image.style.setProperty("--jn-seal-color", this.#stampColor(data.color));
+    // Ink stamps are painted through the glyph's alpha (see stylized.css), so the art URL is
+    // also exposed as a custom property. Tilt is derived from the id so it is stable per stamp.
+    image.style.setProperty("--jn-stamp-url", `url("${url}")`);
+    let hash = 0;
+    for (const ch of String(labelId)) hash = (hash * 31 + ch.charCodeAt(0)) | 0;
+    image.style.setProperty("--jn-stamp-tilt", `${(Math.abs(hash) % 17) - 8}deg`);
     image.classList.toggle("jn-stamp-colored", !!data.color);
     image.title = image.alt;
     image.draggable = false;
