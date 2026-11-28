@@ -1,10 +1,10 @@
 # Journalinator Patch Notes
 
-These notes start with the small board and toolbar polish patches and cover the follow-up fixes and features.
+Patch notes for every published Journalinator version, plus the historical investigation-board/pre-alpha builds that were skipped at the time. Versions 0.4–0.7 were not published as separate Journalinator releases; 0.7.25 is the investigation-board build recorded here.
 
-## Unreleased — Note system rewrite
+## 0.10.0 — Note system rewrite
 
-This development build replaces the note system. It is not a release and has not been verified in real Foundry multiplayer yet.
+This release replaces the note system. It includes the 0.9.7 link overhaul and visual polish below.
 
 - One note is one Markdown body. The first-line H1 is the title; later H1s render as headings. The old separate note name, label, title/heading fields, block list and paragraph widgets are gone. Duplicate and empty titles are allowed, and Foundry's page name is hidden.
 - Notes open directly on the card as a single Markdown source surface. Title, Divider and Portrait tools edit the source; native undo/redo, selection, copy/paste and IME remain available. The editor autosaves, shows `Saved`/`Saving…`/offline/failure states, and keeps unsaved text in a local recovery draft.
@@ -233,6 +233,30 @@ This development build replaces the note system. It is not a release and has not
 - A private note can be published to the shared board as a new copy. Only the title and text are
   copied; links, images, styles, and layout stay private.
 - Private workspaces are UI-private, not encrypted.
+
+## 0.7.25 — Investigation-board build
+
+This pre-alpha build folded the investigation-board experiments into the Journalinator canvas. It was the last build before private canvases.
+
+- Added the stamp/seal library (16 bundled stamps), investigation paper and wood board themes, connection sockets on card edges, nearest-side dynamic link endpoints, and the target/memo card styles.
+- Expanded canvas selection, editor interaction, link threading and board controls. This line was superseded by 0.8.0 and is not migrated.
+
+## 0.3.0 — Delete shortcut and undo restore
+
+- Added the Delete/Backspace shortcut for selected notes, labels and stamps.
+- Added undo restore for deleted shared notes, and kept permanent deletion limited to the GM.
+
+## 0.2.0 — Canvas interactions and dynamic links
+
+- Replaced the basic double-click creation with a right-click board menu for notes, Locations and labels.
+- Added rectangle selection, middle-drag panning, wheel zoom, and four always-visible card connection handles.
+- Links now follow the nearest card sides while a card is dragged; double-clicking a link removes it.
+- Added the packaging and release workflow used by later versions.
+
+## 0.1.0 — Initial shared corkboard journal
+
+- First release: one shared corkboard canvas with note cards, Obsidian-style paragraph editing, per-paragraph locks arbitrated by the active GM, links and `[[wikilinks]]`, three card styles, quick switcher/search, trash and statistics.
+- Included the encrypted GM vault for secret notes, hidden blocks/links and hints; English and Russian interfaces; and read-only behavior when no GM is connected. The vault, Location notes and paragraph model were later removed in 0.10.0.
 
 ## UI polish and fixes
 

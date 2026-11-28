@@ -27,7 +27,7 @@ test("the removed secret, actor, migration and stats-schema paths are gone", () 
 
 test("module.json declares exactly the four current document types", () => {
   const manifest = JSON.parse(readFileSync(join(root, "module.json"), "utf8"));
-  assert.equal(manifest.version, "0.9.7");
+  assert.equal(manifest.version, "0.10.0");
   assert.deepEqual(
     Object.keys(manifest.documentTypes.JournalEntryPage).sort(),
     ["activity", "history", "layout", "note"]

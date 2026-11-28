@@ -4,7 +4,7 @@ Coordinator: OpenCode. Implementation branch: `note-system-update-impl` (child o
 
 Owner approval: 2026-11-28, Phase 0 gate approved as designed. Owner requested preservation of the `main` 0.9.7 link/visual patches and a `main` merge.
 
-**Final status:** implemented, integrated and verified on `note-system-update-impl`. Unit suite 610/610 pass, `npm run check` passes. Real Foundry v14 GM + two players verification passed the tested scope after T14/T15/T17, including the owner's 0.9.7 link overhaul and visual polish merged from `main`. Local `main` is fast-forwarded to the verified implementation tip; nothing is pushed, released or deployed, and the canonical working checkout/live symlink remains on the older `note-system-update` branch.
+**Final status:** released as **0.10.0** on `main`; the owner's 0.9.7 link/visual patches are included. Unit suite 610/610 pass, `npm run check` passes. Real Foundry v14 GM + two players verification passed the tested scope after T14/T15/T17. The canonical working checkout/live symlink was not changed by the release process.
 
 **Task rows T1-T12 were committed on their task branches and integrated in dependency order; T13a/T14/T15 are the independent verification/convergence/fix chain.**
 
@@ -24,11 +24,12 @@ Local `main` has been fast-forwarded to the verified implementation tip at the o
 | --- | --- |
 | Canonical checkout (untouched) | `/home/Riv/Projects/fvtt-journalinator` @ `note-system-update` (`c778b35`) |
 | Implementation worktree/branch | `/home/Riv/Projects/fvtt-journalinator-impl` @ `note-system-update-impl` (tip) |
-| Local `main` | fast-forwarded to the verified implementation tip; not pushed |
+| Local `main` | released as v0.10.0 and pushed |
+| Canonical working checkout | still on `note-system-update`; not deployed |
 | Disposable Foundry data root | `/tmp/opencode/foundry-note-system-test` (exists; not live data) |
 | Live Foundry data (prohibited) | `/home/Riv/foundry-v14-data` |
 
-The canonical working checkout remains on `note-system-update`; local `main` now points at the verified implementation. Nothing has been pushed, released, packaged for distribution or deployed from the implementation branch.
+The canonical working checkout remains on `note-system-update`; local `main` and the v0.10.0 GitHub release carry the verified implementation. The release archive is built with the top-level `fvtt-journalinator` folder.
 
 ## Baseline evidence (actual run)
 
