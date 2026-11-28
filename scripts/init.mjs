@@ -1,17 +1,13 @@
 import NoteModel from "./data/note-model.mjs";
 import LayoutModel from "./data/layout-model.mjs";
-import StatsModel from "./data/stats-model.mjs";
+import ActivityModel from "./data/activity-model.mjs";
 import HistoryModel from "./data/history-model.mjs";
-import PrivateWorkspaceModel from "./data/private-model.mjs";
 import { registerContainerSettings, ensureContainers, registerSidebarHiding } from "./store/containers.mjs";
 import { registerSocket } from "./socket.mjs";
 import { startExpirySweep, startLockResync } from "./locks.mjs";
 import JournalApp, { isRestoringSceneControl } from "./app/journal-app.mjs";
 import { shouldOpenSceneControl } from "./app/scene-control.mjs";
-import { registerGmTierSettings } from "./secrets/access.mjs";
-import { vaultStore } from "./secrets/vault-store.mjs";
 import { privateStore } from "./store/private-store.mjs";
-import { migrateSharedWorld } from "./migrate.mjs";
 import { t } from "./i18n.mjs";
 import {
   BUILTIN_THEME_IDS, getTheme, isThemeId, listThemes, loadSavedThemes, registerTheme, savedThemes
@@ -56,16 +52,10 @@ Hooks.once("init", () => {
   Object.assign(CONFIG.JournalEntryPage.dataModels, {
     [`${MODULE_ID}.note`]: NoteModel,
     [`${MODULE_ID}.layout`]: LayoutModel,
-    [`${MODULE_ID}.stats`]: StatsModel,
-    [`${MODULE_ID}.history`]: HistoryModel,
-    [`${MODULE_ID}.private`]: PrivateWorkspaceModel
+    [`${MODULE_ID}.activity`]: ActivityModel,
+    [`${MODULE_ID}.history`]: HistoryModel
   });
   registerContainerSettings();
-  registerGmTierSettings();
-  // World-scoped schema marker: 0 = legacy records may still exist, 1 = shared migration finished.
-  game.settings.register(MODULE_ID, "schemaVersion", {
-    scope: "world", config: false, type: Number, default: 0
-  });
   game.settings.register(MODULE_ID, "boardTheme", {
     scope: "client", config: false, type: String, default: "stylized"
   });
@@ -117,20 +107,11 @@ function exposeThemeApi() {
 Hooks.once("ready", async () => {
   await ensureContainers();
   if (game.user.isGM) {
-    if ((game.settings.get(MODULE_ID, "schemaVersion") ?? 0) < 1) {
-      try {
-        const result = await migrateSharedWorld();
-        if (result.failed === 0) await game.settings.set(MODULE_ID, "schemaVersion", 1);
-      } catch (err) {
-        console.error("Journalinator: shared-world migration failed", err);
-      }
-    }
     await privateStore.orphanMissingUsers();
   }
   registerSocket();
   startExpirySweep();
   startLockResync();
-  await vaultStore.init();
   Hooks.callAll("journalinatorRegisterThemes", game.journalinator?.themes);
   Hooks.on("deleteUser", user => {
     if (!game.user.isGM) return;

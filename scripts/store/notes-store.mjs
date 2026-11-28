@@ -1,197 +1,117 @@
 import { getContainerIds } from "./containers.mjs";
-import { vaultStore } from "../secrets/vault-store.mjs";
-import { canUseGmTier } from "../secrets/access.mjs";
-import { mergeBlocks } from "../secrets/model.mjs";
-import { resolveAttachment, resolvePresentation } from "../presentation.mjs";
+import {
+  noteSchemaProblem, requireWritable, worldSchemaStatus
+} from "./schema-guard.mjs";
 
 const MODULE_ID = "fvtt-journalinator";
 const NOTE_TYPE = `${MODULE_ID}.note`;
 
 /**
- * The single read seam for the app (spec §5.7). Everything the UI reads about notes/layout goes
- * through here, never straight at the JournalEntry documents.
+ * The single read seam for the app. Everything the UI reads about shared notes,
+ * the layout, activity and history goes through here, never straight at the
+ * JournalEntry documents.
  *
- * Players (and a GM in "view as players" mode, or with the vault locked) get shared content only.
- * A GM-tier user with an unlocked vault gets the merged view: hidden blocks interleaved into
- * shared notes, GM-only links, GM-only notes and their cards, GM-only labels. Merged objects are
- * plain data shaped like note pages ({ _id, id, name, system }) with `secret` on GM-only notes,
- * `hidden` on GM-only blocks/links/labels.
+ * This build reads exactly one stored schema (v2). There is no vault merge and no
+ * GM/player content view: every client reads the same shared documents. Legacy
+ * pages remain on disk but are excluded from renderable note results, so old block
+ * data is never shown as an empty v2 note. `getSharedPage()` is the raw escape
+ * hatch for administration and the schema guard.
  *
- * The shared write path (socket.mjs) never reads from here. It looks at shared documents only, so
- * nothing a player sends can resolve against, collide with, or be steered by secret content.
+ * Reads never write, normalize or migrate. The shared write path (socket.mjs)
+ * does not read from here; it addresses shared documents directly.
  */
 class NotesStore {
-  #gmView = true;
-
-  /** True when the GM view (merged with secrets) is what the UI should show. */
-  get merged() {
-    return this.#gmView && canUseGmTier() && vaultStore.isUnlocked;
-  }
-
-  get gmView() { return this.#gmView; }
-
-  setGmView(on) {
-    this.#gmView = !!on;
-    Hooks.callAll("journalinatorVaultChanged", vaultStore.status);
-  }
-
   #sharedEntry() {
     const ids = getContainerIds();
-    if (!ids) return null;
+    if (!ids?.shared) return null;
     return game.journal.get(ids.shared) ?? null;
   }
 
+  #historyEntry() {
+    const ids = getContainerIds();
+    if (!ids?.history) return null;
+    return game.journal.get(ids.history) ?? null;
+  }
+
   #sharedNotePages() {
-    return (this.#sharedEntry()?.pages ?? []).filter(p => p.type === NOTE_TYPE);
+    return [...(this.#sharedEntry()?.pages ?? [])].filter(page => page.type === NOTE_TYPE);
   }
 
-  /** Live, non-deleted notes — everything the canvas, search, and backlinks should see. */
-  getAllNotes() {
-    const live = this.#sharedNotePages().filter(p => !p.system.deleted);
-    if (!this.merged) return live;
-    const vault = vaultStore.data;
-    return [
-      ...live.map(p => this.#mergeShared(p, vault)),
-      ...Object.values(vault.notes).map(n => this.#secretNote(n))
-    ];
+  #usable(page) {
+    return noteSchemaProblem(page) === null;
   }
 
-  /** Notes currently in the trash (spec §11). Shared only — secret notes have no trash. */
-  getTrashedNotes() {
-    return this.#sharedNotePages().filter(p => p.system.deleted);
-  }
-
-  /** Every shared note ever, trash included — journal-wide stats are about shared work only. */
-  getAllNotesIncludingTrashed() {
-    return this.#sharedNotePages();
-  }
-
-  getNote(noteId) {
-    if (!noteId) return null;
-    const page = this.#sharedEntry()?.pages.get(noteId) ?? null;
-    if (page?.type === NOTE_TYPE) return this.merged ? this.#mergeShared(page, vaultStore.data) : page;
-    if (this.merged) {
-      const secret = vaultStore.data.notes[noteId];
-      if (secret) return this.#secretNote(secret);
-    }
-    return null;
-  }
-
-  /** The raw shared page, for GM actions that must reason about what players actually have. */
-  getSharedPage(noteId) {
-    const page = this.#sharedEntry()?.pages.get(noteId) ?? null;
-    return page?.type === NOTE_TYPE ? page : null;
-  }
-
+  /** Every shared note page, including legacy and trashed pages. */
   getSharedNotes() {
     return this.#sharedNotePages();
   }
 
+  /** Live, schema-current notes for the canvas, search and backlinks. */
+  getAllNotes() {
+    return this.#sharedNotePages().filter(page => page.system?.deleted == null && this.#usable(page));
+  }
+
+  /** Every shared note page ever, trash and legacy included (administration/transfer reads). */
+  getAllNotesIncludingTrashed() {
+    return this.#sharedNotePages();
+  }
+
+  /** Schema-current notes currently in the trash. */
+  getTrashedNotes() {
+    return this.#sharedNotePages().filter(page => page.system?.deleted != null && this.#usable(page));
+  }
+
+  /** A renderable current note, or null for missing or legacy data. */
+  getNote(noteId) {
+    if (!noteId) return null;
+    const page = this.getSharedPage(noteId);
+    return page && this.#usable(page) ? page : null;
+  }
+
+  /** The raw shared page, for guard and GM actions that must see actual stored data. */
+  getSharedPage(noteId) {
+    if (!noteId) return null;
+    const page = this.#sharedEntry()?.pages.get(noteId) ?? null;
+    return page?.type === NOTE_TYPE ? page : null;
+  }
+
   getSharedLayout() {
     const ids = getContainerIds();
-    const page = ids ? this.#sharedEntry()?.pages.get(ids.layoutPage) : null;
-    return page?.system ?? null;
+    if (!ids?.layoutPage) return null;
+    return this.#sharedEntry()?.pages.get(ids.layoutPage)?.system ?? null;
   }
 
+  /** The shared board layout, or null when the current world has not initialized it. */
   getLayout() {
-    const shared = this.getSharedLayout();
-    if (!this.merged) return shared;
-    const vault = vaultStore.data;
-    const cards = { ...(shared?.cards ?? {}) };
-    for (const note of Object.values(vault.notes)) {
-      if (note.card) cards[note.id] = { ...note.card };
-    }
-    const labels = { ...(shared?.labels ?? {}) };
-    for (const [id, label] of Object.entries(vault.labels)) labels[id] = { ...label, hidden: true };
-    return { cards, labels, pins: shared?.pins ?? {}, pinLinks: shared?.pinLinks ?? {},
-      viewport: shared?.viewport ?? null };
+    return this.getSharedLayout();
   }
 
-  getStats() {
+  /** The hidden shared activity store's system data, or null. */
+  getActivity() {
     const ids = getContainerIds();
-    const page = ids ? this.#sharedEntry()?.pages.get(ids.statsPage) : null;
-    return page?.system ?? null;
+    if (!ids?.activityPage) return null;
+    return this.#sharedEntry()?.pages.get(ids.activityPage)?.system ?? null;
   }
 
-  isSecretNote(noteId) {
-    return this.merged && !!vaultStore.data.notes[noteId];
+  /** The hidden shared history store's system data, or null. */
+  getHistory() {
+    const ids = getContainerIds();
+    if (!ids?.historyPage) return null;
+    return this.#historyEntry()?.pages.get(ids.historyPage)?.system ?? null;
   }
 
-  isHiddenBlock(noteId, blockId) {
-    if (!this.merged) return false;
-    const vault = vaultStore.data;
-    return !!vault.notes[noteId] || !!vault.hiddenBlocks[noteId]?.blocks?.[blockId];
+  /** Non-destructive incompatible-format status over shared notes plus the layout page. */
+  getSchemaStatus() {
+    const ids = getContainerIds() ?? {};
+    const layout = ids.layoutPage
+      ? this.#sharedEntry()?.pages.get(ids.layoutPage) ?? null
+      : null;
+    return worldSchemaStatus({ notes: this.#sharedNotePages(), layout });
   }
 
-  isHiddenLink(sourceId, linkId) {
-    if (!this.merged) return false;
-    const vault = vaultStore.data;
-    if (vault.notes[sourceId]) return true;
-    return (vault.hiddenLinks[sourceId] ?? []).some(l => l.id === linkId);
-  }
-
-  isHiddenLabel(labelId) {
-    return this.merged && !!vaultStore.data.labels[labelId];
-  }
-
-  #mergeShared(page, vault) {
-    const system = page.system.toObject ? page.system.toObject() : foundry.utils.deepClone(page.system);
-    const hiddenLinks = (vault.hiddenLinks[page.id] ?? []).map(l => ({ ...l, hidden: true }));
-    return {
-      _id: page.id,
-      id: page.id,
-      name: page.name,
-      secret: false,
-      system: {
-        ...system,
-        blocks: mergeBlocks(system.blocks, vault.hiddenBlocks[page.id]),
-        links: [...(system.links ?? []).map(l => ({ ...l, hidden: false })), ...hiddenLinks]
-      }
-    };
-  }
-
-  #secretNote(note) {
-    // The vault stores its own plain note shape; resolve presentation/attachment with the same
-    // fallbacks as shared records so a merged GM view never drops label/style/pin data.
-    const presentation = resolvePresentation({
-      name: note.name,
-      system: {
-        style: note.style,
-        targetHeading: note.targetHeading,
-        schemaVersion: note.schemaVersion,
-        label: note.label,
-        presentation: note.presentation
-      }
-    });
-    const { label, ...presentationFields } = presentation;
-    return {
-      _id: note.id,
-      id: note.id,
-      name: note.name,
-      secret: true,
-      system: {
-        kind: note.kind === "location" ? "location" : "note",
-        style: note.style ?? "sticky",
-        targetHeading: note.targetHeading ?? "",
-        schemaVersion: note.schemaVersion === 1 ? 1 : 0,
-        label,
-        presentation: presentationFields,
-        attachment: resolveAttachment({ system: { attachment: note.attachment } }),
-        image: note.image ?? null,
-        backgroundImage: note.backgroundImage ?? null,
-        actorRef: null,
-        blocks: (note.blocks ?? []).map(b => ({ ...b, hidden: true })),
-        links: (note.links ?? []).map(l => ({ ...l, hidden: true })),
-        authorId: note.authorId ?? "",
-        createdAt: note.createdAt ?? 0,
-        updatedAt: note.updatedAt ?? 0,
-        editCount: 0,
-        contributions: {},
-        formerNames: note.formerNames ?? [],
-        deleted: null,
-        hint: false
-      }
-    };
+  /** Whether shared note writes are allowed for the currently stored data. */
+  canWriteShared() {
+    return requireWritable(this.getSchemaStatus()).ok;
   }
 }
 

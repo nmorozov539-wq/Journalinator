@@ -1,6 +1,6 @@
 /**
  * Just enough of Foundry v14's client surface to run the module's data paths (shared write
- * handler, vault, read layer) in Node. Not a UI harness: the app/editor/canvas classes are not
+ * handler, read layer) in Node. Not a UI harness: the app/editor/canvas classes are not
  * loaded here. Documents apply dotted-path updates and fire the same hooks Foundry does.
  */
 
@@ -81,14 +81,37 @@ function withToObject(system) {
 }
 
 const NOTE_DEFAULTS = () => ({
-  style: "sticky", image: null, actorRef: null, blocks: [], links: [], authorId: "", createdAt: 0, updatedAt: 0,
-  editCount: 0, contributions: {}, formerNames: [], hint: false, deleted: null
+  schemaVersion: 2,
+  body: "",
+  revision: 0,
+  layout: "plain",
+  skin: {
+    paper: "amber",
+    font: "default",
+    torn: false,
+    backgroundImage: null,
+    tiltSeed: 0
+  },
+  attachment: {
+    mainPinEnabled: true,
+    mainSnapRadius: 24,
+    minorSnapRadius: 6,
+    pinStyle: "default"
+  },
+  links: [],
+  authorId: "",
+  createdAt: 0,
+  updatedAt: 0,
+  deleted: null,
+  lastSave: null
 });
 const DEFAULTS = {
   "fvtt-journalinator.note": NOTE_DEFAULTS,
-  "fvtt-journalinator.layout": () => ({ cards: {}, labels: {}, viewport: null }),
-  "fvtt-journalinator.stats": () => ({ activity: {}, sessions: [] }),
-  "fvtt-journalinator.history": () => ({ snapshots: {} })
+  "fvtt-journalinator.layout": () => ({
+    schemaVersion: 2, cards: {}, labels: {}, pins: {}, pinLinks: {}, viewport: null
+  }),
+  "fvtt-journalinator.activity": () => ({ schemaVersion: 2, activity: {} }),
+  "fvtt-journalinator.history": () => ({ schemaVersion: 2, snapshots: {} })
 };
 
 export class FakePage {
@@ -101,7 +124,7 @@ export class FakePage {
     this.flags = structuredClone(data.flags ?? {});
     const system = { ...(DEFAULTS[data.type]?.() ?? {}), ...structuredClone(data.system ?? {}) };
     if (data.type === "fvtt-journalinator.note") {
-      system.links = (system.links ?? []).map(l => ({ label: "", direction: "none", color: "", lineStyle: "solid", origin: "drawn", edited: false, createdBy: "", hint: false, ...l }));
+      system.links = (system.links ?? []).map(l => ({ label: "", direction: "none", color: "", lineStyle: "solid", origin: "drawn", edited: false, createdBy: "", ...l }));
     }
     this.system = withToObject(system);
   }
@@ -112,7 +135,7 @@ export class FakePage {
     this.ownership = data.ownership;
     this.flags = data.flags;
     if (this.type === "fvtt-journalinator.note") {
-      this.system.links = (this.system.links ?? []).map(l => ({ hint: false, ...l }));
+      this.system.links = (this.system.links ?? []).map(l => ({ ...l }));
     }
     Hooks.callAll("updateJournalEntryPage", this, expand(changes));
     return this;
@@ -244,20 +267,20 @@ export function installFoundry({ user, users, worldId = "test-world" }) {
   return { journal, settings, notifications, socketLog, storage, deliver };
 }
 
-/** Builds the module's containers the same way ensureContainers does. */
+/** Builds the module's current containers the same way ensureContainers does. */
 export async function makeContainers(env) {
-  const shared = new FakeEntry({ name: "Journalinator: Shared Journal" });
-  const history = new FakeEntry({ name: "Journalinator: History" });
-  const secrets = new FakeEntry({ name: "Journalinator: GM Secrets" });
-  const privateJournal = new FakeEntry({ name: "Journalinator: Private Journals" });
-  for (const e of [shared, history, secrets, privateJournal]) env.journal.set(e.id, e);
+  const flag = container => ({ "fvtt-journalinator": { container } });
+  const shared = new FakeEntry({ name: "Journalinator: Shared Journal", flags: flag("shared") });
+  const history = new FakeEntry({ name: "Journalinator: History", flags: flag("history") });
+  const privateJournal = new FakeEntry({ name: "Journalinator: Private Journals", flags: flag("private") });
+  for (const e of [shared, history, privateJournal]) env.journal.set(e.id, e);
   const layoutPage = await JournalEntryPage.create({ name: "__layout__", type: "fvtt-journalinator.layout", system: {} }, { parent: shared });
-  const statsPage = await JournalEntryPage.create({ name: "__stats__", type: "fvtt-journalinator.stats", system: {} }, { parent: shared });
+  const activityPage = await JournalEntryPage.create({ name: "__activity__", type: "fvtt-journalinator.activity", system: {} }, { parent: shared });
   const historyPage = await JournalEntryPage.create({ name: "__history__", type: "fvtt-journalinator.history", system: {} }, { parent: history });
   const ids = {
-    shared: shared.id, history: history.id, secrets: secrets.id, private: privateJournal.id,
-    layoutPage: layoutPage.id, statsPage: statsPage.id, historyPage: historyPage.id
+    shared: shared.id, history: history.id, private: privateJournal.id,
+    layoutPage: layoutPage.id, activityPage: activityPage.id, historyPage: historyPage.id
   };
   await game.settings.set("fvtt-journalinator", "containerIds", ids);
-  return { shared, history, secrets, private: privateJournal, ids };
+  return { shared, history, private: privateJournal, ids };
 }

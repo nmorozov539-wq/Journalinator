@@ -6,13 +6,12 @@ const SETTING_KEY = "containerIds";
 const CONTAINERS = {
   shared: { nameKey: "JN.Container.Shared", ownership: "OBSERVER" },
   history: { nameKey: "JN.Container.History", ownership: "NONE" },
-  secrets: { nameKey: "JN.Container.Secrets", ownership: "NONE" },
   private: { nameKey: "JN.Container.Private", ownership: "NONE" }
 };
 
 const PAGES = {
   layoutPage: { entry: "shared", name: "__layout__", type: `${MODULE_ID}.layout` },
-  statsPage: { entry: "shared", name: "__stats__", type: `${MODULE_ID}.stats` },
+  activityPage: { entry: "shared", name: "__activity__", type: `${MODULE_ID}.activity` },
   historyPage: { entry: "history", name: "__history__", type: `${MODULE_ID}.history` }
 };
 
@@ -26,17 +25,21 @@ export function registerContainerSettings() {
 }
 
 /**
- * Finds or creates the three JournalEntry containers and their system pages (spec §5.1). Runs
- * only on the GM client. This is also the repair path: a deleted layout/stats/history page, or a
- * deleted container that still has an id in the setting, is recreated and the setting updated.
+ * Finds or creates the current JournalEntry containers and their hidden system
+ * pages. Runs only on the GM client. This is also the repair path: a deleted
+ * layout/activity/history page, or a deleted container still referenced by the
+ * setting, is recreated and the setting updated.
  *
- * Ownership NONE on the GM Secrets entry hides it from the sidebar and blocks the edit UI for
- * players, but does NOT keep its content out of player browsers: Foundry v14 sends every
- * JournalEntry's full data to every connected client regardless of ownership (traced in
- * dist/packages/world.mjs — World.#p() calls db.JournalEntry.dump() with no permission filter).
- * Ownership here is a UI convenience, not a secrecy boundary. The GM tier (spec §14) keeps its
- * secrets on the GM Secrets entry as an encrypted vault (scripts/secrets/), so players only ever
- * receive ciphertext.
+ * The current shape is `{ shared, history, private, layoutPage, activityPage,
+ * historyPage }`. Unknown keys from an older world are preserved by the spread
+ * below. In particular a legacy `secrets` container id is left in the setting and
+ * its data is never touched; the old secret and stats pages and containers are
+ * neither migrated nor deleted.
+ *
+ * Ownership NONE hides the history and private entries from the sidebar and
+ * blocks their edit UI for players. It is a UI convenience, not a secrecy
+ * boundary: Foundry sends every JournalEntry's full data to every connected
+ * client regardless of ownership.
  */
 export async function ensureContainers() {
   if (!game.user.isGM) return;
@@ -44,13 +47,14 @@ export async function ensureContainers() {
   const ids = getContainerIds() ?? {};
   const shared = await ensureContainer("shared", ids.shared);
   const history = await ensureContainer("history", ids.history);
-  const secrets = await ensureContainer("secrets", ids.secrets);
   const privateJournal = await ensureContainer("private", ids.private);
-  const entries = { shared, history, secrets, private: privateJournal };
+  const entries = { shared, history, private: privateJournal };
 
   const next = {
     ...ids,
-    shared: shared.id, history: history.id, secrets: secrets.id, private: privateJournal.id
+    shared: shared.id,
+    history: history.id,
+    private: privateJournal.id
   };
   for (const [key, page] of Object.entries(PAGES)) {
     next[key] = await ensurePage(entries[page.entry], ids[key], page.name, page.type);
@@ -84,7 +88,11 @@ async function ensurePage(entry, id, name, type) {
   if (byId) return byId.id;
   const byName = [...entry.pages.values()].find(page => page.name === name && page.type === type);
   if (byName) return byName.id;
-  const page = await JournalEntryPage.create({ name, type, system: {} }, { parent: entry });
+  // Write the current schema marker explicitly. Older pages are reused untouched,
+  // so their raw source still lets the schema guard detect an incompatible world.
+  const page = await JournalEntryPage.create({
+    name, type, system: { schemaVersion: 2 }
+  }, { parent: entry });
   return page.id;
 }
 
@@ -92,13 +100,17 @@ export function getContainerIds() {
   return game.settings.get(MODULE_ID, SETTING_KEY);
 }
 
-/** Prunes the module's own containers out of the Journal sidebar tree. */
+/**
+ * Prunes the module's current containers out of the Journal sidebar tree, plus a
+ * legacy secrets container id if an older world still has one in the setting.
+ * The legacy entry is only hidden here; it is never deleted or edited.
+ */
 export function registerSidebarHiding() {
   Hooks.on("renderJournalDirectory", (app, element) => {
     const el = element instanceof HTMLElement ? element : element[0];
     const ids = getContainerIds();
     if (!ids) return;
-    const hidden = new Set([ids.shared, ids.history, ids.secrets, ids.private]);
+    const hidden = new Set([ids.shared, ids.history, ids.private, ids.secrets].filter(Boolean));
     for (const id of hidden) {
       el.querySelector(`li[data-entry-id="${id}"]`)?.remove();
     }

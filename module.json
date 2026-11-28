@@ -39,9 +39,8 @@
     "JournalEntryPage": {
       "note": {},
       "layout": {},
-      "stats": {},
-      "history": {},
-      "private": {}
+      "activity": {},
+      "history": {}
     }
   }
 }
