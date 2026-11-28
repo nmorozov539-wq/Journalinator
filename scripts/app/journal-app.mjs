@@ -1,33 +1,22 @@
 import { notesStore } from "../store/notes-store.mjs";
-import { requestWrite } from "../socket.mjs";
+import { requestEditReply, requestWrite } from "../socket.mjs";
 import JournalCanvas from "./canvas.mjs";
 import NoteEditor from "./editor.mjs";
 import PrivateWorkspace from "./private-workspace.mjs";
 import { openPrivateAdmin } from "./private-admin.mjs";
 import { privateStore } from "../store/private-store.mjs";
 import { countSharedTransferDrops, countTransferDrops } from "../private-transfer.mjs";
-import { defaultNoteTitle, noteCreationPresentation, noteCreationStyle, promptNewNote } from "./note-dialog.mjs";
+import { createNoteFromMenu, openCreationMenu } from "./note-dialog.mjs";
 import { noteFilterKey, noteMatchesQuery, notePresentationLabelKey, noteSearchLabel } from "./note-search.mjs";
 import { computeJournalStats, deriveSessions, selectLiveSharedNotes } from "../stats.mjs";
-import { CARD_STYLES, cardStyleKey } from "../styles/registry.mjs";
 import { defaultControlTarget } from "./scene-control.mjs";
 import { BOARD_BACKGROUND_IDS, applyTheme, getTheme, listThemes } from "../styles/themes.mjs";
 import { SCENE_THEME_ID, clearSceneThemeCache, sceneTheme } from "../scene-palette.mjs";
-import { canUseGmTier } from "../secrets/access.mjs";
-import { vaultStore } from "../secrets/vault-store.mjs";
-import { openVaultDialog } from "../secrets/vault-ui.mjs";
-import * as secrets from "../secrets/secret-actions.mjs";
 import { t } from "../i18n.mjs";
-import { stripSecretPrefix } from "../secrets/model.mjs";
-import { NOTE_FONT_KEYS, PICTURE_LAYOUTS, PIN_STYLES, PRESENTATION_STYLES, resolvePresentation } from "../presentation.mjs";
-
-/** Runs a GM vault action and surfaces failures (e.g. the vault was locked meanwhile). */
-function gm(job) {
-  return Promise.resolve().then(job).catch(err => {
-    console.error(err);
-    ui.notifications.error(err.message);
-  });
-}
+import { clientSessionId } from "../edit-session.mjs";
+import { resolveSkin } from "../skins/registry.mjs";
+import { promptImageSource } from "./image-dialog.mjs";
+import { toggleTaskListItem } from "../markdown.mjs";
 
 /** The saved theme choice, resolved to a registered theme. `scene` is generated on demand. */
 async function resolveThemeChoice(id) {
@@ -156,83 +145,35 @@ export default class JournalApp extends ApplicationV2 {
   #deleteConfirmPending = false;
   #replacingHTML = false;
   #editor = new NoteEditor({
-    boardOnly: true,
-    onEditHiddenBlock: async (id, blockId) => {
-      await this.render();
-      const slot = this.#canvas.cardEls.get(id)?.querySelector(`.jn-card-block[data-block-id="${CSS.escape(blockId)}"]`);
-      if (slot && this.#selectedNoteId === id) this.#editor.editBoardBlock(id, blockId, slot);
-    },
-    onFocusNote: id => this.#canvas.focusNote(id),
-    onSelectNote: id => { this.#selectedNoteId = id; this.#editor.open(id); this.#editor.render(); },
-    onSetMainPinEnabled: (id, enabled) => this.#setMainPinEnabled(id, enabled),
-    onStamp: (id, trigger) => this.#canvas.openStampPicker(id, trigger),
-    onSend: id => this.#openSendPanel(this.element, null, id, "shared")
+    onClose: ({ noteId }) => this.#onEditorClosed(noteId),
+    onRequestEdit: id => this.#beginEditing(id),
+    onNoteChanged: () => this.#syncSelectionControls()
   });
-  // Every canvas action is routed by what it touches: GM-only things go to the vault in this
-  // client, everything else is a normal shared write request (spec §14).
   #canvas = new JournalCanvas({
     onSelectNote: id => {
       this.#selectedNoteId = id;
-      this.#editor.open(id);
-      this.#editor.render();
       this.#syncSelectionControls();
     },
-    onReadCardText: (id, kind) => {
-      const note = notesStore.getNote(id);
-      if (!note) return "";
-      if (kind === "heading") return resolvePresentation(note).heading;
-      if (kind === "label") return note.system.label ?? "";
-      return note.secret ? stripSecretPrefix(note.name) : note.name;
-    },
-    onSaveCardText: (id, kind, value) => {
-      if (kind === "heading") return this.#editor.setTargetHeading(id, value);
-      if (kind === "label") return this.#editor.setNoteLabel(id, value);
-      return this.#editor.renameNote(id, value);
-    },
-    onEditCardBlock: (id, blockId, slot) => {
-      this.#editor.editBoardBlock(id, blockId, slot);
-    },
-    onToggleTask: (id, blockId, index) => this.#editor.toggleTask(id, blockId, index),
-    onEditCardImage: id => this.#editor.editNoteImage(id),
-    onEditCardBackground: id => this.#editor.editNoteImage(id, true),
-    onEditNote: async id => {
-      this.#selectedNoteId = id;
-      await this.render();
-      const slot = this.#canvas.cardEls.get(id)?.querySelector(".jn-card-block");
-      if (slot && this.#selectedNoteId === id) this.#editor.editFirstBlock(id, slot);
-    },
-    onCreateNoteAt: (x, y, options) => this.#createNoteAt({ ...options, x, y, immediate: true }),
+    onToggleTask: (id, index) => this.#toggleTask(id, index),
+    onEditNote: (id, point) => this.#beginEditing(id, point),
+    onCreateNoteAt: (x, y, options) => this.#openCreationMenuAt(x, y, options),
     onPinToolChange: active => {
       const button = this.element?.querySelector(".journalinator-add-pin");
       button?.classList.toggle("on", active);
       button?.setAttribute("aria-pressed", String(active));
     },
-    onMoveCard: (noteId, x, y) => notesStore.isSecretNote(noteId)
-      ? gm(() => secrets.moveSecretCard(noteId, x, y))
-      : requestWrite({ type: "moveCard", noteId, x, y }),
-    onResizeCard: (noteId, width, height) => notesStore.isSecretNote(noteId)
-      ? gm(() => secrets.resizeSecretCard(noteId, width, height))
-      : requestWrite({ type: "resizeCard", noteId, width, height }),
-    onResetCardSize: noteId => notesStore.isSecretNote(noteId)
-      ? gm(() => secrets.resizeSecretCard(noteId, null, null))
-      : requestWrite({ type: "resizeCard", noteId, width: null, height: null }),
+    onMoveCard: (noteId, x, y) => requestWrite({ type: "moveCard", noteId, x, y }),
+    onMoveCards: moves => requestWrite({ type: "moveCards", moves }),
+    onResizeCard: (noteId, width, height) => this.#resizeCard(noteId, width, height),
+    onAutoSize: ids => this.#autoSizeNotes(ids),
     onAddLabelAt: (x, y) => requestWrite({ type: "addLabel", text: t("JN.Label.Default"), x, y }),
-    onRemoveLabel: labelId => this.#removeLabel(labelId),
-    onAttachStamp: (noteId, stamp, color, corner) => notesStore.isSecretNote(noteId)
-      ? gm(() => secrets.addSecretStamp(noteId, stamp, color, corner))
-      : requestWrite({ type: "addLabel", noteId, stamp, color, corner }),
-    onStampCorner: (labelId, corner) => notesStore.isHiddenLabel(labelId)
-      ? gm(() => secrets.updateHiddenLabel(labelId, { corner }))
-      : requestWrite({ type: "updateLabel", labelId, corner }),
-    onStampColor: (labelId, color) => notesStore.isHiddenLabel(labelId)
-      ? gm(() => secrets.updateHiddenLabel(labelId, { color }))
-      : requestWrite({ type: "updateLabel", labelId, color }),
-    onAddGmLabelAt: (x, y) => gm(() => secrets.addHiddenLabel(x, y)),
-    onMoveLabel: (labelId, x, y) => notesStore.isHiddenLabel(labelId)
-      ? gm(() => secrets.updateHiddenLabel(labelId, { x, y }))
-      : requestWrite({ type: "updateLabel", labelId, x, y }),
+    onRemoveLabel: labelId => requestWrite({ type: "removeLabel", labelId }),
+    onAttachStamp: (noteId, stamp, color, corner) =>
+      requestWrite({ type: "addLabel", noteId, stamp, color, corner }),
+    onStampCorner: (labelId, corner) => requestWrite({ type: "updateLabel", labelId, corner }),
+    onStampColor: (labelId, color) => requestWrite({ type: "updateLabel", labelId, color }),
+    onMoveLabel: (labelId, x, y) => requestWrite({ type: "updateLabel", labelId, x, y }),
     onEditLabel: async labelId => {
-      if (notesStore.isHiddenLabel(labelId)) return this.#editHiddenLabel(labelId);
       const layout = notesStore.getLayout();
       const current = layout?.labels?.[labelId]?.text ?? "";
       const text = await this.#promptText(t("JN.Prompt.EditLabel"), current);
@@ -241,43 +182,39 @@ export default class JournalApp extends ApplicationV2 {
       else requestWrite({ type: "updateLabel", labelId, text });
     },
     onCreateLink: async (sourceId, targetId, ports) => {
-      if (notesStore.isSecretNote(sourceId) || notesStore.isSecretNote(targetId)) {
-        await gm(() => secrets.addHiddenLink(sourceId, targetId, ports));
-      } else {
-        await requestWrite({ type: "createLink", sourceId, targetId, ...ports });
-      }
-      // A new dot writes the layout and then the note link. Foundry can coalesce those document
-      // hooks into a render between writes. Refresh the retained canvas from the final documents.
+      await requestWrite({ type: "createLink", sourceId, targetId, ...ports });
       if (game.users.activeGM?.id === game.user.id && this.#view === "shared"
           && this.#canvas.root.isConnected) {
         this.#canvas.update(notesStore.getAllNotes(), notesStore.getLayout());
       }
     },
-    onUpdateLink: (noteId, linkId, fields) => notesStore.isHiddenLink(noteId, linkId)
-      ? gm(() => secrets.updateHiddenLink(noteId, linkId, fields))
-      : requestWrite({ type: "updateLink", noteId, linkId, fields }),
-    // Floating-toolbar cosmetic batches. Presentation changes never touch label/content/images;
-    // attachment batches are restricted to the cosmetic pin appearance (never pin enable/radius).
-    onSetPresentation: (ids, fields) => this.#setNotePresentation(ids, fields),
-    onSetAttachment: (ids, fields) => this.#setNoteAttachment(ids, fields),
-    onDeleteLink: (noteId, linkId) => notesStore.isHiddenLink(noteId, linkId)
-      ? gm(() => secrets.deleteHiddenLink(noteId, linkId))
-      : requestWrite({ type: "deleteLink", noteId, linkId }),
-    onAddCardAnchor: (noteId, anchor) => this.#addCardAnchor(noteId, anchor),
-    onMoveCardAnchor: (noteId, anchorId, x, y) => this.#moveCardAnchor(noteId, anchorId, x, y),
-    onRemoveCardAnchor: (noteId, anchorId) => this.#removeCardAnchor(noteId, anchorId),
+    onUpdateLink: (noteId, linkId, fields) => requestWrite({ type: "updateLink", noteId, linkId, fields }),
+    onDeleteLink: (noteId, linkId) => requestWrite({ type: "deleteLink", noteId, linkId }),
+    onAddCardAnchor: (noteId, anchor) => {
+      if (!anchor || anchor.kind !== "minor"
+          || !Number.isFinite(anchor.x) || !Number.isFinite(anchor.y)) return undefined;
+      return requestWrite({ type: "addCardAnchor", noteId, kind: "minor", x: anchor.x, y: anchor.y });
+    },
+    onMoveCardAnchor: (noteId, anchorId, x, y) =>
+      requestWrite({ type: "moveCardAnchor", noteId, anchorId, x, y }),
+    onRemoveCardAnchor: (noteId, anchorId) => requestWrite({ type: "removeCardAnchor", noteId, anchorId }),
     onBoardPinAction: action => requestWrite({ type: "boardPinAction", action }),
-    // Route A keeps the original link and appends a main-pin waypoint; Route B is an atomic
-    // split whose undo id becomes usable only after the GM's writeApplied acknowledgement.
     onRouteNoteOnLink: (sourceId, linkId, noteId, mode, index, undoId) =>
       requestWrite({ type: "routeNoteOnLink", sourceId, linkId, noteId, mode, index, undoId }),
     onDetachRouteNote: (sourceId, linkId, noteId, undoId) =>
       requestWrite({ type: "detachRouteNote", sourceId, linkId, noteId, undoId }),
     onClearThreadPins: (noteId, linkId) =>
       requestWrite({ type: "clearThreadPins", noteId, linkId }),
-    onHideLink: (noteId, linkId) => gm(() => secrets.hideSharedLink(noteId, linkId)),
-    onRevealLink: (noteId, linkId) => gm(() => secrets.revealLink(noteId, linkId)),
-    onToggleLinkHint: (noteId, linkId, hint) => requestWrite({ type: "gmSetLinkHint", noteId, linkId, hint }),
+    // Read-mode selection surface. Every mutation goes through a short lease, so a lock that
+    // arrives after selection still rejects the whole action.
+    onSetLayout: (ids, layout) => this.#applyAppearance(ids, { layout }),
+    onSetAppearance: (ids, patch) => this.#applyAppearance(ids, patch),
+    onChooseBackground: ids => this.#chooseBackground(ids),
+    onAutoSize: ids => this.#autoSizeNotes(ids),
+    onHistory: id => this.#openHistory(id),
+    onSendNote: id => this.#openSendPanel(this.element, null, id, "shared"),
+    onCopyNotes: ids => this.#copyNotes(ids),
+    onDeleteNotes: ids => this.#deleteNotes(ids)
   });
 
   #private = new PrivateWorkspace({
@@ -298,251 +235,410 @@ export default class JournalApp extends ApplicationV2 {
     this.render();
   }
 
-  #removeLabel(labelId) {
-    if (notesStore.isHiddenLabel(labelId)) return gm(() => secrets.removeHiddenLabel(labelId));
-    return requestWrite({ type: "removeLabel", labelId });
+  #noteFor(noteId) {
+    return notesStore.getNote(noteId);
   }
 
-  #warnBatch(key) {
-    ui.notifications?.warn(t(key));
+  #noteLocked(noteId) {
+    return this.#canvas.isNoteLocked?.(noteId) === true;
   }
 
-  /**
-   * Resolve every requested cosmetic target before deciding where the batch goes. A stale/
-   * trashed id, a mixed shared + GM-only selection, or several GM-only notes is refused as a
-   * whole so the batch can never apply to a silent subset.
-   */
-  #resolveCosmeticBatch(ids) {
-    const shared = [];
-    const secret = [];
-    const seen = new Set();
-    for (const id of ids) {
-      if (typeof id !== "string" || !id || seen.has(id)) return { error: "stale" };
-      seen.add(id);
-      if (notesStore.isSecretNote(id)) {
-        secret.push(id);
-        continue;
-      }
-      const page = notesStore.getSharedPage(id);
-      if (!page || page.system.deleted) return { error: "stale" };
-      shared.push(id);
-    }
-    if (shared.length && secret.length) return { error: "mixed" };
-    if (secret.length > 1) return { error: "manySecrets" };
-    return { shared, secret };
-  }
-
-  #batchErrorKey(error) {
-    if (error === "mixed") return "JN.Toolbar.BatchMixed";
-    if (error === "manySecrets") return "JN.Toolbar.BatchManySecrets";
-    return "JN.Toolbar.BatchStale";
+  #warnLocked() {
+    ui.notifications?.warn(t("JN.Lock.LockedAction"));
   }
 
   /**
-   * Cosmetic presentation batch for the floating toolbar. Shared notes go through the validated
-   * batch socket request; a GM-only note stays on the vault path. Mixing tiers is refused rather
-   * than silently writing one side. Labels, blocks, images and link topology are never included.
+   * Acquisition for one revisioned helper write (task toggle, appearance, layout). The lease is
+   * always released in `finally`, even when the save is rejected or the transport disappears.
    */
-  #setNotePresentation(ids, fields) {
-    if (!Array.isArray(ids) || !ids.length || !fields || typeof fields !== "object") return;
-    if (this.#canvas.readOnly) return;
-    const batch = this.#resolveCosmeticBatch(ids);
-    if (batch.error) return this.#warnBatch(this.#batchErrorKey(batch.error));
-    const clean = {};
-    if (PRESENTATION_STYLES.includes(fields.extendedStyle)) clean.extendedStyle = fields.extendedStyle;
-    if (NOTE_FONT_KEYS.includes(fields.font)) clean.font = fields.font;
-    if (PICTURE_LAYOUTS.includes(fields.pictureLayout)) clean.pictureLayout = fields.pictureLayout;
-    if (typeof fields.torn === "boolean") clean.torn = fields.torn;
-    // Force-extended is a single-note control; never let a batch widen the set unexpectedly.
-    if (typeof fields.forceExtended === "boolean") {
-      if (ids.length !== 1) return this.#warnBatch("JN.Toolbar.BatchSingle");
-      clean.forceExtended = fields.forceExtended;
+  async #withShortLease(noteId, action) {
+    if (this.#noteLocked(noteId)) {
+      this.#warnLocked();
+      return null;
     }
-    if (!Object.keys(clean).length) return;
-    if (batch.secret.length) {
-      return gm(() => secrets.setSecretNotePresentation(batch.secret[0], clean));
-    }
-    return requestWrite({ type: "setNotePresentation", noteIds: batch.shared, fields: clean });
-  }
-
-  /**
-   * Cosmetic attachment batch. The generic attachment socket request deliberately rejects
-   * `mainPinEnabled`, and the toolbar only ever offers pin appearance for a selection, so snap
-   * radii, pin enable/disable and redistribution stay out of bulk edits.
-   */
-  #setNoteAttachment(ids, fields) {
-    if (!Array.isArray(ids) || !ids.length || !fields || typeof fields !== "object") return;
-    if (this.#canvas.readOnly) return;
-    if (!PIN_STYLES.includes(fields.pinStyle)) return;
-    const batch = this.#resolveCosmeticBatch(ids);
-    if (batch.error) return this.#warnBatch(this.#batchErrorKey(batch.error));
-    const clean = { pinStyle: fields.pinStyle };
-    if (batch.secret.length) {
-      return gm(() => secrets.setSecretNoteAttachment(batch.secret[0], clean));
-    }
-    return requestWrite({ type: "setNoteAttachment", noteIds: batch.shared, fields: clean });
-  }
-
-  /** Main-pin removal is undoable; enabling only reveals the pin again. */
-  #setMainPinEnabled(noteId, enabled) {
-    if (typeof enabled !== "boolean") return;
-    // Projection uses the real measured card size, which is more accurate than stored geometry
-    // for auto-sized cards. Only w/h are sent; the server keeps x/y/rotation authoritative.
-    const measured = this.#canvas.cardBox(noteId);
-    const box = measured ? { w: measured.w, h: measured.h } : undefined;
-    if (!enabled) {
-      const undoId = foundry.utils.randomID();
-      // The active GM acknowledges the successful write; only then does it become an undo step.
-      // A rejected/failed request must not consume Ctrl+Z.
-      return requestWrite({ type: "setMainPinEnabled", noteId, enabled: false, undoId, box });
-    }
-    return requestWrite({ type: "setMainPinEnabled", noteId, enabled: true, box });
-  }
-
-  /**
-   * Secret helpers may not expose card-anchor writes; skip rather than falling back to a shared
-   * request that cannot resolve a vault note. Normal shared notes use the GM-mediated handlers.
-   */
-  #addCardAnchor(noteId, anchor) {
-    if (!anchor || anchor.kind !== "minor"
-        || !Number.isFinite(anchor.x) || !Number.isFinite(anchor.y)) return;
-    if (notesStore.isSecretNote(noteId)) {
-      return typeof secrets.addSecretCardAnchor === "function"
-        ? gm(() => secrets.addSecretCardAnchor(noteId, anchor)) : undefined;
-    }
-    return requestWrite({
-      type: "addCardAnchor", noteId, kind: "minor", x: anchor.x, y: anchor.y
-    });
-  }
-
-  #moveCardAnchor(noteId, anchorId, x, y) {
-    if (typeof anchorId !== "string" || !anchorId
-        || !Number.isFinite(x) || !Number.isFinite(y)) return;
-    if (notesStore.isSecretNote(noteId)) {
-      return typeof secrets.moveSecretCardAnchor === "function"
-        ? gm(() => secrets.moveSecretCardAnchor(noteId, anchorId, x, y)) : undefined;
-    }
-    return requestWrite({ type: "moveCardAnchor", noteId, anchorId, x, y });
-  }
-
-  #removeCardAnchor(noteId, anchorId) {
-    if (typeof anchorId !== "string" || !anchorId) return;
-    if (notesStore.isSecretNote(noteId)) {
-      return typeof secrets.removeSecretCardAnchor === "function"
-        ? gm(() => secrets.removeSecretCardAnchor(noteId, anchorId)) : undefined;
-    }
-    return requestWrite({ type: "removeCardAnchor", noteId, anchorId });
-  }
-
-  async #createNoteAt({
-    x, y, secret = false, kind = "note", style, initialTitle, immediate = false, presentation, label = ""
-  }) {
-    if (!game.users.activeGM) {
-      ui.notifications?.warn(t("JN.TopBar.Offline"));
-      return;
-    }
-    const requestedPresentation = noteCreationPresentation({ kind, style, presentation });
-    const requestedStyle = noteCreationStyle({ kind, style, presentation });
-    const titleStyle = kind === "location" ? "document"
-      : (requestedPresentation.forceExtended ? requestedPresentation.extendedStyle : "auto");
-    const note = immediate
-      ? {
-        title: defaultNoteTitle(kind, titleStyle), style: requestedStyle,
-        autoTitle: true, presentation: requestedPresentation, label
-      }
-      : await promptNewNote(t(secret ? "JN.Prompt.NewSecretNote" : "JN.Prompt.NewNote"), { kind, style, initialTitle });
-    if (!note) return;
-
-    const fields = noteCreationPresentation({ kind, style: note.style, presentation: note.presentation });
-    const finalStyle = noteCreationStyle({ kind, style: note.style, presentation: note.presentation });
-    const finalLabel = typeof note.label === "string" ? note.label : "";
-    if (secret) {
-      return gm(async () => {
-        const noteId = await secrets.createSecretNote({
-          title: note.title, kind, x, y, style: finalStyle
-        });
-        if (!noteId) return;
-        await secrets.setSecretNotePresentation(noteId, fields);
-        await secrets.setSecretNoteLabel(noteId, finalLabel);
-        this.#select(noteId);
+    let grant;
+    try {
+      grant = await requestEditReply({
+        type: "beginNoteEdit", noteId, clientSessionId
       });
+    } catch (error) {
+      console.error("Journalinator: could not acquire edit lease", error);
+      grant = null;
     }
-    return requestWrite({
-      type: "createNote", title: note.title, style: finalStyle, kind, x, y,
-      autoTitle: note.autoTitle === true, presentation: fields, label: finalLabel
+    if (!grant || grant.type !== "noteEditGranted" || !grant.lease) {
+      if (grant?.type === "noteEditDenied") this.#warnLocked();
+      return null;
+    }
+    try {
+      return await action(grant.lease, grant);
+    } finally {
+      try {
+        await requestEditReply({ type: "endNoteEdit", noteId, lease: grant.lease });
+      } catch (error) {
+        // The lease expires on its own; bookkeeping must never mask the action result.
+        console.error("Journalinator: could not release short edit lease", error);
+      }
+    }
+  }
+
+  /** Opens the shared Blank/Document/Profile menu, anchored to a toolbar button or board point. */
+  #openCreationMenuAt(x, y, { clientX, clientY } = {}) {
+    if (!game.users?.activeGM) {
+      ui.notifications?.warn(t("JN.TopBar.Offline"));
+      return null;
+    }
+    const root = this.#canvas.root;
+    const rect = root.getBoundingClientRect?.() ?? { left: 0, top: 0 };
+    const screenX = Number.isFinite(clientX) && clientX
+      ? clientX
+      : rect.left + this.#canvas.view.x + x * this.#canvas.view.k;
+    const screenY = Number.isFinite(clientY) && clientY
+      ? clientY
+      : rect.top + this.#canvas.view.y + y * this.#canvas.view.k;
+    return openCreationMenu({
+      clientX: screenX,
+      clientY: screenY,
+      t,
+      onChoose: templateId => { void this.#createFromTemplate(templateId, { x, y }); }
     });
   }
 
-  #copySelectedNotes() {
-    const ids = this.#view === "private"
-      ? this.#private.canvas.getSelectedNoteIds()
-      : this.#canvas.getSelectedNoteIds();
-    const notes = ids.map(id => this.#view === "private" ? this.#private.getNote(id) : notesStore.getNote(id))
-      .filter(note => note && !note.system.deleted)
-      // Never let a GM-only note or hidden paragraph leak into a shared paste.
-      .filter(note => this.#view !== "shared" || !note.secret);
+  async #createFromTemplate(templateId, { x, y }) {
+    if (!game.users?.activeGM) {
+      ui.notifications?.warn(t("JN.TopBar.Offline"));
+      return null;
+    }
+    const result = await createNoteFromMenu({
+      templateId,
+      x,
+      y,
+      clientSessionId,
+      requestEditReply,
+      onCreated: created => this.#onNoteCreated(created)
+    });
+    if (!result.ok) {
+      ui.notifications?.warn(t("JN.Creation.Failed"));
+      return null;
+    }
+    return result;
+  }
+
+  async #onNoteCreated(result) {
+    const noteId = result?.reply?.noteId;
+    if (!noteId) return;
+    this.#selectedNoteId = noteId;
+    await this.render();
+    await this.#beginEditing(noteId, null, result.note, result.focus);
+  }
+
+  /**
+   * Mounts the single shared NoteEditor on the card paper. The card keeps its rotation; the
+   * editor toolbar/status are screen-space overlays owned by CSS.
+   */
+  async #beginEditing(noteId, point = null, noteOverride = null, focus = null) {
+    if (!noteId) return { ok: false };
+    if (this.#view !== "shared") return { ok: false };
+    if (!game.users?.activeGM) {
+      ui.notifications?.warn(t("JN.TopBar.Offline"));
+      return { ok: false };
+    }
+    if (this.#noteLocked(noteId)) {
+      this.#warnLocked();
+      return { ok: false };
+    }
+    if (this.#editor.isEditing()) {
+      await this.#editor.close({ reason: "switch" });
+    }
+    const note = noteOverride ?? this.#noteFor(noteId);
+    if (!note || note.system?.deleted) return { ok: false };
+    const card = this.#canvas.cardEls.get(noteId);
+    if (!card) return { ok: false };
+    this.#selectedNoteId = noteId;
+    this.#canvas.setEditingNote(noteId);
+    card.classList.add("jn-editing");
+    const result = await this.#editor.open(noteId, { host: card, note });
+    if (!result?.ok) {
+      this.#canvas.setEditingNote(null);
+      card.classList.remove("jn-editing");
+      return result;
+    }
+    if (point && Number.isFinite(point.clientX) && Number.isFinite(point.clientY)) {
+      this.#editor.focusAtPoint(point.clientX, point.clientY);
+    } else if (focus) {
+      this.#focusEditorDestination(focus);
+    }
+    this.#placeEditorChrome(noteId);
+    this.#syncSelectionControls();
+    return result;
+  }
+
+  /** Toolbar sits 12 px above the paper unless that would leave the canvas viewport. */
+  #placeEditorChrome(noteId) {
+    const card = this.#canvas.cardEls.get(noteId);
+    const toolbar = this.#editor.root?.querySelector?.(".jn-editor-toolbar");
+    if (!card || !toolbar) return;
+    const rootRect = this.#canvas.root.getBoundingClientRect?.() ?? { top: 0 };
+    const toolbarRect = toolbar.getBoundingClientRect?.() ?? { top: 0 };
+    this.#editor.root.classList.toggle("jn-toolbar-below",
+      toolbarRect.top < (rootRect.top ?? 0) + 8);
+  }
+
+  #focusEditorDestination(focus) {
+    const textarea = this.#editor.root?.querySelector?.("textarea.jn-source-input");
+    if (!textarea) return;
+    const value = textarea.value ?? "";
+    let caret = 0;
+    if (focus === "after-title-marker") {
+      const end = value.indexOf("\n");
+      const first = end < 0 ? value : value.slice(0, end);
+      const match = /^( {0,3}#{1,6})(?:[ \t]+)?/.exec(first);
+      caret = match ? Math.min(match[0].length, value.length) : 0;
+    }
+    try {
+      textarea.focus({ preventScroll: true });
+    } catch {
+      textarea.focus();
+    }
+    textarea.setSelectionRange(caret, caret);
+  }
+
+  #onEditorClosed(noteId) {
+    this.#editor.detach();
+    this.#canvas.setEditingNote(null);
+    const card = this.#canvas.cardEls.get(noteId);
+    card?.classList.remove("jn-editing");
+    if (this.#view === "shared" && this.#canvas.root.isConnected) {
+      this.#canvas.update(notesStore.getAllNotes(), notesStore.getLayout());
+    }
+    this.#syncSelectionControls();
+  }
+
+  /** One revisioned task-toggle write outside the editor, under a short whole-note lease. */
+  async #toggleTask(noteId, index) {
+    if (this.#noteLocked(noteId)) return this.#warnLocked();
+    const note = this.#noteFor(noteId);
+    if (!note) return;
+    const body = toggleTaskListItem(note.system.body ?? "", index);
+    if (typeof body !== "string") return;
+    const result = await this.#withShortLease(noteId, (lease, grant) => requestEditReply({
+      type: "saveNoteBody",
+      noteId,
+      lease,
+      sequence: 1,
+      baseRevision: Number.isInteger(grant.revision) ? grant.revision : (note.system.revision ?? 0),
+      body,
+      geometry: null,
+      eventIds: []
+    }));
+    if (result?.type === "noteSaveAck") this.render();
+  }
+
+  #clampWidth(value) {
+    const width = Number(value);
+    return Number.isFinite(width) ? Math.max(160, Math.min(800, Math.round(width))) : 300;
+  }
+
+  #clampHeight(value) {
+    const height = Number(value);
+    return Number.isFinite(height) ? Math.max(80, Math.min(1600, Math.round(height))) : 120;
+  }
+
+  #resizeCard(noteId, width, height) {
+    if (this.#noteLocked(noteId)) return this.#warnLocked();
+    const card = notesStore.getLayout()?.cards?.[noteId];
+    if (!card) return;
+    const nextWidth = this.#clampWidth(width);
+    const nextHeight = this.#clampHeight(height);
+    return requestWrite({
+      type: "setCardSizing",
+      noteId,
+      sizing: { mode: "manual", width: nextWidth, minHeight: nextHeight },
+      autoSizeOrigin: card.autoSizeOrigin ?? { x: card.x + nextWidth / 2, y: card.y }
+    });
+  }
+
+  #autoSizeNotes(ids) {
+    const requested = Array.isArray(ids) ? ids : [];
+    if (requested.some(noteId => this.#noteLocked(noteId))) {
+      this.#warnLocked();
+      return Promise.resolve(false);
+    }
+    const cards = notesStore.getLayout()?.cards ?? {};
+    const writes = [];
+    for (const noteId of requested) {
+      const card = cards[noteId];
+      if (!card) continue;
+      const measured = this.#canvas.cardBox(noteId);
+      const origin = card.autoSizeOrigin
+        ?? { x: card.x + (Number.isFinite(measured?.w) ? measured.w / 2 : 110), y: card.y };
+      writes.push(requestWrite({
+        type: "setCardSizing",
+        noteId,
+        sizing: { mode: "auto", width: null, minHeight: null },
+        autoSizeOrigin: origin
+      }));
+    }
+    return Promise.allSettled(writes);
+  }
+
+  #appearanceSkinPatch(patch) {
+    const clean = {};
+    for (const key of ["paper", "font", "torn", "backgroundImage"]) {
+      if (Object.hasOwn(patch ?? {}, key)) clean[key] = patch[key];
+    }
+    return clean;
+  }
+
+  /** Short-lease appearance/layout write; body text and revision are untouched. */
+  async #applyAppearance(ids, patch = {}) {
+    if (!Array.isArray(ids) || !ids.length) return false;
+    if (this.#canvas.readOnly) return false;
+    if (ids.some(id => this.#noteLocked(id))) {
+      this.#warnLocked();
+      return false;
+    }
+    let applied = false;
+    for (const noteId of ids) {
+      const note = this.#noteFor(noteId);
+      if (!note) continue;
+      const layout = patch.layout === "profile" || patch.layout === "plain"
+        ? patch.layout
+        : (note.system.layout === "profile" ? "profile" : "plain");
+      const skin = resolveSkin({ ...resolveSkin(note), ...this.#appearanceSkinPatch(patch) });
+      const reply = await this.#withShortLease(noteId, lease => requestEditReply({
+        type: "saveNoteAppearance", noteId, lease, layout, skin
+      }));
+      if (reply?.type === "noteAppearanceAck") applied = true;
+    }
+    if (applied) {
+      if (this.#view === "shared" && this.#canvas.root.isConnected) {
+        this.#canvas.update(notesStore.getAllNotes(), notesStore.getLayout());
+      }
+    }
+    return applied;
+  }
+
+  async #chooseBackground(ids) {
+    if (!Array.isArray(ids) || !ids.length) return false;
+    const note = this.#noteFor(ids[0]);
+    const current = resolveSkin(note).backgroundImage ?? "";
+    const src = await promptImageSource(
+      t("JN.Skin.BackgroundImage"),
+      current,
+      t("JN.Skin.BackgroundHint")
+    );
+    if (src === null || src === undefined) return false;
+    return this.#applyAppearance(ids, { backgroundImage: src.trim() || null });
+  }
+
+  /** T9 owns the history modal; expose one wiring point without building it here. */
+  #historyHandler = null;
+
+  setHistoryHandler(handler) {
+    this.#historyHandler = typeof handler === "function" ? handler : null;
+  }
+
+  #openHistory(noteId) {
+    if (this.#historyHandler) return this.#historyHandler(noteId);
+    return null;
+  }
+
+  /** Clipboard payload is the current v2 content only. */
+  #copyNotes(ids) {
+    const requested = Array.isArray(ids) ? ids : [];
+    if (requested.some(id => this.#canvas.isNoteLocked?.(id))) {
+      this.#warnLocked();
+      return false;
+    }
+    const notes = requested
+      .map(id => this.#noteFor(id))
+      .filter(note => note && !note.system.deleted);
     if (!notes.length) return false;
-    const layout = this.#view === "private" ? this.#private.layout() : notesStore.getLayout();
-    const cards = layout?.cards ?? {};
     this.#clipboard = notes.map(note => ({
-      title: note.name?.trim() || t("JN.Private.NewNoteTitle"),
-      blocks: (note.system.blocks ?? []).filter(block => !block.hidden).map(block => block.text),
-      style: cardStyleKey(note.system.style),
-      kind: note.system.kind === "location" ? "location" : "note",
-      targetHeading: typeof note.system.targetHeading === "string" ? note.system.targetHeading : "",
-      label: typeof note.system.label === "string" ? note.system.label : "",
-      presentation: note.system.presentation && typeof note.system.presentation === "object"
-        ? note.system.presentation : undefined,
-      attachment: note.system.attachment && typeof note.system.attachment === "object"
-        ? note.system.attachment : undefined,
-      schemaVersion: note.system.schemaVersion,
-      // The note model has no card, so read the selected card's anchors from the layout.
-      card: { anchors: cards[note.id]?.anchors ?? {} }
+      body: typeof note.system.body === "string" ? note.system.body : "",
+      layout: note.system.layout === "profile" ? "profile" : "plain",
+      skin: resolveSkin(note),
+      schemaVersion: 2
     }));
     ui.notifications?.info(t("JN.Clipboard.Copied", { count: this.#clipboard.length }));
     return true;
   }
 
+  #copySelectedNotes() {
+    if (this.#view === "private") {
+      const noteId = this.#private.canvas.getSelectedNoteIds()[0];
+      return !!noteId;
+    }
+    return this.#copyNotes(this.#canvas.getSelectedNoteIds());
+  }
+
   async #pasteClipboard() {
     if (!this.#clipboard.length) return false;
     if (this.#view === "private") {
-      const page = privateStore.findActive(game.user.id);
-      if (!page) return false;
-      const position = this.#private.canvas.newCardPosition();
-      await this.#private.pasteNotes(this.#clipboard, position);
-      ui.notifications?.info(t("JN.Clipboard.Pasted", { count: this.#clipboard.length }));
+      // T11 replaces the private transfer payload; shared clipboard entries are not pasted into
+      // a private workspace until that adapter lands.
+      ui.notifications?.warn(t("JN.Clipboard.PrivateUnsupported"));
       return true;
     }
     if (!game.users.activeGM) {
-      ui.notifications?.warn(t("JN.Private.NoGM"));
+      ui.notifications?.warn(t("JN.TopBar.Offline"));
       return true;
     }
     const position = this.#canvas.newCardPosition();
     for (const entry of this.#clipboard) {
       await requestWrite({
-        type: "pasteNote", title: entry.title, blocks: entry.blocks,
-        style: entry.style, kind: entry.kind, targetHeading: entry.targetHeading,
-        label: entry.label, presentation: entry.presentation, attachment: entry.attachment,
-        schemaVersion: entry.schemaVersion, card: entry.card,
-        x: position.x, y: position.y
+        type: "pasteNote",
+        body: entry.body,
+        layout: entry.layout,
+        skin: entry.skin,
+        x: position.x,
+        y: position.y
       });
     }
     ui.notifications?.info(t("JN.Clipboard.Pasted", { count: this.#clipboard.length }));
     return true;
   }
 
+  #deleteNotes(ids) {
+    const unique = [...new Set(Array.isArray(ids) ? ids : [])].filter(id => {
+      const page = notesStore.getSharedPage(id);
+      return page && !page.system.deleted;
+    });
+    if (!unique.length) return false;
+    if (unique.some(id => this.#noteLocked(id))) {
+      this.#warnLocked();
+      return false;
+    }
+    const undoId = foundry.utils.randomID();
+    this.#canvas.clearSelection();
+    this.#pushHistory({ kind: "delete", noteIds: unique, undoId });
+    this.#expectDeleteAcks(undoId, unique.length);
+    requestWrite({ type: "deleteNotes", noteIds: unique, undoId });
+    return true;
+  }
+
   _onFirstRender() {
     this.#editor.activate();
     this.#normalizePinsOnce();
-    const rerender = () => this.render();
+    const rerender = () => {
+      // While the in-place editor is open, refresh the retained canvas instead of moving the
+      // whole subtree through a full app render: moving it would blur the textarea and break
+      // selection, IME composition and native undo. The card body under the editor is skipped
+      // by the canvas itself.
+      if (this.#view === "shared" && this.#editor?.isEditing() && this.#canvas?.root?.isConnected) {
+        this.#canvas.update(notesStore.getAllNotes(), notesStore.getLayout());
+        this.#syncSelectionControls();
+        return;
+      }
+      this.render();
+    };
     for (const hook of [
       "createJournalEntryPage", "updateJournalEntryPage", "deleteJournalEntryPage",
       "updateJournalEntry", "createUser", "updateUser", "deleteUser", "userConnected"
     ]) {
       this.#hookIds.push([hook, Hooks.on(hook, rerender)]);
     }
-    this.#hookIds.push(["journalinatorLocksChanged", Hooks.on("journalinatorLocksChanged", rerender)]);
-    this.#hookIds.push(["journalinatorVaultChanged", Hooks.on("journalinatorVaultChanged", rerender)]);
+    this.#hookIds.push(["journalinatorEditStateChanged", Hooks.on("journalinatorEditStateChanged", rerender)]);
     this.#hookIds.push(["journalinatorThemeRegistered", Hooks.on("journalinatorThemeRegistered", rerender)]);
     this.#hookIds.push(["journalinatorWriteApplied", Hooks.on("journalinatorWriteApplied", message => {
       // Commit client-side undo only after the active GM confirms the write actually landed.
@@ -652,13 +748,12 @@ export default class JournalApp extends ApplicationV2 {
         });
         if (!shared.length && !labelIds.length) return;
         const deleteSelection = () => {
-          this.#canvas.clearSelection();
-          for (const labelId of labelIds) this.#removeLabel(labelId);
-          if (!shared.length) return;
-          const undoId = foundry.utils.randomID();
-          this.#pushHistory({ kind: "delete", noteIds: shared, undoId });
-          this.#expectDeleteAcks(undoId, shared.length);
-          for (const noteId of shared) requestWrite({ type: "deleteNote", noteId, undoId });
+          for (const labelId of labelIds) requestWrite({ type: "removeLabel", labelId });
+          if (!shared.length) {
+            this.#canvas.clearSelection();
+            return;
+          }
+          this.#deleteNotes(shared);
         };
         // One note stays a single, immediate action; a multi-selection is destructive enough to
         // require an explicit confirmation. Cancelling must also leave selected labels untouched.
@@ -740,12 +835,13 @@ export default class JournalApp extends ApplicationV2 {
     this.#pendingDeleteAcks.set(undoId, { expected: count, acked: 0 });
   }
 
-  /** Counts a confirmed note deletion and shows the recovery notice once the batch is complete. */
+  /** Counts a confirmed deletion batch and shows the recovery notice once complete. */
   #onDeleteApplied(message) {
     if (typeof message.undoId !== "string" || !message.undoId) return;
     const pending = this.#pendingDeleteAcks.get(message.undoId);
     if (!pending) return;
-    pending.acked += 1;
+    const count = Array.isArray(message.noteIds) ? Math.max(1, message.noteIds.length) : 1;
+    pending.acked = Math.min(pending.expected, pending.acked + count);
     if (pending.acked < pending.expected) return;
     this.#pendingDeleteAcks.delete(message.undoId);
     ui.notifications?.info(t("JN.Delete.Notice", { count: pending.acked }));
@@ -829,10 +925,11 @@ export default class JournalApp extends ApplicationV2 {
     }
   }
 
-  /** Live, non-secret shared note ids from a selection; vault notes are never sendable. */
+  /** Live shared note ids from a selection. */
   #sharedSendableIds(ids) {
-    return (Array.isArray(ids) ? ids : []).filter(id => {
-      if (typeof id !== "string" || !id || notesStore.isSecretNote(id)) return false;
+    const requested = (Array.isArray(ids) ? ids : []).filter(id => typeof id === "string" && id);
+    if (requested.some(id => this.#canvas?.isNoteLocked?.(id))) return [];
+    return requested.filter(id => {
       const page = notesStore.getSharedPage(id);
       return !!page && !page.system.deleted;
     });
@@ -1068,19 +1165,11 @@ export default class JournalApp extends ApplicationV2 {
     this.#showTransferPanel(panel, trigger ?? fallbackTrigger);
   }
 
-  async #publishPrivateNote(id) {
-    const note = this.#private.getNote(id);
-    const card = this.#private.layout()?.cards?.[id];
-    if (!note || !card || !game.users.activeGM) return;
-    await requestWrite({
-      type: "pasteNote", title: note.name?.trim() || t("JN.Private.NewNoteTitle"),
-      blocks: (note.system.blocks ?? []).filter(block => !block.hidden).map(block => block.text),
-      style: cardStyleKey(note.system.style), kind: note.system.kind,
-      targetHeading: note.system.targetHeading ?? "", label: note.system.label ?? "",
-      presentation: note.system.presentation, attachment: note.system.attachment,
-      schemaVersion: note.system.schemaVersion,
-      card: { anchors: card.anchors ?? {} }, x: card.x, y: card.y
-    });
+  async #publishPrivateNote(_id) {
+    // TODO(T11): publish private notes with the current v2 body/layout/skin payload. The old
+    // block/style payload referenced the removed schema, so T8 deliberately leaves this panel
+    // inert instead of sending invalid data. The private T7 model lands with the transfer task.
+    return false;
   }
 
   /** Recipient inbox: every pending copy addressed to this user, with Accept/Decline. */
@@ -1181,9 +1270,8 @@ export default class JournalApp extends ApplicationV2 {
       privateName: privatePage?.name ?? pendingPage?.name ?? "",
       canManagePrivate: game.user.isGM,
       gmOnline: !!game.users.activeGM,
-      gmTier: canUseGmTier(),
-      vaultStatus: vaultStore.status,
-      merged: notesStore.merged,
+      gmTier: false,
+      merged: false,
       theme: theme.id,
       themeObj: theme,
       themeChoice,
@@ -1329,7 +1417,6 @@ export default class JournalApp extends ApplicationV2 {
       </button>` : ""}
       ${privateView ? this.#privateBodyHTML(context) : `<div class="journalinator-body">
         <div class="journalinator-canvas-slot"></div>
-        <aside class="journalinator-editor"></aside>
       </div>`}
       <div class="jn-transfer-popover journalinator-transfer-send" role="dialog"
         aria-labelledby="jn-transfer-send-title" hidden></div>
@@ -1355,22 +1442,16 @@ export default class JournalApp extends ApplicationV2 {
 
     // Moving the canvas into the detached render result blurs it, even though we reuse the node.
     if (document.activeElement === this.#canvas.root) this.#focusedCanvasRenders.add(root);
-    this.#editor.suspendBlur();
     this.#canvas.readOnly = offline;
-    this.#editor.readOnly = offline;
     this.#canvas.pinsEnabled = this.#pinsEnabled();
     this.#canvas.setTheme(context.themeObj);
     this.#canvas.mount(root.querySelector(".journalinator-canvas-slot"));
     this.#canvas.selectedNoteId = this.#selectedNoteId;
-    this.#canvas.gmMode = context.merged;
+    this.#canvas.gmMode = false;
     this.#canvas.update(context.allNotes, context.layout, {
       deferGeometry: true,
       dimMatch: note => this.#matchesQuery(note, context.query) && this.#matchesFilters(note)
     });
-
-    this.#editor.open(this.#selectedNoteId);
-    this.#editor.mount(root.querySelector(".journalinator-editor"));
-    this.#editor.render();
 
     if (this.#switcherOpen) this.#renderSwitcher(root, context.allNotes);
 
@@ -1542,9 +1623,14 @@ export default class JournalApp extends ApplicationV2 {
       this.#private.canvas.togglePinTool();
     });
 
-    root.querySelector(".journalinator-new")?.addEventListener("click", () => {
+    root.querySelector(".journalinator-new")?.addEventListener("click", event => {
       this.#canvas.deactivatePinTool();
-      this.#createNoteAt(this.#canvas.newCardPosition());
+      const position = this.#canvas.newCardPosition(220, 120);
+      const rect = event.currentTarget.getBoundingClientRect?.();
+      this.#openCreationMenuAt(position.x, position.y, {
+        clientX: rect?.left,
+        clientY: rect?.bottom
+      });
     });
 
     root.querySelector(".journalinator-add-label")?.addEventListener("click", () => {
@@ -1587,17 +1673,6 @@ export default class JournalApp extends ApplicationV2 {
       requestWrite({ type: "privateDecline" });
     });
 
-    root.querySelector(".journalinator-vault")?.addEventListener("click", () => openVaultDialog());
-    root.querySelector(".journalinator-view-toggle")?.addEventListener("click", () => {
-      notesStore.setGmView(!notesStore.gmView);
-    });
-    root.querySelector(".journalinator-new-secret")?.addEventListener("click", () => {
-      this.#createNoteAt({ ...this.#canvas.newCardPosition(), secret: true });
-    });
-    root.querySelector(".journalinator-add-gm-label")?.addEventListener("click", () => {
-      const { x, y } = this.#canvas.newCardPosition(0, 0);
-      gm(() => secrets.addHiddenLabel(x, y));
-    });
     root.querySelector(".journalinator-private-stats")?.addEventListener("click", () => {
       this.#private.openStats();
     });
@@ -1725,7 +1800,14 @@ export default class JournalApp extends ApplicationV2 {
       this.#private.createNoteAt({ ...this.#private.canvas.newCardPosition(), title });
       return;
     }
+    // TODO(T9): quick-switcher creation uses typed text as `# <query>` in Plain/Cream. The
+    // anchored Blank/Document/Profile menu is the supported shared creation path in T8.
     this.#createNoteAt({ ...this.#canvas.newCardPosition(), initialTitle: title });
+  }
+
+  /** TODO(T9): quick-switcher create. T8 deliberately leaves this surface to the app task. */
+  #createNoteAt() {
+    return null;
   }
 
   #clearSearch() {
@@ -1888,41 +1970,8 @@ export default class JournalApp extends ApplicationV2 {
     });
   }
 
-  #gmControlsHTML(context) {
-    const vaultLabel = {
-      absent: t("JN.TopBar.SecretsSetup"),
-      locked: t("JN.TopBar.SecretsLocked"),
-      unlocked: t("JN.TopBar.SecretsUnlocked"),
-      error: t("JN.TopBar.SecretsError")
-    }[context.vaultStatus] ?? t("JN.TopBar.Secrets");
-    const unlocked = context.vaultStatus === "unlocked";
-    return `
-      <span class="jn-gm-controls">
-        <button type="button" class="journalinator-vault">${vaultLabel}</button>
-        ${unlocked ? `<button type="button" class="journalinator-view-toggle" title="${t("JN.TopBar.GMViewTitle")}">${notesStore.gmView ? t("JN.TopBar.GMView") : t("JN.TopBar.PlayerView")}</button>` : ""}
-        ${context.merged ? `
-          <button type="button" class="journalinator-new-secret" title="${t("JN.TopBar.NewSecretTitle")}">${t("JN.TopBar.NewSecret")}</button>
-          <button type="button" class="journalinator-add-gm-label">${t("JN.TopBar.AddGMLabel")}</button>` : ""}
-      </span>`;
-  }
-
-  async #editHiddenLabel(labelId) {
-    const label = notesStore.getLayout()?.labels?.[labelId];
-    if (!label) return;
-    const result = await foundry.applications.api.DialogV2.wait({
-      window: { title: t("JN.Prompt.GMLabel") },
-      content: `<input type="text" name="value" autofocus value="${foundry.utils.escapeHTML(label.text ?? "")}">`,
-      buttons: [
-        { action: "save", label: t("JN.Common.Save"), default: true, callback: (event, button) => ({ action: "save", text: button.form.elements.value.value.trim() }) },
-        { action: "reveal", label: t("JN.Editor.LabelMakePublic"), callback: () => ({ action: "reveal" }) },
-        { action: "delete", label: t("JN.Common.Delete"), callback: () => ({ action: "delete" }) }
-      ],
-      rejectClose: false
-    });
-    if (!result) return;
-    if (result.action === "reveal") return gm(() => secrets.revealLabel(labelId));
-    if (result.action === "delete" || (result.action === "save" && !result.text)) return gm(() => secrets.removeHiddenLabel(labelId));
-    return gm(() => secrets.updateHiddenLabel(labelId, { text: result.text }));
+  #gmControlsHTML() {
+    return "";
   }
 
   async #promptText(title, initial) {

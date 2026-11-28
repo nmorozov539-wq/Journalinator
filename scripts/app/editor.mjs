@@ -488,6 +488,24 @@ export default class NoteEditor {
     return Boolean(this._session && !TERMINAL_STATES.has(this._session.state));
   }
 
+  /**
+   * Places the caret at the source offset nearest a viewport point. T8's read-mode double click
+   * uses this after mounting the editor; it is a thin delegation to the source surface so no
+   * other editor behaviour changes.
+   */
+  focusAtPoint(clientX, clientY) {
+    if (!this._source || typeof this._source.caretOffsetFromPoint !== "function") return false;
+    const offset = this._source.caretOffsetFromPoint(clientX, clientY);
+    this._source.focusRange(offset, offset);
+    return true;
+  }
+
+  /** Absolute source offset nearest a viewport point, or null when no surface is mounted. */
+  caretOffsetFromPoint(clientX, clientY) {
+    if (!this._source || typeof this._source.caretOffsetFromPoint !== "function") return null;
+    return this._source.caretOffsetFromPoint(clientX, clientY);
+  }
+
   attach(host) {
     if (!host) return this;
     this._host = host;

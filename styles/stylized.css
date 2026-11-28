@@ -549,18 +549,7 @@
 .jn-canvas .jn-card.selected .jn-card-resize {
   display: block;
 }
-.jn-canvas .jn-card.jn-hint {
-  border-radius: 3px;
-  box-shadow:
-    0 0 0 1px var(--jn-hint, #d6a45c),
-    0 0 14px color-mix(in srgb, var(--jn-hint, #d6a45c) 35%, transparent);
-}
-.jn-canvas .jn-card.jn-secret {
-  outline-offset: 4px;
-}
-.jn-canvas .jn-card .jn-card-lock-pill {
-  z-index: 6;
-}
+
 
 /* Old author stripe/badge decoration is intentionally absent in Canvas 2. */
 .jn-canvas .jn-card .jn-author-stripe,
@@ -673,22 +662,10 @@
   stroke-width: calc(var(--jn-thread-k, 1) * 0.8 * 1px);
 }
 
-/* State precedence: hidden wins over pattern; selected/hint glows compose; dim is whole-group. */
-.jn-canvas .jn-link-hidden .jn-thread-layer {
-  stroke-dasharray: var(--jn-link-dash-hidden, 2 6);
-  stroke-opacity: 0.75;
-}
-.jn-canvas .jn-link-hidden .jn-link-label { fill: var(--jn-gm); }
-.jn-canvas .jn-link-hint .jn-link-strokes { filter: drop-shadow(0 0 3px var(--jn-hint)); }
-.jn-canvas .jn-link-hint .jn-link-label { fill: var(--jn-hint); }
+/* State precedence: selected glow composes with dim as a whole-group opacity. */
 .jn-canvas .jn-link-selected { --jn-thread-boost: 1.15; }
 .jn-canvas .jn-link-selected .jn-link-strokes {
   filter: drop-shadow(0 0 2px color-mix(in srgb, var(--jn-link-select, #b85d4d) 90%, transparent))
-    drop-shadow(0 0 7px color-mix(in srgb, var(--jn-link-select, #b85d4d) 50%, transparent));
-}
-.jn-canvas .jn-link-hint.jn-link-selected .jn-link-strokes {
-  filter: drop-shadow(0 0 3px var(--jn-hint))
-    drop-shadow(0 0 2px color-mix(in srgb, var(--jn-link-select, #b85d4d) 90%, transparent))
     drop-shadow(0 0 7px color-mix(in srgb, var(--jn-link-select, #b85d4d) 50%, transparent));
 }
 
@@ -1388,4 +1365,57 @@
   .jn-ft-label {
     transition: none;
   }
+}
+
+
+/* --- v2 note paper: one body, skin-driven appearance -------------------------------- */
+.jn-canvas .jn-card {
+  color: var(--jn-paper-ink, #3c2b19);
+  background: none;
+  border: 0;
+  box-shadow: none;
+}
+.jn-canvas .jn-card > .jn-card-paper {
+  position: relative;
+  z-index: 1;
+  display: block;
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 20px;
+  color: var(--jn-paper-ink-soft, #45321f);
+  background-color: var(--jn-skin-paper-token, var(--jn-sc-paper-memo, #ead9b4));
+  background-image:
+    var(--jn-sc-grain, url("../assets/stylized/grain.svg")),
+    linear-gradient(180deg, rgba(255, 255, 255, .16), transparent 16%);
+  background-size: 200px 200px, 100% 100%;
+  background-repeat: repeat, no-repeat;
+  background-blend-mode: multiply, normal;
+  border: 1px solid color-mix(in srgb, var(--jn-paper-ink, #3c2b19) 18%, transparent);
+  border-radius: 2px 2px 6px 2px;
+  box-shadow:
+    2px 5px 4px rgba(0, 0, 0, .35),
+    7px 12px 12px rgba(0, 0, 0, .18);
+  color-scheme: light;
+  overflow-wrap: anywhere;
+}
+.jn-canvas .jn-card-profile > .jn-card-paper { min-width: 300px; }
+.jn-canvas .jn-card.jn-torn > .jn-card-paper {
+  clip-path: var(--jn-tear, polygon(0% 0%, 100% 0%, 100% 100%, 0% 100%));
+  box-shadow: none;
+}
+.jn-canvas .jn-card.jn-torn {
+  filter:
+    drop-shadow(2px 5px 4px rgba(0, 0, 0, .35))
+    drop-shadow(7px 12px 12px rgba(0, 0, 0, .18));
+}
+.jn-canvas .jn-card .jn-note-body {
+  font-family: var(--jn-note-font, var(--jn-paper-font-body, Georgia, serif));
+  font-size: 16px;
+  line-height: 1.5;
+  color: var(--jn-paper-ink-soft, #45321f);
+  text-align: left;
+}
+.jn-canvas .jn-card-profile .jn-note-body h1.jn-note-title,
+.jn-canvas .jn-card-profile .jn-note-body .jn-profile-caption {
+  text-align: center;
 }
