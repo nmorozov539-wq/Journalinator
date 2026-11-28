@@ -16,6 +16,11 @@ import { MAX_ROUTE_ANCHORS } from "../route-notes.mjs";
 import { DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, STAMP_CORNERS, STAMP_IDS, stampUrl } from "../stamps.mjs";
 import { getNoteEditor, getNotePreview, noteIsLocked } from "../edit-session.mjs";
 import { requestEditReply } from "../socket.mjs";
+import {
+  AUTO_MAX_WIDTH, AUTO_MIN_HEIGHT, autoSizeCacheKey, autoSizing, clampManualSizing,
+  computeAutoSize, createDomMeasure
+} from "../sizing/measure.mjs";
+import { originFromBox, translateForAutoOrigin, validAutoOrigin } from "../sizing/geometry.mjs";
 import { createCardView } from "./card-view.mjs";
 import { createSelectionBar } from "./selection-bar.mjs";
 
@@ -155,6 +160,19 @@ export default class JournalCanvas {
     this.pinTarget = null;
     this.snappedPinEl = null;
     this.movingThreads = new Set();
+    // Automatic sizing state. Views are the same objects used for the rendered body; the
+    // dirty set coalesces all invalidations (input, fonts, images, resize) into one geometry
+    // pass per animation frame. Automatic results are never persisted.
+    this.cardViews = new Map();
+    this.autoSizes = new Map();
+    this.autoOrigins = new Map();
+    this.sizingDirty = new Set();
+    this.autoPreviewIds = new Set();
+    this.manualPreviewIds = new Set();
+    this.fontVersion = 0;
+    this.imageVersion = 0;
+    this.sizingListeners = null;
+    this.sizingDisposed = false;
     this.threadFrame = null;
     this.threadTime = null;
     this.zoomFrame = null;
@@ -229,6 +247,11 @@ export default class JournalCanvas {
     // Kept while the popover is open so a viewport/root resize can re-clamp it without
     // guessing where the trigger went.
     this.floatingPopoverAnchor = null;
+    // Production uses a real offscreen card; tests inject a deterministic measure function.
+    this.ownsMeasure = typeof callbacks?.measure !== "function"
+      && typeof callbacks?.measure?.textWidth !== "function"
+      && typeof callbacks?.measure?.heightAtWidth !== "function";
+    this.measure = callbacks?.measure ?? createDomMeasure({ document: this.root.ownerDocument });
     this.patchNotes = new PatchNotesPanel();
     this.patchNotes.appendTo(this.root);
     this.editingNoteId = null;
@@ -237,7 +260,12 @@ export default class JournalCanvas {
       onEdit: id => this.#requestEdit(id, null),
       onLayout: (ids, layout) => this.callbacks.onSetLayout?.(ids, layout),
       onAppearance: (ids, patch) => this.callbacks.onSetAppearance?.(ids, patch),
-      onAuto: ids => this.callbacks.onAutoSize?.(ids),
+      onAuto: ids => {
+        // Apply the automatic dimensions locally before the write round-trip so the toggle
+        // responds in the same frame; a rejected/failed write is corrected on the next update.
+        this.#previewAutomatic(ids);
+        return this.callbacks.onAutoSize?.(ids);
+      },
       onHistory: id => this.callbacks.onHistory?.(id),
       onSend: id => this.callbacks.onSendNote?.(id),
       onCopy: ids => this.callbacks.onCopyNotes?.(ids),
@@ -247,9 +275,14 @@ export default class JournalCanvas {
     this.root.appendChild(this.selectionBar.element);
 
     this.#bindPointerEvents();
+    this.#bindSizingEvents();
   }
 
   update(notes, layout, { dimMatch, deferGeometry = false } = {}) {
+    // A document update is authoritative: drop local-only Auto/manual previews. If the write
+    // landed, the layout card now says auto/manual; if it failed, the card's sizing is restored.
+    if (this.autoPreviewIds.size) this.autoPreviewIds.clear();
+    if (this.manualPreviewIds.size) this.manualPreviewIds.clear();
     this.notes = notes;
     this.notesById = new Map(notes.map(note => [note._id, note]));
     this.layout = layout ?? { cards: {}, labels: {} };
@@ -318,6 +351,12 @@ export default class JournalCanvas {
         this.cardEls.delete(id);
         this.cardSizes.delete(id);
         this.unmeasuredCards.delete(id);
+        this.cardViews.delete(id);
+        this.autoSizes.delete(id);
+        this.autoOrigins.delete(id);
+        this.sizingDirty.delete(id);
+        this.autoPreviewIds.delete(id);
+        this.manualPreviewIds.delete(id);
       }
     }
     for (const pin of this.pinLayer.querySelectorAll("[data-anchor-id]")) {
@@ -354,6 +393,9 @@ export default class JournalCanvas {
       this.#centerOnContent();
       this.hasCentered = true;
     }
+    // Size/position every dirty card before pins and threads read the boxes, so the whole
+    // board uses one coherent geometry pass.
+    this.#applyAutoGeometry();
     this.#applyTransform();
     this.#flushLinkDraw();
     // Bind the overlay resize observer before the card observer so UI tests that stub the
@@ -365,7 +407,12 @@ export default class JournalCanvas {
         if (!entries?.length) this.cardSizes.clear();
         else for (const entry of entries) {
           const id = entry.target?.dataset?.id;
-          if (id) this.cardSizes.delete(id);
+          if (!id) continue;
+          this.cardSizes.delete(id);
+          // Content-driven size changes (font swap, image decode, editor growth) must be
+          // re-measured. The applied result is stable, so this cannot loop indefinitely.
+          this.autoSizes.delete(id);
+          this.sizingDirty.add(id);
         }
         this.#queueLinkDraw();
       });
@@ -443,6 +490,10 @@ export default class JournalCanvas {
     this.movingThreads.clear();
     this.#closeRouteChooser();
     this.#clearRouteDrop();
+    this.sizingListeners?.abort?.();
+    this.sizingListeners = null;
+    this.sizingDisposed = true;
+    if (this.ownsMeasure) this.measure?.dispose?.();
   }
 
   setDimMatch(dimMatch) {
@@ -515,6 +566,9 @@ export default class JournalCanvas {
       this.cardEls.set(note._id, el);
       this.cardResizeObserver?.observe(el, { box: "border-box" });
     }
+    // Capture the prior rendered box before replacing size/content. It is only used to
+    // initialize a missing autoSizeOrigin once, never written back on each frame.
+    const previousBox = this.#cardBox(note._id);
 
     el.className = [
       ...view.classes,
@@ -538,15 +592,9 @@ export default class JournalCanvas {
       delete el.dataset.tearSeed;
     }
 
-    el.style.left = `${cardData.x}px`;
-    el.style.top = `${cardData.y}px`;
     // Any render can change the paper's intrinsic size, so the next geometry pass re-measures.
     this.cardSizes.delete(note._id);
-    const sizing = cardData.sizing;
-    const manual = sizing?.mode === "manual";
-    el.classList.toggle("jn-sized", manual);
-    el.style.width = manual && Number.isFinite(sizing.width) ? `${sizing.width}px` : "";
-    el.style.minHeight = manual && Number.isFinite(sizing.minHeight) ? `${sizing.minHeight}px` : "";
+    this.cardViews.set(note._id, view);
 
     const author = game.users.get(note.system.authorId);
     el.style.setProperty("--jn-author-color", author?.color ?? "#8d8d97");
@@ -559,6 +607,8 @@ export default class JournalCanvas {
       const portrait = content.querySelector("img");
       if (portrait) portrait.classList.add("jn-profile-portrait");
     }
+    // Measure/apply size and origin-derived position before pins consume the box.
+    this.#applyCardSizing(note, cardData, view, el, { previousBox });
 
     const badge = el.querySelector(".jn-lock-badge");
     badge.hidden = !locked;
@@ -581,6 +631,251 @@ export default class JournalCanvas {
     // Pin projection measures the finished paper. Measuring before the body above was populated
     // cached a placeholder, leaving links on an auto-sized note far from its pin.
     this.#renderCardPins(el, note, cardData, resolveAttachment(note));
+  }
+
+  /**
+   * Sizing/geometry listeners. Input, image decode and font readiness all invalidate cached
+   * automatic results; the dirty set is flushed by the existing one-frame link draw scheduler.
+   */
+  #bindSizingEvents() {
+    const view = this.root.ownerDocument.defaultView;
+    const Abort = view?.AbortController ?? globalThis.AbortController;
+    const controller = Abort ? new Abort() : null;
+    this.sizingListeners = controller;
+    const options = controller ? { signal: controller.signal, capture: true } : true;
+    this.root.addEventListener("input", ev => {
+      const card = ev.target?.closest?.(".jn-card");
+      const id = card?.dataset?.id;
+      if (!id || !this.cardEls.has(id)) return;
+      this.autoSizes.delete(id);
+      this.sizingDirty.add(id);
+      this.#queueLinkDraw();
+    }, options);
+    const mediaChanged = () => {
+      this.imageVersion += 1;
+      this.#invalidateAllAutoSizing();
+    };
+    this.root.addEventListener("load", ev => {
+      if (ev.target?.tagName === "IMG") mediaChanged();
+    }, options);
+    this.root.addEventListener("error", ev => {
+      if (ev.target?.tagName === "IMG") mediaChanged();
+    }, options);
+
+    const doc = this.root.ownerDocument;
+    const fonts = doc.fonts;
+    const fontReady = () => {
+      if (this.sizingDisposed) return;
+      this.fontVersion += 1;
+      this.#invalidateAllAutoSizing();
+    };
+    if (fonts?.ready?.then) Promise.resolve(fonts.ready).then(fontReady, () => {});
+    if (typeof fonts?.addEventListener === "function") {
+      fonts.addEventListener("loadingdone", fontReady);
+      controller.signal.addEventListener("abort",
+        () => fonts.removeEventListener("loadingdone", fontReady), { once: true });
+    }
+  }
+
+  #invalidateAllAutoSizing() {
+    this.autoSizes.clear();
+    for (const id of this.cardEls.keys()) this.sizingDirty.add(id);
+    this.#queueLinkDraw();
+  }
+
+  /** The editor's textarea is the freshest body while typing; readers use the preview view. */
+  #viewForAutoSize(note, view, el) {
+    if (this.editingNoteId !== note?._id) return view;
+    const input = el?.querySelector?.(".jn-source-input");
+    if (!input || typeof input.value !== "string") return view;
+    const cardData = this.layout.cards?.[note._id] ?? null;
+    const sanitizer = globalThis.foundry?.utils?.cleanHTML;
+    return createCardView(note, {
+      readOnly: false,
+      preview: { body: input.value },
+      card: cardData,
+      sanitizer: typeof sanitizer === "function" ? sanitizer : undefined
+    });
+  }
+
+  #computeAutoSize(note, view) {
+    const available = this.root.clientWidth > 0 ? this.root.clientWidth : undefined;
+    const key = autoSizeCacheKey({
+      parsed: view.parsed,
+      layout: view.parsed.effectiveLayout,
+      skin: view.skin,
+      availableWidth: available,
+      fontVersion: this.fontVersion,
+      imageVersion: this.imageVersion
+    });
+    const cached = this.autoSizes.get(note._id);
+    if (cached?.key === key) return { ...cached.size };
+    const size = computeAutoSize({
+      parsed: view.parsed,
+      // A selected-but-invalid Profile renders Plain, so its dimensions follow Plain steps.
+      layout: view.parsed.effectiveLayout,
+      skin: view.skin,
+      measure: this.measure,
+      availableWidth: available,
+      html: view.html
+    });
+    const bounded = {
+      width: Math.min(AUTO_MAX_WIDTH, Math.max(1, size.width)),
+      height: Math.max(AUTO_MIN_HEIGHT, size.height)
+    };
+    this.autoSizes.set(note._id, { key, size: bounded });
+    return { ...bounded };
+  }
+
+  #autoOriginFor(noteId, cardData, previousBox, width, height, rotation) {
+    const baseX = Number.isFinite(cardData?.x) ? cardData.x : 0;
+    const baseY = Number.isFinite(cardData?.y) ? cardData.y : 0;
+    if (validAutoOrigin(cardData?.autoSizeOrigin)) {
+      const origin = { x: cardData.autoSizeOrigin.x, y: cardData.autoSizeOrigin.y };
+      this.autoOrigins.set(noteId, { origin, baseX, baseY });
+      return origin;
+    }
+    const known = this.autoOrigins.get(noteId);
+    if (known && known.baseX === baseX && known.baseY === baseY) return known.origin;
+    const fallback = previousBox && previousBox.w > 0 && previousBox.h > 0
+      ? previousBox
+      : {
+        x: baseX,
+        y: baseY,
+        w: width,
+        h: height,
+        rotation
+      };
+    const origin = originFromBox(fallback, rotation);
+    this.autoOrigins.set(noteId, { origin, baseX, baseY });
+    return origin;
+  }
+
+  /**
+   * Applies one card's geometry. Automatic mode derives x/y from the stable origin and the
+   * final rendered box; manual mode keeps the normal top-left and only grows vertically.
+   * The caller owns cache invalidation and the surrounding refresh of pins/threads.
+   */
+  #applyCardSizing(note, cardData, view, el, { previousBox = null, mode = null } = {}) {
+    if (!note || !el || !view) return false;
+    // Only schema-v2 notes own measured sizing. Old test/import cards keep their measured box
+    // and stored top-left; they are never rendered in a real v2 world and must not gain an
+    // automatic origin or persisted dimensions.
+    const managed = typeof note.system?.body === "string" || note.system?.schemaVersion === 2;
+    if (!managed) {
+      el.classList.remove("jn-sized");
+      el.style.left = `${Number.isFinite(cardData?.x) ? cardData.x : 0}px`;
+      el.style.top = `${Number.isFinite(cardData?.y) ? cardData.y : 0}px`;
+      const measuredW = el.offsetWidth > 0 ? el.offsetWidth
+        : Number.isFinite(cardData?.width) && cardData.width > 0 ? cardData.width : 220;
+      const measuredH = el.offsetHeight > 0 ? el.offsetHeight
+        : Number.isFinite(cardData?.height) && cardData.height > 0 ? cardData.height : AUTO_MIN_HEIGHT;
+      if (el.isConnected) {
+        this.cardSizes.set(note._id, { w: measuredW, h: measuredH });
+        this.unmeasuredCards.delete(note._id);
+      } else {
+        this.unmeasuredCards.add(note._id);
+      }
+      this.sizingDirty.delete(note._id);
+      return true;
+    }
+    // While a resize gesture is live (or its write is in flight), keep the user's inline
+    // manual dimensions even if a ResizeObserver or document update arrives.
+    if (!mode && this.manualPreviewIds.has(note._id)) {
+      const width = el.offsetWidth > 0 ? el.offsetWidth
+        : Number.parseFloat(el.style.width) || 220;
+      const height = el.offsetHeight > 0 ? el.offsetHeight
+        : Number.parseFloat(el.style.minHeight) || AUTO_MIN_HEIGHT;
+      if (el.isConnected) {
+        this.cardSizes.set(note._id, { w: width, h: height });
+        this.unmeasuredCards.delete(note._id);
+      }
+      this.sizingDirty.delete(note._id);
+      return true;
+    }
+    const requested = mode === "auto" || (!mode && this.autoPreviewIds.has(note._id))
+      ? autoSizing()
+      : cardData?.sizing;
+    const manual = requested?.mode === "manual"
+      ? clampManualSizing(requested)
+      : null;
+    const rotation = Number.isFinite(cardData?.rotation) ? Number(cardData.rotation) : view.rotation ?? 0;
+    const renderedView = this.#viewForAutoSize(note, view, el);
+
+    let width;
+    let minimumHeight;
+    if (manual) {
+      width = manual.width;
+      minimumHeight = manual.minHeight;
+      el.classList.add("jn-sized");
+    } else {
+      const auto = this.#computeAutoSize(note, renderedView);
+      width = auto.width;
+      minimumHeight = auto.height;
+      el.classList.remove("jn-sized");
+    }
+    el.style.width = `${width}px`;
+    el.style.minHeight = `${minimumHeight}px`;
+
+    // Read the finished box once. With real layout this includes any content that grows past
+    // the minimum; detached/jsdom cards fall back to the requested dimensions.
+    const measuredW = el.offsetWidth > 0 ? el.offsetWidth : width;
+    const measuredH = el.offsetHeight > 0 ? el.offsetHeight : minimumHeight;
+
+    let x;
+    let y;
+    if (manual) {
+      x = Number.isFinite(cardData?.x) ? cardData.x : 0;
+      y = Number.isFinite(cardData?.y) ? cardData.y : 0;
+    } else {
+      const origin = this.#autoOriginFor(note._id, cardData, previousBox, width, minimumHeight, rotation);
+      const next = translateForAutoOrigin({ origin, w: measuredW, h: measuredH, rotation });
+      x = next.x;
+      y = next.y;
+    }
+    el.style.left = `${x}px`;
+    el.style.top = `${y}px`;
+
+    if (el.isConnected) {
+      this.cardSizes.set(note._id, { w: measuredW, h: measuredH });
+      this.unmeasuredCards.delete(note._id);
+    } else {
+      this.unmeasuredCards.add(note._id);
+    }
+    this.sizingDirty.delete(note._id);
+    return true;
+  }
+
+  /** One dirty-card sizing pass; called at the start of refreshGeometry. */
+  #applyAutoGeometry() {
+    if (!this.sizingDirty.size) return;
+    for (const id of [...this.sizingDirty]) {
+      const note = this.notesById.get(id);
+      const el = this.cardEls.get(id);
+      const view = this.cardViews.get(id);
+      if (!note || !el || !view || this.manualPreviewIds.has(id)) {
+        this.sizingDirty.delete(id);
+        continue;
+      }
+      this.#applyCardSizing(note, this.layout.cards?.[id] ?? {}, view, el);
+    }
+  }
+
+  /** Local immediate automatic preview while the setCardSizing write is in flight. */
+  #previewAutomatic(ids) {
+    const requested = Array.isArray(ids) ? ids : [];
+    for (const id of requested) {
+      const note = this.notesById.get(id);
+      const el = this.cardEls.get(id);
+      const view = this.cardViews.get(id);
+      if (!note || !el || !view) continue;
+      this.manualPreviewIds.delete(id);
+      this.autoPreviewIds.add(id);
+      this.autoSizes.delete(id);
+      this.sizingDirty.add(id);
+      this.#applyCardSizing(note, this.layout.cards?.[id] ?? {}, view, el, { mode: "auto" });
+    }
+    this.#queueLinkDraw();
   }
 
   /** Pins are an experimental world feature; an unset legacy setting still means enabled. */
@@ -965,7 +1260,10 @@ export default class JournalCanvas {
       } else {
         // Detached or otherwise nonmeasurable: paint with known/manual/placeholder dimensions only.
         // Never cache these, because the connected refresh must measure the finished card.
-        size = { w: knownW > 0 ? knownW : 190, h: knownH > 0 ? knownH : 70 };
+        size = {
+          w: knownW > 0 ? knownW : 220,
+          h: knownH > 0 ? knownH : AUTO_MIN_HEIGHT
+        };
         if (el) this.unmeasuredCards.add(id);
       }
     }
@@ -3454,7 +3752,13 @@ export default class JournalCanvas {
       } else if (resizeHandle) {
         const id = resizeHandle.closest(".jn-card").dataset.id;
         const el = this.cardEls.get(id);
-        drag = { type: "resize", id, sx: ev.clientX, sy: ev.clientY, ow: el.offsetWidth, oh: el.offsetHeight, moved: 0 };
+        const box = this.#cardBox(id);
+        drag = {
+          type: "resize", id, sx: ev.clientX, sy: ev.clientY,
+          ow: box.w, oh: box.h, moved: 0, width: box.w, minHeight: box.h
+        };
+        this.manualPreviewIds.add(id);
+        el?.classList.add("jn-sized");
       } else if (cardEl && cardLocked) {
         // A remotely locked note is readable but cannot be selected for any mutation.
         this.#setSelection([], null);
@@ -3475,7 +3779,14 @@ export default class JournalCanvas {
         }
         const origins = new Map(selected.map(noteId => {
           const box = this.#cardBox(noteId);
-          return [noteId, { x: box.x, y: box.y }];
+          const stored = this.layout.cards?.[noteId] ?? {};
+          return [noteId, {
+            x: box.x,
+            y: box.y,
+            storedX: Number.isFinite(stored.x) ? stored.x : box.x,
+            storedY: Number.isFinite(stored.y) ? stored.y : box.y,
+            auto: stored.sizing?.mode !== "manual" || !stored.sizing
+          }];
         }));
         if (!this.selectedNoteIds.has(id)) {
           this.selectedNoteIds = new Set([id]);
@@ -3565,10 +3876,15 @@ export default class JournalCanvas {
 
       if (drag.type === "resize") {
         const el = this.cardEls.get(drag.id);
-        const w = Math.max(130, drag.ow + dx / this.view.k);
-        const h = Math.max(80, drag.oh + dy / this.view.k);
-        el.style.width = `${w}px`;
-        el.style.minHeight = `${h}px`;
+        const sizing = clampManualSizing({
+          width: drag.ow + dx / this.view.k,
+          minHeight: drag.oh + dy / this.view.k
+        });
+        if (!sizing) return;
+        drag.width = sizing.width;
+        drag.minHeight = sizing.minHeight;
+        el.style.width = `${sizing.width}px`;
+        el.style.minHeight = `${sizing.minHeight}px`;
         el.classList.add("jn-sized");
         this.cardSizes.delete(drag.id);
         this.#queueLinkDraw();
@@ -3695,7 +4011,17 @@ export default class JournalCanvas {
           if (drag.readOnly) return;
           const moves = drag.ids.map(id => {
             const el = this.cardEls.get(id);
-            return { noteId: id, x: parseFloat(el.style.left), y: parseFloat(el.style.top) };
+            const origin = drag.origins.get(id);
+            const liveX = Number.parseFloat(el.style.left);
+            const liveY = Number.parseFloat(el.style.top);
+            // For automatic cards the stored x/y may lag the origin-derived position. Send the
+            // stored point translated by the same world delta so the server's origin
+            // compensation (nextX - storedX) equals the actual drag, not a size jump.
+            const x = origin?.auto && Number.isFinite(liveX) && Number.isFinite(origin.x)
+              ? origin.storedX + (liveX - origin.x) : liveX;
+            const y = origin?.auto && Number.isFinite(liveY) && Number.isFinite(origin.y)
+              ? origin.storedY + (liveY - origin.y) : liveY;
+            return { noteId: id, x, y };
           }).filter(move => Number.isFinite(move.x) && Number.isFinite(move.y));
           if (moves.length > 1) this.callbacks.onMoveCards?.(moves);
           else if (moves.length === 1) this.callbacks.onMoveCard?.(moves[0].noteId, moves[0].x, moves[0].y);
@@ -3753,9 +4079,16 @@ export default class JournalCanvas {
           }
         }
       } else if (drag.type === "resize" && !wasClick) {
-        const el = this.cardEls.get(drag.id);
-        this.callbacks.onResizeCard?.(drag.id, el.offsetWidth,
-          Number.parseFloat(el.style.minHeight) || el.offsetHeight);
+        if (this.#isLocked(drag.id)) {
+          this.manualPreviewIds.delete(drag.id);
+          this.#warnLocked();
+          this.cardSizes.delete(drag.id);
+          this.#flushLinkDraw();
+        } else {
+          this.callbacks.onResizeCard?.(drag.id, drag.width ?? drag.ow, drag.minHeight ?? drag.oh);
+        }
+      } else if (drag.type === "resize" && wasClick) {
+        this.manualPreviewIds.delete(drag.id);
       } else if (drag.type === "attached-stamp" && wasClick) {
         this.#selectLabel(drag.id);
       } else if (drag.type === "label") {
@@ -3861,10 +4194,7 @@ export default class JournalCanvas {
         const cardEl = ev.target.closest(".jn-card");
         const id = cardEl.dataset.id;
         if (this.#isLocked(id)) return this.#warnLocked();
-        cardEl.style.width = "";
-        cardEl.style.minHeight = "";
-        cardEl.classList.remove("jn-sized");
-        this.cardSizes.delete(id);
+        this.#previewAutomatic([id]);
         this.callbacks.onAutoSize?.([id]);
         return;
       }
@@ -3887,8 +4217,13 @@ export default class JournalCanvas {
     this.callbacks.onAddLabelAt(x, y);
   }
 
+  /** Coalesces any external sizing/geometry invalidation into one animation-frame pass. */
+  scheduleGeometry() {
+    this.#queueLinkDraw();
+  }
+
   /** World-space top-left for a new card centered in the current viewport. */
-  newCardPosition(width = 190, height = 90) {
+  newCardPosition(width = 220, height = AUTO_MIN_HEIGHT) {
     const rect = this.root.getBoundingClientRect();
     const center = this.#toWorld(rect.left + rect.width / 2, rect.top + rect.height / 2);
     return {
@@ -3923,7 +4258,8 @@ export default class JournalCanvas {
     const card = this.layout.cards?.[noteId];
     if (!card) return;
     const el = this.cardEls.get(noteId);
-    const w = el?.offsetWidth ?? 190, h = el?.offsetHeight ?? 70;
+    const box = el ? this.#cardBox(noteId) : null;
+    const w = box?.w || 220, h = box?.h || AUTO_MIN_HEIGHT;
     const rect = this.root.getBoundingClientRect();
     this.view.x = rect.width / 2 - (card.x + w / 2) * this.view.k;
     this.view.y = rect.height / 2 - (card.y + h / 2) * this.view.k;

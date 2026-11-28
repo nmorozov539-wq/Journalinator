@@ -1370,10 +1370,16 @@
 
 /* --- v2 note paper: one body, skin-driven appearance -------------------------------- */
 .jn-canvas .jn-card {
+  /* Width/min-height are applied inline from measured automatic size or manual overrides.
+     The CSS only supplies safe defaults and never animates them. */
+  width: 220px;
+  min-width: 160px;
+  max-width: 800px;
   color: var(--jn-paper-ink, #3c2b19);
   background: none;
   border: 0;
   box-shadow: none;
+  transition: none !important;
 }
 .jn-canvas .jn-card > .jn-card-paper {
   position: relative;
@@ -1397,8 +1403,9 @@
     7px 12px 12px rgba(0, 0, 0, .18);
   color-scheme: light;
   overflow-wrap: anywhere;
+  transition: none !important;
 }
-.jn-canvas .jn-card-profile > .jn-card-paper { min-width: 300px; }
+.jn-canvas .jn-card-profile > .jn-card-paper { min-width: 0; }
 .jn-canvas .jn-card.jn-torn > .jn-card-paper {
   clip-path: var(--jn-tear, polygon(0% 0%, 100% 0%, 100% 100%, 0% 100%));
   box-shadow: none;

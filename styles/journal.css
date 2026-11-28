@@ -1125,17 +1125,18 @@
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
-  width: max-content;
-  min-width: 220px;
-  max-width: 380px;
+  width: 220px;
+  min-width: 160px;
+  max-width: 800px;
   color: var(--jn-paper-ink, #3c2b19);
   cursor: grab;
   user-select: none;
   transform: rotate(var(--jn-note-rotation));
   transform-origin: center center;
   outline: none;
+  /* Automatic sizes are measured in JS; never animate width/height/position or pins. */
+  transition: none !important;
 }
-.jn-card-profile { min-width: 300px; }
 .jn-card:focus-visible .jn-card-paper {
   outline: 2px solid var(--jn-acc);
   outline-offset: 3px;
@@ -1152,6 +1153,7 @@
   box-shadow: 0 8px 18px color-mix(in srgb, #000 32%, transparent);
   text-align: left;
   overflow-wrap: anywhere;
+  transition: none !important;
 }
 /* Decorative background is a wash on the paper, never a content image. */
 .jn-card-paper::before {
@@ -1172,7 +1174,18 @@
 }
 .jn-card.jn-editing .jn-card-paper { overflow: visible; }
 .jn-card.jn-editing .jn-note-body { visibility: hidden; }
-.jn-card.jn-sized { width: auto; }
+/* Manual mode still uses the same inline width/min-height; the class only records intent. */
+.jn-card.jn-sized { min-width: 160px; }
+/* Offscreen measurement surface: real card CSS, no rotation and no interaction. */
+.jn-card.jn-card-measure {
+  position: absolute !important;
+  left: -100000px !important;
+  top: 0 !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+  transform: none !important;
+  contain: layout style;
+}
 .jn-card.selected .jn-card-paper {
   outline: 2px solid var(--jn-acc);
   outline-offset: 3px;
@@ -1187,6 +1200,7 @@
   color: inherit;
   overflow-wrap: anywhere;
   min-width: 0;
+  transition: none !important;
 }
 .jn-note-body > :first-child { margin-top: 0; }
 .jn-note-body > :last-child { margin-bottom: 0; }
