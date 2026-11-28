@@ -4,9 +4,9 @@ A shared corkboard journal for Foundry VTT v14, with per-user private canvases, 
 
 ## Development status
 
-The note-system rewrite is released as **0.10.0** on `main`, with the owner's 0.9.7 link-overhaul and visual-polish patches included. Independent real Foundry v14 verification was run on 2026-11-28 with a GM and two players in a disposable world, including the 0.9.7 link/visual behavior; the tested scope passed after fixes, and remaining unverified cases are listed in [the progress ledger](handoff/note-system-update/PROGRESS.md). Passing Node/jsdom tests alone are not treated as multiplayer evidence.
+Current release: **0.10.0**. Implemented features can still have bugs; historical verification is not a guarantee of current behavior. See [CHANGELOG.md](CHANGELOG.md) for release history.
 
-Start with [the note-system handover](handoff/note-system-update/README.md) and read the ledger. [The OpenCode prompt](handoff/note-system-update/OPENCODE-PROMPT.md) defines delegated tasks, coordinator approval and the owner approval gate.
+For code-level appearance changes, read [the styling guide](docs/STYLING-GUIDE.md). It maps persisted settings, the theme API, current CSS consumers and dormant scene-color support. Completed implementation handouts have been removed; their history remains in Git.
 
 ## Implemented note system
 
@@ -37,11 +37,11 @@ https://github.com/nmorozov539-wq/Journalinator/releases/latest/download/module.
 
 For manual installation, extract the release's `fvtt-journalinator` folder into `<Foundry data>/Data/modules/`. Enable it in the world and open Journalinator from its scene-control button. Foundry loads the module directly; no build is required. See [CHANGELOG.md](CHANGELOG.md) for release history.
 
-Do not install this development branch into a live world. The local canonical checkout is already symlinked into a Foundry installation; use the isolated worktree and disposable test world described in the handover.
+Use a separate checkout for development; the local canonical checkout may be linked to a live Foundry installation.
 
 ## Private canvases
 
-Private canvases are isolated through application UI and Foundry document ownership, not encryption. The shared canvas must never include private content, and private work is not a live shared document. [PRIVATE-WORKSPACES.md](PRIVATE-WORKSPACES.md) records the implemented boundary.
+Private canvases are isolated through application UI and Foundry document ownership, not encryption. The shared canvas must never include private content, and private work is not a live shared document. [The private workspace reference](docs/PRIVATE-WORKSPACES.md) records the implemented boundary.
 
 ## Development
 
@@ -51,7 +51,7 @@ npm test
 npm run check
 ```
 
-`npm test` runs the Node and jsdom suites. The UI tests use a fake Foundry harness, not a live server. Real Foundry multiplayer checks are recorded in the progress ledger and must be repeated after integration. Do not reuse historical test counts as current results.
+`npm test` runs the Node and jsdom suites. The UI tests use a fake Foundry harness, not a live server. Do not reuse historical test counts as current results or mistake mocked tests for visual/multiplayer verification. Follow the scope and testing limits of the active task.
 
 | Area | Path |
 | --- | --- |
@@ -65,7 +65,7 @@ npm run check
 | Board, selection and app surfaces | `scripts/app/canvas.mjs`, `scripts/app/journal-app.mjs`, `scripts/app/selection-bar.mjs`, `scripts/app/history-dialog.mjs` |
 | Pins, routes and threads | `scripts/board-pins.mjs`, `scripts/anchors.mjs`, `scripts/link-thread.mjs`, `scripts/route-notes.mjs` |
 | Tests and localization | `tests/`, `lang/` |
-| Active handover and ledger | `handoff/note-system-update/` |
+| Styling data flow and theme API | [docs/STYLING-GUIDE.md](docs/STYLING-GUIDE.md) |
 
 ## License
 

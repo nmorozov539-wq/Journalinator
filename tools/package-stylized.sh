@@ -13,7 +13,8 @@ rm -rf "$MODULE_DIR" "$OUT/$NAME.zip"
 mkdir -p "$MODULE_DIR"
 
 cp "$ROOT/module.json" "$ROOT/LICENSE" "$MODULE_DIR/"
-cp "$ROOT/README.md" "$ROOT/CHANGELOG.md" "$ROOT/STYLIZED-CANVAS.md" "$MODULE_DIR/"
+cp "$ROOT/README.md" "$ROOT/CHANGELOG.md" "$MODULE_DIR/"
+cp -a "$ROOT/docs" "$MODULE_DIR/"
 cp -a "$ROOT/scripts" "$ROOT/styles" "$ROOT/lang" "$ROOT/assets" "$MODULE_DIR/"
 
 # Never ship design references, tests, source maps, node_modules, or the stale legacy dist.

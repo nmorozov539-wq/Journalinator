@@ -1,6 +1,6 @@
 # Private workspace boundary
 
-Private canvases are part of the implemented note-system rewrite. This file records the boundary as built, not a competing implementation plan. Requirements and task history are in [handoff/note-system-update/](handoff/note-system-update/README.md).
+Private canvases are part of the implemented note-system rewrite. This file records the boundary as built, not a competing implementation plan.
 
 ## Storage and permissions
 
