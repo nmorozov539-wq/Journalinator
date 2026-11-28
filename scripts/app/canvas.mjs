@@ -9,17 +9,15 @@ import { boardPinRef, pinRef, resolvePin } from "../board-pins.mjs";
 import { looseTails, pinnedThreadPath, threadLayerSpecs, ThreadMotion, THREAD_PRESETS } from "../link-thread.mjs";
 import { LINK_COLOR_SLOTS, normalizeLinkColor } from "../link-colors.mjs";
 import PatchNotesPanel from "./patch-notes.mjs";
-import { noteImageSource } from "../image-url.mjs";
-import { hasAnyLock } from "../locks.mjs";
-import { renderMarkdown } from "../markdown.mjs";
 import { t } from "../i18n.mjs";
-import {
-  NOTE_FONT_KEYS, PICTURE_LAYOUTS,
-  classifyNote, resolveAttachment, resolveLinkCosmetics, resolvePresentation
-} from "../presentation.mjs";
+import { resolveAttachment, resolveLinkCosmetics } from "../presentation.mjs";
 import { tearPoints, tearPolygon, tearSeed } from "../tear.mjs";
 import { MAX_ROUTE_ANCHORS } from "../route-notes.mjs";
 import { DEFAULT_STAMP_CORNER, isStampCorner, STAMP_COLORS, STAMP_CORNERS, STAMP_IDS, stampUrl } from "../stamps.mjs";
+import { getNoteEditor, getNotePreview, noteIsLocked } from "../edit-session.mjs";
+import { requestEditReply } from "../socket.mjs";
+import { createCardView } from "./card-view.mjs";
+import { createSelectionBar } from "./selection-bar.mjs";
 
 const DRAG_THRESHOLD = 5;
 // Pin heads are board objects: their world size stays fixed so they shrink/grow naturally with
@@ -84,49 +82,6 @@ function distanceToThreadPath(d, point) {
   return Math.sqrt(minimum);
 }
 
-// Extended style class names stay aligned with the legacy theme token keys (`wanted` is Target).
-const STYLE_CLASSES = Object.freeze({
-  memo: "jn-card-memo",
-  document: "jn-card-document",
-  target: "jn-card-wanted"
-});
-
-// Nominal creation widths; inline manually-sized cards override these.
-const CREATE_WIDTHS = Object.freeze({
-  note: 120,
-  memo: 360,
-  document: 248,
-  target: 252,
-  location: 245
-});
-
-const FONT_LABEL_KEYS = Object.freeze({
-  default: "JN.Font.Default",
-  serif: "JN.Font.Serif",
-  hand: "JN.Font.Hand",
-  display: "JN.Font.Display"
-});
-const PICTURE_LABEL_KEYS = Object.freeze({
-  above: "JN.Picture.Above",
-  below: "JN.Picture.Below",
-  left: "JN.Picture.Left",
-  right: "JN.Picture.Right"
-});
-const STYLE_LABEL_KEYS = Object.freeze({
-  memo: "JN.Style.Memo",
-  document: "JN.Style.Document",
-  target: "JN.Style.Target"
-});
-// Floating-toolbar groups. Icons and label keys are data so the button list and popover
-// builder cannot drift apart. Cosmetic-only: no label/content/image/permission/topology action.
-const NOTE_TOOL_GROUPS = Object.freeze({
-  type: { icon: "fa-note-sticky", label: "JN.Editor.Type" },
-  layout: { icon: "fa-table-columns", label: "JN.Toolbar.Layout" },
-  font: { icon: "fa-font", label: "JN.Editor.Font" },
-  effects: { icon: "fa-scissors", label: "JN.Toolbar.Effects" },
-  connections: { icon: "fa-link", label: "JN.Toolbar.Connections" },
-  locked: { icon: "fa-lock", label: "JN.Toolbar.BulkDisabled" }
-});
 // A26 multi-link bulk is intentionally out of scope for this canvas: selection is a single
 // `selectedLinkId`, so choosing another thread replaces it and the link popover edits one link.
 // (Multi-note cosmetic batches remain supported through `selectedNoteIds`.)
@@ -214,7 +169,6 @@ export default class JournalCanvas {
     // window or the canvas root changes size, with listeners owned by the canvas lifecycle.
     this.rootResizeObserver = null;
     this.windowResize = null;
-    this.inlineText = null;
     this.linkPlacement = null;
     // Dropping a single note near a thread previews the target link. The chooser is built only
     // on pointerup, in screen space, so a pan or a plain drag never opens a menu.
@@ -231,7 +185,6 @@ export default class JournalCanvas {
     this.hoverNoteId = null;
     this.focusedNoteId = null;
     this.dimMatch = () => true; // (note) => does it match the active search/filters?
-    this.gmMode = false; // GM view with secrets merged in: shows hide/reveal/hint controls
     this.readOnly = false; // no active GM: allow selecting/reading but no writes
 
     this.root = document.createElement("div");
@@ -278,6 +231,20 @@ export default class JournalCanvas {
     this.floatingPopoverAnchor = null;
     this.patchNotes = new PatchNotesPanel();
     this.patchNotes.appendTo(this.root);
+    this.editingNoteId = null;
+    this.selectionBar = createSelectionBar({
+      t,
+      onEdit: id => this.#requestEdit(id, null),
+      onLayout: (ids, layout) => this.callbacks.onSetLayout?.(ids, layout),
+      onAppearance: (ids, patch) => this.callbacks.onSetAppearance?.(ids, patch),
+      onAuto: ids => this.callbacks.onAutoSize?.(ids),
+      onHistory: id => this.callbacks.onHistory?.(id),
+      onSend: id => this.callbacks.onSendNote?.(id),
+      onCopy: ids => this.callbacks.onCopyNotes?.(ids),
+      onDelete: ids => this.callbacks.onDeleteNotes?.(ids),
+      onLocked: () => ui.notifications?.warn(t("JN.Selection.LockedGroup"))
+    });
+    this.root.appendChild(this.selectionBar.element);
 
     this.#bindPointerEvents();
   }
@@ -432,6 +399,7 @@ export default class JournalCanvas {
   }
 
   #repositionFloatingPopoverOnResize() {
+    this.#syncSelectionBar();
     if (this.floatingPopover.hidden) return;
     const anchor = this.floatingPopoverAnchor;
     const rootRect = this.root.getBoundingClientRect();
@@ -490,60 +458,80 @@ export default class JournalCanvas {
     ui.notifications?.warn(t("JN.TopBar.Offline"));
   }
 
+  /** True when another client (or another tab) currently owns the editing lease. */
+  #isLocked(noteId) {
+    return noteIsLocked(noteId);
+  }
+
+  #linkLocked(link) {
+    return !!link && (
+      (typeof link.sourceId === "string" && this.#isLocked(link.sourceId))
+      || (typeof link.targetId === "string" && this.#isLocked(link.targetId))
+    );
+  }
+
+  /** Public lock check used by JournalApp before mounting the editor. */
+  isNoteLocked(noteId) {
+    return this.#isLocked(noteId);
+  }
+
   #renderCard(note, stamp) {
     const cardData = this.layout.cards?.[note._id] ?? { x: 0, y: 0, rotation: 0 };
-    const presentation = resolvePresentation(note);
-    const mode = classifyNote(note).mode;
+    const locked = this.#isLocked(note._id);
+    const editing = this.editingNoteId === note._id;
+    const preview = locked ? getNotePreview(note._id) : null;
+    const sanitizer = globalThis.foundry?.utils?.cleanHTML;
+    const view = createCardView(note, {
+      readOnly: this.readOnly || locked,
+      preview,
+      card: cardData,
+      sanitizer: typeof sanitizer === "function" ? sanitizer : undefined
+    });
+
     let el = this.cardEls.get(note._id);
     if (!el) {
       el = document.createElement("div");
       el.className = "jn-card";
       el.dataset.id = note._id;
+      el.tabIndex = 0;
       el.innerHTML = `
-        <img class="jn-card-background" alt="" draggable="false" referrerpolicy="no-referrer" hidden>
-        <button type="button" class="jn-card-image-button">
-          <i class="fa-solid fa-camera" aria-hidden="true"></i><span aria-hidden="true">+</span>
-        </button>
-        <div class="jn-card-main">
-          <strong class="jn-card-wanted-heading" data-card-text="heading" tabindex="0" hidden></strong>
-          <h3 class="jn-card-title" data-card-text="label" tabindex="0" hidden></h3>
-          <div class="jn-card-body">
-            <div class="jn-card-image" hidden><img alt="" draggable="false" referrerpolicy="no-referrer"></div>
-            <div class="jn-card-text"><div class="jn-card-excerpt"></div></div>
-          </div>
+        <div class="jn-lock-badge" role="status" hidden>
+          <i class="fa-solid fa-lock" aria-hidden="true"></i>
+          <span class="jn-lock-text"></span>
+          <button type="button" class="jn-lock-unlock" hidden></button>
+        </div>
+        <div class="jn-card-paper">
+          <div class="jn-note-body"></div>
         </div>
         <div class="jn-card-stamps"></div>
-        <span class="jn-card-lock-pill">&#9998;</span>
         <b class="jn-card-resize"></b>
       `;
+      el.querySelector(".jn-lock-unlock").addEventListener("click", event => {
+        event.preventDefault();
+        event.stopPropagation();
+        void this.#confirmUnlock(note._id);
+      });
       this.world.appendChild(el);
       this.cardEls.set(note._id, el);
       this.cardResizeObserver?.observe(el, { box: "border-box" });
     }
 
-    const styleClass = STYLE_CLASSES[presentation.extendedStyle] ?? STYLE_CLASSES.memo;
     el.className = [
-      "jn-card", styleClass,
-      mode === "compact" ? "jn-compact" : "jn-extended",
-      `jn-font-${presentation.font}`,
-      `jn-pic-${presentation.pictureLayout}`,
-      presentation.torn ? "jn-torn" : ""
+      ...view.classes,
+      this.selectedNoteIds.has(note._id) || note._id === this.selectedNoteId ? "selected" : "",
+      locked ? "jn-being-edited" : "",
+      editing ? "jn-editing" : "",
+      this.dimMatch(note) ? "" : "jn-dimmed"
     ].filter(Boolean).join(" ");
-    el.classList.toggle("jn-secret", !!note.secret);
-    el.classList.toggle("jn-kind-location", note.system.kind === "location");
-    el.classList.toggle("jn-hint", !!note.system.hint);
-    el.classList.toggle("jn-has-hidden", !note.secret && (note.system.blocks ?? []).some(b => b.hidden));
-    el.classList.toggle("selected", this.selectedNoteIds.has(note._id) || note._id === this.selectedNoteId);
-    el.classList.toggle("jn-being-edited", hasAnyLock(note._id));
-    el.classList.toggle("jn-dimmed", !this.dimMatch(note));
 
-    // The torn outline is a stable function of the permanent document id, never DOM order or
-    // another client's view. Only the paper (`.jn-card-main`) is clipped; pins, stamps, the
-    // signature and the resize handle stay outside it and keep their hit areas.
-    if (presentation.torn) {
+    for (const [property, value] of Object.entries(view.cssVars)) {
+      el.style.setProperty(property, value);
+    }
+    // The board geometry code and selection outline still read the short token.
+    el.style.setProperty("--jn-rotation", view.cssVars["--jn-note-rotation"]);
+
+    if (view.skin.torn) {
       el.style.setProperty("--jn-tear", tearPolygon(note._id));
-      // The numeric seed is recorded for diagnostics/tests; the silhouette itself stays a
-      // pure function of the stable id.
       el.dataset.tearSeed = String(tearSeed(note._id));
     } else {
       el.style.removeProperty("--jn-tear");
@@ -552,59 +540,46 @@ export default class JournalCanvas {
 
     el.style.left = `${cardData.x}px`;
     el.style.top = `${cardData.y}px`;
-    el.style.setProperty("--jn-rotation", `${cardData.rotation ?? 0}deg`);
     // Any render can change the paper's intrinsic size, so the next geometry pass re-measures.
     this.cardSizes.delete(note._id);
-    // Manual sizes live in the layout card; calculated compact/extended sizes live only in CSS.
-    const manualWidth = Number.isFinite(cardData.width) && cardData.width > 0;
-    const manualHeight = Number.isFinite(cardData.height) && cardData.height > 0;
-    el.classList.toggle("jn-sized", manualWidth || manualHeight);
-    el.style.width = manualWidth ? `${cardData.width}px` : "";
-    el.style.minHeight = manualHeight ? `${cardData.height}px` : "";
+    const sizing = cardData.sizing;
+    const manual = sizing?.mode === "manual";
+    el.classList.toggle("jn-sized", manual);
+    el.style.width = manual && Number.isFinite(sizing.width) ? `${sizing.width}px` : "";
+    el.style.minHeight = manual && Number.isFinite(sizing.minHeight) ? `${sizing.minHeight}px` : "";
 
     const author = game.users.get(note.system.authorId);
     el.style.setProperty("--jn-author-color", author?.color ?? "#8d8d97");
 
-    const image = el.querySelector(".jn-card-image");
-    const portrait = image.querySelector("img");
-    const imageButton = el.querySelector(".jn-card-image-button");
-    const source = noteImageSource(note.system.image);
-    // Only an explicit image earns the two-column picture layout; otherwise left/right would
-    // leave an empty column behind.
-    el.classList.toggle("jn-has-picture", !!source);
-    const label = t(source ? "JN.Editor.ChangeImage" : "JN.Editor.SetImage");
-    imageButton.title = label;
-    imageButton.setAttribute("aria-label", label);
-    image.hidden = !source;
-    if (source && portrait.getAttribute("src") !== source) portrait.setAttribute("src", source);
-    else if (!source) portrait.removeAttribute("src");
-    const background = el.querySelector(".jn-card-background");
-    const backgroundSource = noteImageSource(note.system.backgroundImage);
-    background.hidden = !backgroundSource;
-    if (backgroundSource && background.getAttribute("src") !== backgroundSource) background.setAttribute("src", backgroundSource);
-    else if (!backgroundSource) background.removeAttribute("src");
+    // Never rebuild the rendered body under an open editor: a remote update must not reset the
+    // caret, selection, IME composition or undo history. The read body is simply hidden by CSS.
+    const content = el.querySelector(".jn-note-body");
+    if (!editing) content.innerHTML = view.html;
+    if (view.parsed.effectiveLayout === "profile") {
+      const portrait = content.querySelector("img");
+      if (portrait) portrait.classList.add("jn-profile-portrait");
+    }
 
-    // The optional label is the only visible identity on a card. The internal Foundry name is
-    // never rendered in normal view; an empty label simply hides the slot.
-    const title = el.querySelector(".jn-card-title");
-    const heading = el.querySelector(".jn-card-wanted-heading");
-    const text = presentation.label.trim();
-    if (this.inlineText?.field !== title) {
-      title.textContent = text;
-      title.hidden = !text;
+    const badge = el.querySelector(".jn-lock-badge");
+    badge.hidden = !locked;
+    if (locked) {
+      const lease = getNoteEditor(note._id);
+      const name = String(lease?.userName ?? "").trim();
+      el.querySelector(".jn-lock-text").textContent = name
+        ? t("JN.Lock.Editing", { name })
+        : t("JN.Lock.SomeoneEditing");
+      const unlock = el.querySelector(".jn-lock-unlock");
+      unlock.hidden = !game.user?.isGM;
+      unlock.textContent = t("JN.Lock.Unlock");
+      unlock.setAttribute("aria-label", t("JN.Lock.UnlockNote", { name: name || t("JN.Lock.Someone") }));
     }
-    const isTarget = presentation.extendedStyle === "target";
-    heading.hidden = !isTarget;
-    if (this.inlineText?.field !== heading) {
-      heading.textContent = presentation.heading.trim() || t("JN.Style.Wanted");
-    }
-    this.#renderCardBlocks(el.querySelector(".jn-card-excerpt"), note.system.blocks ?? []);
+
     const stampSlot = el.querySelector(".jn-card-stamps");
     if (stamp) el.dataset.sealCorner = stamp.dataset.sealCorner;
     else delete el.dataset.sealCorner;
     stampSlot.replaceChildren(...(stamp ? [stamp] : []));
-    // Pin projection measures the finished paper. Measuring before the image/text above was
-    // populated cached a 190px placeholder, leaving links on an auto-sized note far from its pin.
+    // Pin projection measures the finished paper. Measuring before the body above was populated
+    // cached a placeholder, leaving links on an auto-sized note far from its pin.
     this.#renderCardPins(el, note, cardData, resolveAttachment(note));
   }
 
@@ -856,103 +831,74 @@ export default class JournalCanvas {
     return this.#anchorWorldAttachment(box, this.#cardAnchor(noteId, anchorId));
   }
 
-  #renderCardBlocks(excerpt, blocks) {
-    const activeId = excerpt.querySelector(".jn-block-input")?.parentElement.dataset.blockId;
-    const visible = blocks.filter(block => block.text || block.hidden || activeId === block.blockId);
-    const shown = visible.length ? visible : blocks.slice(0, 1);
-    const existing = new Map([...excerpt.children].map(el => [el.dataset.blockId, el]));
-    for (const [index, block] of shown.entries()) {
-      const row = existing.get(block.blockId) ?? document.createElement("div");
-      if (!existing.has(block.blockId)) {
-        row.className = "jn-card-block";
-        row.dataset.blockId = block.blockId;
-        row.dataset.cardText = "block";
-        row.tabIndex = 0;
-        const body = document.createElement("div");
-        body.className = "jn-card-block-body";
-        row.appendChild(body);
-      }
-      const body = row.firstElementChild;
-      const markdownKey = `${this.readOnly ? "r" : "w"}\u0000${block.text}`;
-      if (body.dataset.markdownKey !== markdownKey) {
-        body.dataset.markdownKey = markdownKey;
-        if (block.text.trim()) {
-          body.innerHTML = renderMarkdown(block.text, { interactiveTasks: !this.readOnly });
-        } else {
-          body.textContent = t("JN.Editor.EditCardText");
-        }
-      }
-      row.classList.toggle("jn-card-block-empty", !block.text);
-      if (excerpt.children[index] !== row) excerpt.insertBefore(row, excerpt.children[index] ?? null);
-      existing.delete(block.blockId);
-    }
-    for (const row of existing.values()) row.remove();
+  #warnLocked() {
+    ui.notifications?.warn(t("JN.Lock.LockedAction"));
   }
 
-  #editCardText(id, field) {
-    if (this.readOnly) return this.#warnReadOnly();
-    this.#setSelection([id], id);
-    if (field.dataset.cardText === "block") {
-      this.callbacks.onEditCardBlock?.(id, field.dataset.blockId, field);
-      return;
+  /** GM-only force unlock, after the exact confirmation copy. No passphrase is involved. */
+  async #confirmUnlock(noteId) {
+    if (!game.user?.isGM || !noteId) return false;
+    const lease = getNoteEditor(noteId);
+    const rawName = String(lease?.userName ?? "").trim();
+    const name = rawName
+      ? (globalThis.foundry?.utils?.escapeHTML?.(rawName) ?? rawName)
+      : t("JN.Lock.Someone");
+    const DialogV2 = globalThis.foundry?.applications?.api?.DialogV2;
+    let choice = null;
+    if (DialogV2?.wait) {
+      choice = await DialogV2.wait({
+        window: { title: t("JN.Lock.EndTitle", { name }) },
+        content: `<p>${t("JN.Lock.EndBody")}</p>`,
+        buttons: [
+          { action: "cancel", label: t("JN.Common.Cancel"), default: true },
+          { action: "unlock", label: t("JN.Lock.UnlockNote") }
+        ],
+        close: () => null
+      });
+    } else if (DialogV2?.confirm) {
+      choice = await DialogV2.confirm({
+        window: { title: t("JN.Lock.EndTitle", { name }) },
+        content: `<p>${t("JN.Lock.EndBody")}</p>`
+      }) ? "unlock" : null;
     }
-    const note = this.notes.find(item => item._id === id);
-    if (!note || this.inlineText?.field === field) return;
-    this.finishInlineText();
-    const kind = field.dataset.cardText;
-    // The editor owns the internal Foundry name; the card only edits the optional label and
-    // the target heading.
-    if (kind !== "label" && kind !== "heading") return;
-    const presentation = resolvePresentation(note);
-    const current = kind === "label" ? presentation.label : presentation.heading;
-    const input = document.createElement("input");
-    input.type = "text";
-    input.className = "jn-card-text-input";
-    input.maxLength = kind === "label" ? 200 : 80;
-    input.value = this.callbacks.onReadCardText?.(id, kind) ?? current;
-    if (kind === "heading") input.placeholder = t("JN.Style.Wanted");
-    input.setAttribute("aria-label", t(kind === "heading" ? "JN.Editor.TargetHeading" : "JN.Editor.Label"));
-    this.inlineText = { field, input, id, kind };
-    this.#syncMaskState();
-    field.hidden = false;
-    field.replaceChildren(input);
-    input.onblur = () => this.finishInlineText();
-    input.addEventListener("keydown", event => {
-      if (event.isComposing || !["Enter", "Escape"].includes(event.key)) return;
-      event.preventDefault();
-      event.stopPropagation();
-      this.finishInlineText(event.key === "Enter");
-      this.root.focus({ preventScroll: true });
-    });
-    input.focus();
-    input.select();
+    if (choice !== "unlock") return false;
+    const reply = await requestEditReply({ type: "forceUnlockNote", noteId });
+    if (reply?.type === "noteEditForced") {
+      this.update(this.notes, this.layout);
+    }
+    return reply?.type === "noteEditForced";
+  }
+
+  /** Requests the shared editor for one note. Locked notes stay readable but never editable. */
+  #requestEdit(id, point = null) {
+    if (this.readOnly) return this.#warnReadOnly();
+    if (!id) return;
+    if (this.#isLocked(id)) return this.#warnLocked();
+    this.#setSelection([id], id);
+    this.callbacks.onEditNote?.(id, point);
+  }
+
+  /**
+   * JournalApp marks the note whose in-place editor is mounted. While set, card renders keep
+   * the editor DOM and the read body untouched; only position/appearance chrome is refreshed.
+   */
+  setEditingNote(noteId) {
+    const previous = this.editingNoteId;
+    this.editingNoteId = noteId ?? null;
+    for (const id of [previous, this.editingNoteId]) {
+      if (!id) continue;
+      this.cardEls.get(id)?.classList.toggle("jn-editing", id === this.editingNoteId);
+    }
+    if (this.editingNoteId) this.selectionBar.hide();
+    else this.#syncSelectionBar();
   }
 
   mount(slot) {
-    const input = this.inlineText?.input;
-    if (input) input.onblur = null;
     slot.appendChild(this.root);
-    if (input) input.onblur = () => this.finishInlineText();
   }
 
-  finishInlineText(save = true) {
-    if (!this.inlineText) return;
-    const { field, input, id, kind } = this.inlineText;
-    this.inlineText = null;
-    this.#syncMaskState();
-    input.onblur = null;
-    const note = this.notes.find(item => item._id === id);
-    if (!note) return;
-    const presentation = resolvePresentation(note);
-    if (kind === "label") {
-      const value = presentation.label.trim();
-      field.textContent = value;
-      field.hidden = !value;
-    } else {
-      field.textContent = presentation.heading.trim() || t("JN.Style.Wanted");
-    }
-    if (save) this.callbacks.onSaveCardText?.(id, kind, input.value.trim());
-  }
+  /** Kept for the app-close path; inline text editing no longer exists. */
+  finishInlineText() {}
 
   #stampImage(labelId, data, url) {
     const image = document.createElement("img");
@@ -1080,7 +1026,7 @@ export default class JournalCanvas {
       const roleClass = role => `jn-thread-${role.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)}`;
       const layerPaths = () => specs.layers.map(layer => `<path class="jn-thread-layer ${roleClass(layer.role)}" d="${d}"
         style="--jn-layer-width:${layer.widthFactor};--jn-layer-opacity:${layer.opacity};--jn-layer-dx:${layer.dx};--jn-layer-dy:${layer.dy}"/>`).join("");
-      const accentStack = cosmetics.pattern === "alternating" && !link.hidden
+      const accentStack = cosmetics.pattern === "alternating"
         ? `<g class="jn-link-stack jn-link-stack-accent">${layerPaths()}</g>`
         : "";
       const tails = cosmetics.ends === "loose"
@@ -1091,8 +1037,7 @@ export default class JournalCanvas {
       const endpoint = (anchor, attached) => `<circle class="jn-thread-pin${attached ? " jn-thread-pin-attached" : ""}" cx="${anchor.x - anchor.nx * THREAD_PIN_RADIUS}"
           cy="${anchor.y - anchor.ny * THREAD_PIN_RADIUS}"/>`;
       const dimmed = dimmedIds.has(note._id) || dimmedIds.has(link.targetId);
-      // A hidden link keeps its hidden treatment regardless of the chosen pattern.
-      const pattern = link.hidden ? "continuous" : cosmetics.pattern;
+      const pattern = cosmetics.pattern;
       const selected = link.id === this.selectedLinkId;
       const linkId = foundry.utils.escapeHTML(String(link.id ?? ""));
 
@@ -1105,8 +1050,6 @@ export default class JournalCanvas {
         selected ? "jn-link-selected" : "",
         this.routeDrop?.linkId === link.id ? "jn-link-drop-target" : "",
         dimmed ? "jn-link-dimmed" : "",
-        link.hidden ? "jn-link-hidden" : "",
-        link.hint ? "jn-link-hint" : ""
       ].filter(Boolean).join(" ");
       const k = Math.round(specs.k * 10000) / 10000;
       body += `<g data-id="${linkId}" class="${linkClasses}"
@@ -1119,7 +1062,7 @@ export default class JournalCanvas {
         ${endpoint(start, !!link.sourcePinRef || this.#visibleEndpointPin(note._id, link.sourceAnchorId))}
         ${endpoint(end, !!link.targetPinRef || this.#visibleEndpointPin(link.targetId, link.targetAnchorId))}
         ${pins.map((pin, index) => `<circle class="jn-thread-pin jn-board-pin" data-pin-index="${index}" cx="${pin.x}" cy="${pin.y}"/>`).join("")}
-        ${link.label || link.hint ? `<text class="jn-link-label" x="${mx}" y="${my + 4}">${link.hint ? "&#10022; " : ""}${foundry.utils.escapeHTML(link.label ?? "")}</text>` : ""}
+        ${link.label ? `<text class="jn-link-label" x="${mx}" y="${my + 4}">${foundry.utils.escapeHTML(link.label)}</text>` : ""}
       </g>`;
       hits += `<path class="jn-link-hit" data-id="${linkId}" d="${d}"/>`;
 
@@ -1189,7 +1132,7 @@ export default class JournalCanvas {
     const entries = Array.isArray(link.routeAnchors) ? link.routeAnchors : [];
     const points = [];
     // Defensive rendering: a disabled pin experiment or a note that re-enabled/removed its main
-    // pin must not draw a waypoint the server would no longer accept. Missing anchors and secret/
+    // pin must not draw a waypoint the server would no longer accept. Missing anchors and
     // trashed notes are skipped here too; the active GM prunes them on the next route write.
     if (!this.#pinsOn()) return points;
     for (const entry of entries) {
@@ -1197,7 +1140,7 @@ export default class JournalCanvas {
       const box = boxes.get(entry.noteId);
       if (!box) continue;
       const note = this.notes.find(item => item._id === entry.noteId);
-      if (!note || note.secret) continue;
+      if (!note) continue;
       if (resolveAttachment(note).mainPinEnabled === false) continue;
       const anchor = this.#cardAnchor(entry.noteId, entry.anchorId);
       if (!isMainAnchor(anchor)) continue;
@@ -1326,7 +1269,7 @@ export default class JournalCanvas {
     const note = this.notes.find(item => item._id === noteId);
     // Secret/vault notes and hidden links are outside the shared route transaction; never offer
     // an operation the active GM would silently reject.
-    if (!note || note.secret) {
+    if (!note) {
       this.#setRouteDropTarget(null);
       return;
     }
@@ -1336,7 +1279,7 @@ export default class JournalCanvas {
     let best = null;
     for (const [linkId, thread] of this.threads) {
       const link = this.linksById.get(linkId);
-      if (!link || !thread.hit || link.hidden) continue;
+      if (!link || !thread.hit) continue;
       if (link.sourceId === noteId || link.targetId === noteId) continue;
       if ((link.routeAnchors ?? []).some(entry => entry?.noteId === noteId)) continue;
       const distance = distanceToThreadPath(thread.hit.getAttribute("d"), center);
@@ -1483,7 +1426,7 @@ export default class JournalCanvas {
       return [
         String(link.id), note._id, link.targetId, normalizeLinkColor(link.color),
         cosmetics.secondaryColor, cosmetics.material, cosmetics.thickness, cosmetics.pattern,
-        cosmetics.ends, link.hidden ? 1 : 0, link.hint ? 1 : 0, link.label ?? "",
+        cosmetics.ends, link.label ?? "",
         savedPins.length, link.id === this.selectedLinkId ? 1 : 0, dimmed ? 1 : 0,
         sourceSide, targetSide, link.sourceAnchorId ?? "", link.targetAnchorId ?? "",
         link.sourcePinRef ?? "", link.targetPinRef ?? "",
@@ -1668,7 +1611,7 @@ export default class JournalCanvas {
     if (this.hoverNoteId) active.add(this.hoverNoteId);
     if (this.focusedNoteId) active.add(this.focusedNoteId);
     for (const [id, el] of this.cardEls) {
-      if (el.classList.contains("jn-being-edited") || this.inlineText?.id === id) active.add(id);
+      if (el.classList.contains("jn-being-edited") || el.classList.contains("jn-editing")) active.add(id);
     }
     for (const shape of this.svg.querySelectorAll(".jn-thread-mask-shape")) {
       shape.classList.toggle("jn-thread-mask-active", active.has(shape.dataset.noteId));
@@ -1961,7 +1904,6 @@ export default class JournalCanvas {
       <div class="jn-link-row jn-link-actions">
         ${link.boardPinLink ? "" : this.#clearBoardPinsButton(link)}
         ${link.boardPinLink ? "" : this.#routeDetachButtons(link)}
-        ${link.boardPinLink ? "" : this.#gmLinkButtons(link)}
         <button type="button" class="jn-link-delete" title="${t("JN.Link.Delete")}">✕</button>
       </div>
     `;
@@ -2019,17 +1961,6 @@ export default class JournalCanvas {
         });
       };
     });
-    const gmButton = (selector, fn) => {
-      const btn = this.linkToolbar.querySelector(selector);
-      if (btn) btn.onclick = () => {
-        fn();
-        this.#closeLinkToolbar();
-      };
-    };
-    gmButton(".jn-link-hide", () => this.callbacks.onHideLink?.(link.sourceId, link.id));
-    gmButton(".jn-link-reveal", () => this.callbacks.onRevealLink?.(link.sourceId, link.id));
-    const hintBtn = this.linkToolbar.querySelector(".jn-link-hint-toggle");
-    if (hintBtn) hintBtn.onclick = () => this.callbacks.onToggleLinkHint?.(link.sourceId, link.id, !link.hint);
     this.linkToolbar.querySelectorAll(".jn-link-detach").forEach(btn => {
       btn.onclick = () => {
         const undoId = foundry.utils.randomID();
@@ -2068,30 +1999,58 @@ export default class JournalCanvas {
 
   #floatingSelection() {
     const link = this.selectedLinkId ? this.linksById.get(this.selectedLinkId) : null;
-    if (link) return { kind: "link", link, ids: [], notes: [] };
-    const ids = this.getSelectedNoteIds();
-    if (!ids.length) return null;
-    const notes = ids.map(id => this.notesById.get(id)).filter(Boolean);
-    return notes.length ? { kind: "notes", notes, ids: notes.map(note => note._id) } : null;
+    return link ? { kind: "link", link, ids: [], notes: [] } : null;
   }
 
   #syncFloatingToolbar() {
     const selection = this.#floatingSelection();
-    const signature = selection
-      ? (selection.kind === "link"
-        ? `link:${selection.link.id}:${this.readOnly ? 1 : 0}`
-        : `notes:${selection.ids.join(",")}:${this.readOnly ? 1 : 0}:${selection.notes.some(note => note.secret) ? 1 : 0}:${selection.notes.map(note => resolvePresentation(note).extendedStyle).join(",")}`)
-      : "none";
-    if (signature === this.floatingToolbarSignature) return;
+    const signature = selection ? `link:${selection.link.id}:${this.readOnly ? 1 : 0}` : "none";
+    if (signature === this.floatingToolbarSignature) {
+      this.#syncSelectionBar();
+      return;
+    }
     this.floatingToolbarSignature = signature;
     this.#closeFloatingPopover();
     if (!selection) {
       this.floatingToolbar.hidden = true;
       this.floatingToolbar.replaceChildren();
+      this.#syncSelectionBar();
       return;
     }
     this.floatingToolbar.replaceChildren(...this.#floatingButtons(selection));
     this.floatingToolbar.hidden = false;
+    this.#syncSelectionBar();
+  }
+
+  /**
+   * The read-mode note toolbar is a screen-space overlay independent of canvas zoom. It is
+   * hidden while a link is selected or the in-place editor owns the card.
+   */
+  #syncSelectionBar() {
+    if (!this.selectionBar) return;
+    if (this.editingNoteId || this.selectedLinkId) {
+      this.selectionBar.hide();
+      return;
+    }
+    const ids = this.getSelectedNoteIds();
+    if (!ids.length) {
+      this.selectionBar.hide();
+      return;
+    }
+    const notes = ids.map(id => this.notesById.get(id)).filter(Boolean);
+    if (!notes.length) {
+      this.selectionBar.hide();
+      return;
+    }
+    const lockedIds = ids.filter(id => this.#isLocked(id));
+    this.selectionBar.update({
+      notes,
+      lockedIds,
+      readOnly: this.readOnly,
+      cards: this.layout.cards ?? {}
+    });
+    const anchor = this.cardEls.get(ids[ids.length - 1]);
+    if (anchor) this.selectionBar.position(anchor, this.root);
   }
 
   #floatingButton(group, definition, disabled) {
@@ -2122,39 +2081,18 @@ export default class JournalCanvas {
   }
 
   #floatingButtons(selection) {
-    if (selection.kind === "link") {
-      return Object.entries(LINK_TOOL_GROUPS).map(([group, definition]) =>
-        this.#floatingButton(group, definition, this.readOnly));
-    }
-    const single = selection.notes.length === 1;
-    const secretMixed = !single && selection.notes.some(note => note.secret);
-    const disabled = this.readOnly || secretMixed;
-    const groups = ["type"];
-    if (single && resolvePresentation(selection.notes[0]).extendedStyle === "target") groups.push("layout");
-    groups.push("font", "effects");
-    if (single) groups.push("connections");
-    const buttons = [];
-    // Mixed shared + GM-only multi-selection: bulk writes are disabled with an explicit reason
-    // instead of partially applying to one tier and leaking the difference.
-    if (secretMixed) buttons.push(this.#floatingButton("locked", NOTE_TOOL_GROUPS.locked, false));
-    for (const group of groups) buttons.push(this.#floatingButton(group, NOTE_TOOL_GROUPS[group], disabled));
-    return buttons;
+    if (selection.kind !== "link") return [];
+    return Object.entries(LINK_TOOL_GROUPS).map(([group, definition]) =>
+      this.#floatingButton(group, definition, this.readOnly));
   }
 
   #openFloatingPopover(group, button) {
     const selection = this.#floatingSelection();
     if (!selection) return;
-    if (selection.kind === "link" && !LINK_TOOL_GROUPS[group]) return;
-    if (selection.kind === "notes") {
-      if (!NOTE_TOOL_GROUPS[group]) return;
-      if ((group === "layout" || group === "connections") && selection.notes.length !== 1) return;
-      if (this.readOnly && group !== "locked") return;
-      if (group !== "locked" && selection.notes.length > 1 && selection.notes.some(note => note.secret)) return;
-    } else if (this.readOnly) return;
+    if (selection.kind !== "link" || !LINK_TOOL_GROUPS[group]) return;
+    if (this.readOnly) return;
 
-    const payload = selection.kind === "link"
-      ? this.#linkPopover(group, selection.link)
-      : this.#notePopover(group, selection);
+    const payload = this.#linkPopover(group, selection.link);
     if (!payload) return;
 
     this.#closeFloatingPopover();
@@ -2273,11 +2211,6 @@ export default class JournalCanvas {
     el.style.maxWidth = `${maxWidth}px`;
   }
 
-  #common(values) {
-    const value = values[0];
-    return { value, mixed: values.some(candidate => candidate !== value) };
-  }
-
   #selectField({ className, label, options, value, mixed }) {
     const safeLabel = foundry.utils.escapeHTML(label);
     const mixedOption = mixed
@@ -2288,115 +2221,6 @@ export default class JournalCanvas {
     return `<label class="jn-ft-field"><span>${safeLabel}</span>
       <select class="jn-ft-input ${className}" aria-label="${safeLabel}">${mixedOption}${choices}</select>
     </label>`;
-  }
-
-  #notePopover(group, selection) {
-    const { notes, ids } = selection;
-    const presentations = notes.map(note => resolvePresentation(note));
-    if (group === "locked") {
-      return {
-        title: t("JN.Toolbar.BulkDisabled"),
-        html: `<p class="jn-ft-note">${foundry.utils.escapeHTML(t("JN.Toolbar.SecretBulkDisabled"))}</p>`,
-        bind: () => {}
-      };
-    }
-    if (group === "type") {
-      const state = this.#common(presentations.map(presentation =>
-        presentation.forceExtended ? presentation.extendedStyle : "auto"));
-      return {
-        title: t("JN.Editor.Type"),
-        html: this.#selectField({
-          className: "jn-ft-style", label: t("JN.Editor.Type"), value: state.value, mixed: state.mixed,
-          options: [...(ids.length === 1 ? [["auto", t("JN.Style.Auto")]] : []),
-            ...Object.entries(STYLE_LABEL_KEYS).map(([key, labelKey]) => [key, t(labelKey)])]
-        }),
-        bind: el => {
-          el.querySelector(".jn-ft-style").onchange = event => {
-            const value = event.target.value;
-            if (!value) return;
-            this.callbacks.onSetPresentation?.(ids, value === "auto"
-              ? { forceExtended: false } : { extendedStyle: value, ...(ids.length === 1 ? { forceExtended: true } : {}) });
-          };
-        }
-      };
-    }
-    if (group === "font") {
-      const state = this.#common(presentations.map(presentation => presentation.font));
-      return {
-        title: t("JN.Editor.Font"),
-        html: this.#selectField({
-          className: "jn-ft-font", label: t("JN.Editor.Font"), value: state.value, mixed: state.mixed,
-          options: NOTE_FONT_KEYS.map(key => [key, t(FONT_LABEL_KEYS[key] ?? "JN.Font.Default")])
-        }),
-        bind: el => {
-          el.querySelector(".jn-ft-font").onchange = event => {
-            const value = event.target.value;
-            if (!value) return;
-            this.callbacks.onSetPresentation?.(ids, { font: value });
-          };
-        }
-      };
-    }
-    if (group === "layout") {
-      const state = this.#common(presentations.map(presentation => presentation.pictureLayout));
-      return {
-        title: t("JN.Toolbar.Layout"),
-        html: this.#selectField({
-          className: "jn-ft-picture", label: t("JN.Toolbar.Layout"),
-          value: state.value, mixed: state.mixed,
-          options: PICTURE_LAYOUTS.map(key => [key, t(PICTURE_LABEL_KEYS[key] ?? "JN.Picture.Above")])
-        }),
-        bind: el => {
-          el.querySelector(".jn-ft-picture").onchange = event => {
-            const value = event.target.value;
-            if (!value) return;
-            this.callbacks.onSetPresentation?.(ids, { pictureLayout: value });
-          };
-        }
-      };
-    }
-    if (group === "effects") {
-      const state = this.#common(presentations.map(presentation => presentation.torn));
-      return {
-        title: t("JN.Toolbar.Effects"),
-        html: this.#selectField({
-          className: "jn-ft-torn", label: t("JN.Editor.Torn"), mixed: state.mixed,
-          value: state.value ? "on" : "off",
-          options: [["on", t("JN.Toolbar.On")], ["off", t("JN.Toolbar.Off")]]
-        }),
-        bind: el => {
-          el.querySelector(".jn-ft-torn").onchange = event => {
-            const value = event.target.value;
-            if (!value) return;
-            this.callbacks.onSetPresentation?.(ids, { torn: value === "on" });
-          };
-        }
-      };
-    }
-    if (group === "connections") {
-      const id = ids[0];
-      const related = new Map();
-      for (const note of this.notes) {
-        if (note._id === id) continue;
-        if ((note.system.links ?? []).some(link => link.targetId === id)
-            || (notes[0].system.links ?? []).some(link => link.targetId === note._id)) {
-          related.set(note._id, note);
-        }
-      }
-      return {
-        title: t("JN.Toolbar.Connections"),
-        html: `<div class="jn-ft-connections">${[...related].map(([noteId, note]) =>
-          `<button type="button" data-related-id="${foundry.utils.escapeHTML(noteId)}">${foundry.utils.escapeHTML(note.name)}</button>`).join("")
-          || `<p class="jn-ft-note">${t("JN.Common.NoneYet")}</p>`}</div>`,
-        bind: el => el.querySelectorAll("[data-related-id]").forEach(button => {
-          button.onclick = () => {
-            this.#closeFloatingPopover();
-            this.focusNote(button.dataset.relatedId);
-          };
-        })
-      };
-    }
-    return null;
   }
 
   #linkPopover(group, link) {
@@ -2527,7 +2351,7 @@ export default class JournalCanvas {
 
   /** Clear the free board waypoints when a split is blocked by them; route data is untouched. */
   #clearBoardPinsButton(link) {
-    if (link.hidden || typeof this.callbacks.onClearThreadPins !== "function") return "";
+    if (typeof this.callbacks.onClearThreadPins !== "function") return "";
     if (!Array.isArray(link.pins) || link.pins.length === 0) return "";
     return `<button type="button" class="jn-link-clear-pins" title="${t("JN.Route.ClearPins")}">${t("JN.Route.ClearPins")}</button>`;
   }
@@ -2537,7 +2361,7 @@ export default class JournalCanvas {
     // Hidden links live in a separate store with their own route policy; only expose the plain
     // shared detach operation here rather than guessing at vault authority. Local/private
     // canvases have no route callback and therefore offer no false affordance.
-    if (link.hidden || typeof this.callbacks.onDetachRouteNote !== "function") return "";
+    if (typeof this.callbacks.onDetachRouteNote !== "function") return "";
     const routed = Array.isArray(link.routeAnchors) ? link.routeAnchors : [];
     return routed.map(entry => {
       const note = this.notes.find(item => item._id === entry?.noteId);
@@ -2546,18 +2370,6 @@ export default class JournalCanvas {
       return `<button type="button" class="jn-link-detach" data-route-note-id="${foundry.utils.escapeHTML(String(entry?.noteId ?? ""))}"
         title="${t("JN.Route.Detach")}">${t("JN.Route.Detach")}${suffix}</button>`;
     }).join("");
-  }
-
-  /** GM-only toolbar buttons: hide a shared link, reveal a hidden one, mark a shared link as a hint. */
-  #gmLinkButtons(link) {
-    if (!this.gmMode) return "";
-    if (link.hidden) {
-      const secretEnd = this.notes.some(n => n.secret && (n._id === link.sourceId || n._id === link.targetId));
-      return secretEnd ? `<span class="jn-link-gm-tag" title="${t("JN.Link.GMTitle")}">${t("JN.Link.GM")}</span>`
-        : `<button type="button" class="jn-link-reveal" title="${t("JN.Link.RevealTitle")}">${t("JN.Link.Reveal")}</button>`;
-    }
-    return `<button type="button" class="jn-link-hint-toggle${link.hint ? " on" : ""}" title="${t("JN.Link.HintTitle")}">&#10022;</button>` +
-      (link.origin === "typed" ? "" : `<button type="button" class="jn-link-hide" title="${t("JN.Link.HideTitle")}">${t("JN.Link.Hide")}</button>`);
   }
 
   #centerOnContent() {
@@ -2633,6 +2445,7 @@ export default class JournalCanvas {
     this.root.style.setProperty("--jn-board-pattern-pos", `${this.view.x}px ${this.view.y}px`);
     this.root.classList.toggle("jn-far-zoom", this.view.k < 0.48);
     this.#syncZoomComp();
+    this.#syncSelectionBar();
   }
 
   /**
@@ -2762,7 +2575,7 @@ export default class JournalCanvas {
     const notes = new Set(drag.additive ? drag.initialIds : []);
     const labels = new Set(drag.additive ? drag.initialLabelIds : []);
     for (const [id, el] of this.cardEls) {
-      if (intersects(el)) notes.add(id);
+      if (intersects(el) && !this.#isLocked(id)) notes.add(id);
     }
     for (const [id, el] of this.labelEls) {
       if (intersects(el)) labels.add(id);
@@ -2781,9 +2594,9 @@ export default class JournalCanvas {
       if (!point || point.x < x0 || point.x > x1 || point.y < y0 || point.y > y1) continue;
       if (ref.startsWith("p:")) {
         const data = this.layout.pins?.[ref.slice(2)];
-        if (data?.noteId && this.cardEls.has(data.noteId)) notes.add(data.noteId);
+        if (data?.noteId && this.cardEls.has(data.noteId) && !this.#isLocked(data.noteId)) notes.add(data.noteId);
         else if (data && !data.noteId) pins.add(ref);
-      } else if (ref.startsWith("n:") && pin.dataset.noteId) {
+      } else if (ref.startsWith("n:") && pin.dataset.noteId && !this.#isLocked(pin.dataset.noteId)) {
         notes.add(pin.dataset.noteId);
       }
     }
@@ -2811,6 +2624,12 @@ export default class JournalCanvas {
   #deleteTargetPin() {
     const ref = this.selectedPinRef ?? this.hoverPinRef;
     if (!ref || !this.#pinPoint(ref)?.movable || this.readOnly) return false;
+    const pin = [...this.pinLayer.querySelectorAll("[data-pin-ref]")]
+      .find(candidate => candidate.dataset.pinRef === ref);
+    if (pin?.dataset.noteId && this.#isLocked(pin.dataset.noteId)) {
+      this.#warnLocked();
+      return false;
+    }
     this.#cancelPinInteraction();
     this.#setSelectedPin(null);
     this.callbacks.onBoardPinAction?.({ type: "delete", ref });
@@ -2860,11 +2679,17 @@ export default class JournalCanvas {
     return !this.#hitCanvas(ev).noteId;
   }
 
-  /** Single entry point for opening the note-type menu from an empty-canvas double click. */
+  /** Empty-canvas double click opens the same anchored Blank/Document/Profile menu as + Note. */
   #openBoardMenu(ev, layers = null) {
     if (!this.#boardMenuAllowed(ev, layers)) return false;
     ev.preventDefault?.();
-    this.#openContextMenu(ev.clientX, ev.clientY);
+    const point = this.#toWorld(ev.clientX, ev.clientY);
+    // Center the default Plain paper under the double click; the server still clamps and
+    // applies the current free-placement rules.
+    this.callbacks.onCreateNoteAt?.(point.x - 110, point.y - 60, {
+      clientX: ev.clientX,
+      clientY: ev.clientY
+    });
     return true;
   }
 
@@ -2927,11 +2752,27 @@ export default class JournalCanvas {
     }
   }
 
+  #pinOwnerNoteId(ref) {
+    if (typeof ref !== "string") return "";
+    if (ref.startsWith("n:")) {
+      const split = ref.indexOf(":", 2);
+      return split > 2 ? ref.slice(2, split) : "";
+    }
+    if (ref.startsWith("p:")) return this.layout.pins?.[ref.slice(2)]?.noteId ?? "";
+    return "";
+  }
+
   #finishPinConnection(ev) {
     const state = this.pinInteraction;
     if (!state || state.mode !== "thread") return;
     const target = this.#hitCanvas(ev).ref;
     if (target && target !== state.sourceRef && this.#pinPoint(target)) {
+      const owner = this.#pinOwnerNoteId(target);
+      if (owner && this.#isLocked(owner)) {
+        this.#warnLocked();
+        this.#cancelPinInteraction();
+        return;
+      }
       this.callbacks.onBoardPinAction?.({ type: "connect", source: state.sourceRef, target });
     }
     this.#cancelPinInteraction();
@@ -2942,6 +2783,11 @@ export default class JournalCanvas {
     if (!state || state.mode !== "move") return;
     const point = this.#toWorld(ev.clientX, ev.clientY, state.rect ?? null);
     const noteId = this.#hitCanvas(ev).noteId;
+    if (noteId && this.#isLocked(noteId)) {
+      this.#warnLocked();
+      this.#cancelPinInteraction();
+      return;
+    }
     if (noteId) this.cardSizes.delete(noteId);
     const box = noteId ? this.#cardBox(noteId) : null;
     const local = box ? cardNormalizedPoint(box, point) : point;
@@ -3127,6 +2973,11 @@ export default class JournalCanvas {
     const target = anchorHit ?? reusable ?? (edge && this.#pinsOn()
       ? { ...edge, anchor: { kind: "minor", ...edge.point } } : edge);
     const { source, pins } = this.linkPlacement;
+    if (target?.id && this.#isLocked(target.id)) {
+      this.#warnLocked();
+      this.cancelLinkTool();
+      return;
+    }
     if (!target) {
       if (card) return; // The card interior is not a board waypoint or a minor attachment.
       if (!source || pins.length >= MAX_THREAD_PINS || !validThreadPin(world)) return;
@@ -3141,18 +2992,11 @@ export default class JournalCanvas {
     }
     const { id, point } = target;
     if (source && source.id !== id) {
-      const sourceNote = this.notes.find(item => item._id === source.id);
-      const targetNote = this.notes.find(item => item._id === id);
-      const secret = !!sourceNote?.secret || !!targetNote?.secret;
-      // Secret/hidden links keep plain points: their anchor registries live in different
-      // stores, so sharing anchor ids would let either side prune/redistribute the other.
       const anchors = { sourcePoint: source.point, targetPoint: point, pins: [...pins] };
-      if (!secret) {
-        anchors.sourceAnchorId = source.anchorId ?? "";
-        anchors.targetAnchorId = target.anchorId ?? "";
-        if (!source.anchorId && source.anchor) anchors.sourceAnchor = source.anchor;
-        if (!target.anchorId && target.anchor) anchors.targetAnchor = target.anchor;
-      }
+      anchors.sourceAnchorId = source.anchorId ?? "";
+      anchors.targetAnchorId = target.anchorId ?? "";
+      if (!source.anchorId && source.anchor) anchors.sourceAnchor = source.anchor;
+      if (!target.anchorId && target.anchor) anchors.targetAnchor = target.anchor;
       this.cancelLinkTool();
       this.callbacks.onCreateLink?.(source.id, id, anchors);
       return;
@@ -3277,9 +3121,6 @@ export default class JournalCanvas {
       ${Object.entries(STAMP_COLORS).map(([name, value]) => `<button type="button" data-stamp-color="${value}"
         aria-pressed="${value === color}" title="${t(`JN.Stamp.Color.${name}`)}" aria-label="${t(`JN.Stamp.Color.${name}`)}"
         style="--jn-swatch:${value}"></button>`).join("")}</div>`;
-    const gmItems = this.gmMode ? `
-      <button type="button" data-action="secret-note">${t("JN.Context.NewSecretNote")}</button>
-      <button type="button" data-action="gm-label">${t("JN.Context.NewGMLabel")}</button>` : "";
     if (editStamp && noteId) {
       this.contextMenu.innerHTML = `
         ${stampColors()}
@@ -3300,19 +3141,12 @@ export default class JournalCanvas {
         ${isStamp ? stampColors() : `<button type="button" data-action="edit-label">${t("JN.Prompt.EditLabel")}</button>`}
         <button type="button" data-action="remove-label">${t(isStamp ? "JN.Stamp.Remove" : "JN.Common.Delete")}</button>`;
     } else if (noteId) {
-      const note = this.notes.find(item => item._id === noteId);
       this.contextMenu.innerHTML = `
         <button type="button" data-action="card-stamp">${t("JN.Stamp.Add")}</button>
-        <button type="button" data-action="card-background">${t("JN.Editor.ChangeBackground")}</button>
         `;
     } else this.contextMenu.innerHTML = `
       <button type="button" data-action="note">${t("JN.Context.NewNote")}</button>
-      <button type="button" data-action="memo">${t("JN.Style.Memo")}</button>
-      <button type="button" data-action="document">${t("JN.Style.Document")}</button>
-      <button type="button" data-action="target">${t("JN.Style.Wanted")}</button>
-      <button type="button" data-action="location">${t("JN.Context.NewLocation")}</button>
       <button type="button" data-action="label">${t("JN.Context.NewLabel")}</button>
-      ${gmItems}
     `;
     const rootRect = this.root.getBoundingClientRect();
     this.contextMenu.style.left = `${clientX - rootRect.left}px`;
@@ -3328,11 +3162,6 @@ export default class JournalCanvas {
       button.addEventListener("click", ev => {
         ev.stopPropagation();
         const action = button.dataset.action;
-        if (action === "card-background") {
-          this.#closeContextMenu();
-          this.callbacks.onEditCardBackground?.(noteId);
-          return;
-        }
         if (action === "delete-private") {
           this.#closeContextMenu();
           this.callbacks.onDeleteNote?.(noteId);
@@ -3361,22 +3190,9 @@ export default class JournalCanvas {
         if (button.dataset.stamp) this.callbacks.onAttachStamp?.(noteId, button.dataset.stamp, color, corner);
         else if (action === "remove-label") this.callbacks.onRemoveLabel?.(labelId);
         else if (action === "edit-label") this.callbacks.onEditLabel(labelId);
-        else if (action === "note") this.callbacks.onCreateNoteAt(point.x - CREATE_WIDTHS.note / 2, point.y - 30, {
-          kind: "note", presentation: { extendedStyle: "memo", forceExtended: false }
-        });
-        else if (action === "memo") this.callbacks.onCreateNoteAt(point.x - CREATE_WIDTHS.memo / 2, point.y - 40, {
-          kind: "note", presentation: { extendedStyle: "memo", forceExtended: true }
-        });
-        else if (action === "document") this.callbacks.onCreateNoteAt(point.x - CREATE_WIDTHS.document / 2, point.y - 40, {
-          kind: "note", presentation: { extendedStyle: "document", forceExtended: true }
-        });
-        else if (action === "target") this.callbacks.onCreateNoteAt(point.x - CREATE_WIDTHS.target / 2, point.y - 40, {
-          kind: "note", presentation: { extendedStyle: "target", forceExtended: true }
-        });
-        else if (action === "location") this.callbacks.onCreateNoteAt(point.x - CREATE_WIDTHS.location / 2, point.y - 45, { kind: "location" });
-        else if (action === "label") this.callbacks.onAddLabelAt(point.x, point.y);
-        else if (action === "secret-note") this.callbacks.onCreateNoteAt(point.x - CREATE_WIDTHS.note / 2, point.y - 30, { kind: "note", secret: true });
-        else if (action === "gm-label") this.callbacks.onAddGmLabelAt?.(point.x, point.y);
+        else if (action === "note") {
+          this.callbacks.onCreateNoteAt?.(point.x, point.y, {});
+        } else if (action === "label") this.callbacks.onAddLabelAt(point.x, point.y);
         this.#closeContextMenu();
       });
     });
@@ -3423,13 +3239,7 @@ export default class JournalCanvas {
     });
 
     this.root.addEventListener("click", ev => {
-      const camera = ev.target.closest(".jn-card-image-button");
-      if (camera && !camera.hidden) {
-        ev.stopPropagation();
-        this.callbacks.onEditCardImage?.(camera.closest(".jn-card").dataset.id);
-        return;
-      }
-      if (ev.button !== 0 || ev.target.closest(`.jn-context-menu, .jn-link-toolbar, .jn-floating-toolbar, .jn-floating-popover, .jn-route-chooser, ${PATCH_NOTES_SELECTOR}, input, textarea`)) return;
+      if (ev.button !== 0 || ev.target.closest(`.jn-context-menu, .jn-link-toolbar, .jn-floating-toolbar, .jn-floating-popover, .jn-selection-bar, .jn-route-chooser, ${PATCH_NOTES_SELECTOR}, input, textarea`)) return;
       if (!this.linkPlacement) return;
       ev.preventDefault();
       ev.stopPropagation();
@@ -3437,14 +3247,17 @@ export default class JournalCanvas {
     }, { capture: true });
 
     this.root.addEventListener("click", ev => {
-      const box = ev.target.closest(".jn-card-block input[type=\"checkbox\"]");
-      if (!box || this.readOnly) return;
+      const box = ev.target.closest(".jn-note-body input.jn-task-checkbox");
+      if (!box) return;
       ev.preventDefault();
       ev.stopPropagation();
-      const row = box.closest(".jn-card-block");
       const noteId = box.closest(".jn-card")?.dataset.id;
-      const index = [...row.querySelectorAll('input[type="checkbox"]')].indexOf(box);
-      if (noteId && index >= 0) this.callbacks.onToggleTask?.(noteId, row.dataset.blockId, index);
+      if (!noteId) return;
+      if (this.readOnly) return this.#warnReadOnly();
+      if (this.#isLocked(noteId)) return this.#warnLocked();
+      const content = box.closest(".jn-note-body");
+      const index = [...content.querySelectorAll('input[type="checkbox"]')].indexOf(box);
+      if (index >= 0) this.callbacks.onToggleTask?.(noteId, index);
     });
 
     this.root.addEventListener("keydown", ev => {
@@ -3504,7 +3317,13 @@ export default class JournalCanvas {
         this.#clearPinSelection();
         return;
       }
-      // Inline card text is opened by a deliberate double click below.
+      if (ev.key === "Enter" && this.selectedNoteId
+          && !ev.target.closest("input, textarea, select, [contenteditable]")) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.#requestEdit(this.selectedNoteId, null);
+        return;
+      }
     });
 
     this.root.addEventListener("wheel", ev => {
@@ -3553,6 +3372,10 @@ export default class JournalCanvas {
         if (hit.directPin && !this.readOnly) {
           ev.preventDefault();
           ev.stopPropagation();
+          if (hit.noteId && this.#isLocked(hit.noteId)) {
+            this.#warnLocked();
+            return;
+          }
           this.root.focus({ preventScroll: true });
           this.#setSelectedPin(hit.ref);
           this.#markPinGesture();
@@ -3569,6 +3392,10 @@ export default class JournalCanvas {
             && !ev.target.closest(".jn-link-hit, .jn-pin-link-hit")) {
           ev.preventDefault();
           ev.stopPropagation();
+          if (hit.noteId && this.#isLocked(hit.noteId)) {
+            this.#warnLocked();
+            return;
+          }
           drag = { type: "place-pin", sx: ev.clientX, sy: ev.clientY, moved: 0,
             noteId: hit.noteId };
           try { this.root.setPointerCapture(ev.pointerId); } catch { /* synthetic pointer */ }
@@ -3577,10 +3404,9 @@ export default class JournalCanvas {
       }
       if (ev.target.closest(PATCH_NOTES_SELECTOR)) return;
       if (ev.target.closest(".jn-route-chooser")) return;
-      if (ev.target.closest(".jn-floating-toolbar, .jn-floating-popover")) return;
-      if (ev.target.closest(".jn-card-image-button")) return;
+      if (ev.target.closest(".jn-floating-toolbar, .jn-floating-popover, .jn-selection-bar")) return;
       if (!this.linkPlacement && !ev.altKey
-          && ev.target.closest(".jn-card-block a[href], .jn-card-block input[type=\"checkbox\"]")) return;
+          && ev.target.closest(".jn-note-body a[href], .jn-note-body input[type=\"checkbox\"]")) return;
       if (this.linkPlacement && ev.button === 0 && !ev.target.closest(".jn-context-menu, .jn-link-toolbar, input, textarea")) {
         ev.preventDefault();
         lastBoardClick = null;
@@ -3595,7 +3421,8 @@ export default class JournalCanvas {
       this.#clearRouteDrop();
       try { this.root.setPointerCapture(ev.pointerId); } catch { /* no active pointer (e.g. synthetic event) */ }
       const cardEl = ev.target.closest(".jn-card");
-      const resizeHandle = this.readOnly ? null : ev.target.closest(".jn-card-resize");
+      const cardLocked = cardEl ? this.#isLocked(cardEl.dataset.id) : false;
+      const resizeHandle = this.readOnly || cardLocked ? null : ev.target.closest(".jn-card-resize");
       const labelEl = ev.target.closest(".jn-label");
       const stampId = this.readOnly ? null : ev.target.closest("[data-stamp-label-id]")?.dataset.stampLabelId;
       const linkHit = ev.target.closest(".jn-link-hit, .jn-pin-link-hit");
@@ -3610,6 +3437,10 @@ export default class JournalCanvas {
         return;
       } else if (pin) {
         const id = pin.closest("[data-id]").dataset.id;
+        if (this.#linkLocked(this.linksById.get(id))) {
+          this.#warnLocked();
+          return;
+        }
         const index = Number(pin.dataset.pinIndex);
         const point = this.threads.get(id)?.pins[index];
         if (!point) return;
@@ -3624,12 +3455,24 @@ export default class JournalCanvas {
         const id = resizeHandle.closest(".jn-card").dataset.id;
         const el = this.cardEls.get(id);
         drag = { type: "resize", id, sx: ev.clientX, sy: ev.clientY, ow: el.offsetWidth, oh: el.offsetHeight, moved: 0 };
+      } else if (cardEl && cardLocked) {
+        // A remotely locked note is readable but cannot be selected for any mutation.
+        this.#setSelection([], null);
+        lastBoardClick = null;
+        drag = { type: "locked", moved: 0 };
       } else if (cardEl) {
         const initialLabelIds = [...this.selectedLabelIds];
         this.#highlightLabels([]);
         const id = cardEl.dataset.id;
         const initialIds = [...this.selectedNoteIds];
         const selected = this.selectedNoteIds.has(id) ? [...this.selectedNoteIds] : [id];
+        if (selected.some(noteId => this.#isLocked(noteId))) {
+          // A lock can arrive while a group is selected. Reject the whole gesture rather than
+          // moving an allowed subset of the selection.
+          this.#warnLocked();
+          drag = { type: "locked", moved: 0 };
+          return;
+        }
         const origins = new Map(selected.map(noteId => {
           const box = this.#cardBox(noteId);
           return [noteId, { x: box.x, y: box.y }];
@@ -3639,6 +3482,7 @@ export default class JournalCanvas {
           this.selectedPinRefs.clear();
           this.#syncPinSelection();
           for (const [noteId, el] of this.cardEls) el.classList.toggle("selected", noteId === id);
+          this.#syncSelectionBar();
         }
         // Free pins selected with this note group move by the same world delta. Attached pins
         // already follow their card and are never tracked as independent pin selections.
@@ -3653,7 +3497,6 @@ export default class JournalCanvas {
         drag = {
           type: "card", id, ids: selected, origins, pinOrigins,
           toggle: ev.ctrlKey || ev.metaKey, initialIds, initialLabelIds,
-          text: ev.target.closest("[data-card-text]"),
           sx: ev.clientX, sy: ev.clientY, moved: 0, readOnly: this.readOnly
         };
       } else if (labelEl) {
@@ -3663,6 +3506,10 @@ export default class JournalCanvas {
           toggle: ev.ctrlKey || ev.metaKey, readOnly: this.readOnly };
       } else if (linkHit) {
         const id = linkHit.dataset.id;
+        if (this.#linkLocked(this.linksById.get(id))) {
+          this.#warnLocked();
+          return;
+        }
         const motion = this.threads.get(id)?.motion;
         drag = { type: "link", id, sx: ev.clientX, sy: ev.clientY, moved: 0, x: motion?.x ?? 0, y: motion?.y ?? 0,
           readOnly: this.readOnly };
@@ -3843,18 +3690,15 @@ export default class JournalCanvas {
             this.#setSelection(next, next.length === 1 && !drag.initialLabelIds.length ? next[0] : null, drag.initialLabelIds);
           } else {
             this.#setSelection([drag.id], drag.id);
-            const now = Date.now();
-            if (lastCardClick?.id === drag.id && now - lastCardClick.at < 450) {
-              if (drag.text && lastCardClick.text) this.#editCardText(drag.id, drag.text);
-              lastCardClick = null;
-            } else lastCardClick = { id: drag.id, at: now, text: !!drag.text };
           }
         } else {
           if (drag.readOnly) return;
-          for (const id of drag.ids) {
+          const moves = drag.ids.map(id => {
             const el = this.cardEls.get(id);
-            this.callbacks.onMoveCard(id, parseFloat(el.style.left), parseFloat(el.style.top));
-          }
+            return { noteId: id, x: parseFloat(el.style.left), y: parseFloat(el.style.top) };
+          }).filter(move => Number.isFinite(move.x) && Number.isFinite(move.y));
+          if (moves.length > 1) this.callbacks.onMoveCards?.(moves);
+          else if (moves.length === 1) this.callbacks.onMoveCard?.(moves[0].noteId, moves[0].x, moves[0].y);
           if (drag.pinOrigins?.size) {
             const pinDx = (ev.clientX - drag.sx) / this.view.k;
             const pinDy = (ev.clientY - drag.sy) / this.view.k;
@@ -3910,7 +3754,8 @@ export default class JournalCanvas {
         }
       } else if (drag.type === "resize" && !wasClick) {
         const el = this.cardEls.get(drag.id);
-        this.callbacks.onResizeCard(drag.id, el.offsetWidth, Number.parseFloat(el.style.minHeight) || el.offsetHeight);
+        this.callbacks.onResizeCard?.(drag.id, el.offsetWidth,
+          Number.parseFloat(el.style.minHeight) || el.offsetHeight);
       } else if (drag.type === "attached-stamp" && wasClick) {
         this.#selectLabel(drag.id);
       } else if (drag.type === "label") {
@@ -4015,18 +3860,20 @@ export default class JournalCanvas {
         if (this.readOnly) return this.#warnReadOnly();
         const cardEl = ev.target.closest(".jn-card");
         const id = cardEl.dataset.id;
+        if (this.#isLocked(id)) return this.#warnLocked();
         cardEl.style.width = "";
         cardEl.style.minHeight = "";
         cardEl.classList.remove("jn-sized");
         this.cardSizes.delete(id);
-        this.callbacks.onResetCardSize(id);
+        this.callbacks.onAutoSize?.([id]);
         return;
       }
-      const text = layers.find(element => element.closest?.("[data-card-text]"))
-        ?.closest("[data-card-text]") ?? ev.target.closest("[data-card-text]");
-      if (text && !this.readOnly) {
+      const cardEl = ev.target.closest(".jn-card");
+      if (cardEl) {
+        if (this.readOnly) return this.#warnReadOnly();
+        if (this.#isLocked(cardEl.dataset.id)) return this.#warnLocked();
         ev.preventDefault();
-        this.#editCardText(text.closest(".jn-card").dataset.id, text);
+        this.#requestEdit(cardEl.dataset.id, { clientX: ev.clientX, clientY: ev.clientY });
         return;
       }
       this.#openBoardMenu(ev, layers);
